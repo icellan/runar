@@ -85,7 +85,7 @@ test "BabyBear_FieldAdd_WrongResult_Rejected" {
     defer allocator.free(deploy_txid);
 
     // Call checkAdd(3, 7, 11) — wrong expected, should be rejected on-chain
-    const broadcasts_before = rpc_provider.broadcast_attempts;
+    const probe = rpc_provider.rejectionProbe();
     const result = contract.call(
         "checkAdd",
         &[_]runar.StateValue{
@@ -107,7 +107,7 @@ test "BabyBear_FieldAdd_WrongResult_Rejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+        try rpc_provider.expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED);
         std.log.info("BabyBear correctly rejected wrong result", .{});
     }
 }

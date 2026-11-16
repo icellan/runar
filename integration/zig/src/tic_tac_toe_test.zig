@@ -258,7 +258,7 @@ test "TicTacToe_WrongPlayerRejected" {
 
     // After join, turn=1 (X's turn). Player O tries to move -- assertCorrectPlayer
     // checks player == playerX when turn==1, so this should be rejected.
-    const broadcasts_before = rpc_provider.broadcast_attempts;
+    const probe = rpc_provider.rejectionProbe();
     const move_result = contract.call(
         "move",
         &[_]runar.StateValue{
@@ -280,7 +280,7 @@ test "TicTacToe_WrongPlayerRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+        try rpc_provider.expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED);
         // Expected: move was rejected because wrong player tried to move
         std.log.warn("TicTacToe correctly rejected wrong player move", .{});
     }
@@ -349,7 +349,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
     allocator.free(join_txid);
 
     // Try to join again with intruder -- status is now 1, assert(status==0) fails
-    const broadcasts_before = rpc_provider.broadcast_attempts;
+    const probe = rpc_provider.rejectionProbe();
     const second_join_result = contract.call(
         "join",
         &[_]runar.StateValue{
@@ -370,7 +370,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+        try rpc_provider.expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED);
         // Expected: second join was rejected because status != 0
         std.log.warn("TicTacToe correctly rejected second join attempt", .{});
     }

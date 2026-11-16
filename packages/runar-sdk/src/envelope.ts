@@ -141,6 +141,52 @@ function payloadExceedsMaxDepth(payload: string): boolean {
 }
 
 /**
+ * R2-DUPKEY: does any object in the payload carry the same key twice?
+ *
+ * JSON.parse keeps the LAST of two equal keys, so a payload
+ * `{"nonce":1,"nonce":<outer>}` verified ok here while a keep-first tier said
+ * envelope-mismatch -- and the signer and the verifier can disagree about what
+ * a signed field says. Decided on the TEXT because the parsed object no longer
+ * shows the duplicate. Runs only on text JSON.parse has already ACCEPTED, under
+ * the depth guard, so it can read the grammar directly. Keys are compared after
+ * unescaping (each key's quoted text goes back through JSON.parse), so "a",
+ * "a" and a surrogate-pair spelling of one code point all collide. One key
+ * set per open object: the same key in sibling or nested objects is fine.
+ * Flat scan, no recursion.
+ */
+function payloadHasDuplicateKey(payload: string): boolean {
+  // null = array frame; otherwise the open object's keys and whether the next
+  // string token is a key.
+  const frames: Array<{ keys: Set<string>; expectKey: boolean } | null> = [];
+  const n = payload.length;
+  for (let i = 0; i < n; i++) {
+    const c = payload[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n && payload[j] !== '"') j += payload[j] === '\\' ? 2 : 1;
+      const top = frames[frames.length - 1];
+      if (top && top.expectKey) {
+        const key = JSON.parse(payload.slice(i, j + 1)) as string;
+        if (top.keys.has(key)) return true;
+        top.keys.add(key);
+        top.expectKey = false;
+      }
+      i = j;
+    } else if (c === '{') {
+      frames.push({ keys: new Set(), expectKey: true });
+    } else if (c === '[') {
+      frames.push(null);
+    } else if (c === '}' || c === ']') {
+      frames.pop();
+    } else if (c === ',') {
+      const top = frames[frames.length - 1];
+      if (top) top.expectKey = true;
+    }
+  }
+  return false;
+}
+
+/**
  * GK-BUG-009: the payload's own `nonce` / `expiresAt` must be a JSON INTEGER
  * TOKEN -- optional '-', then 0 or a non-zero digit followed by digits; no
  * '.', no exponent, inside the signed 64-bit range -- or the envelope is
@@ -162,8 +208,8 @@ function isI64IntegerToken(tok: string | undefined): boolean {
 /**
  * Raw value text of each TOP-LEVEL member of a payload that JSON.parse has
  * already accepted as an object. Keys are decoded with JSON.parse, so an
- * escaped spelling (`"n\u006fnce"`) is the same key; a duplicate key keeps
- * its LAST value, which is the one JSON.parse keeps. Flat scan, no recursion.
+ * escaped spelling (`"n\u006fnce"`) is the same key. A payload with a
+ * duplicate key never gets here (R2-DUPKEY: bad-json). Flat scan, no recursion.
  */
 function topLevelMemberTokens(payload: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -343,6 +389,11 @@ export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
     }
     parsed = raw as Record<string, unknown>;
   } catch {
+    return { ok: false, reason: 'bad-json' };
+  }
+  // R2-DUPKEY: a duplicate key is bad-json, decided here with every other
+  // parse failure (after expired, before envelope-mismatch).
+  if (payloadHasDuplicateKey(env.payload)) {
     return { ok: false, reason: 'bad-json' };
   }
 

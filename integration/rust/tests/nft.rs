@@ -246,6 +246,7 @@ fn test_nft_wrong_owner_rejected() {
     let mut new_state = HashMap::new();
     new_state.insert("owner".to_string(), SdkValue::Bytes(new_owner.pub_key_hex.clone()));
 
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "transfer",
         &[SdkValue::Auto, SdkValue::Bytes(new_owner.pub_key_hex), SdkValue::Int(5000)],
@@ -256,5 +257,5 @@ fn test_nft_wrong_owner_rejected() {
             ..Default::default()
         }),
     );
-    assert!(result.is_err(), "transfer with wrong owner should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

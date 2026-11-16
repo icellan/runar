@@ -127,6 +127,24 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
     end
   end
 
+  # R2-DUPKEY. A payload object with two members of the same key (compared
+  # after unescaping, at any depth) is bad-json, decided in the parse step:
+  # after expired, before envelope-mismatch / bad-sig. JSON.parse keeps the
+  # LAST value, so the dk* vectors verified ok here before the fix; the dkc*
+  # controls (same key in DIFFERENT objects) must stay ok.
+  it 'gives every duplicate-key vector its listed verdict' do
+    vectors = fixture['duplicate_key_vectors']
+    expect(vectors).not_to be_empty
+    failures = vectors.filter_map do |v|
+      env = Runar::SDK::Envelope::SignedEnvelope.from_h(v['envelope'])
+      r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
+      want = v['expect_ok'] ? 'ok' : v['reason']
+      got = r[:ok] ? 'ok' : r[:reason]
+      "#{v['_vector_id']}: got #{got}, want #{want}" unless got == want
+    end
+    expect(failures).to eq([])
+  end
+
   # F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
   # signature, and the TS reference accepts it: BIP-62's low-S rule is
   # transaction-script policy, not part of the envelope protocol. THIS tier

@@ -82,6 +82,7 @@ type fixture struct {
 	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
 	MalleabilityVectors  []fixtureMalleability    `json:"malleability_vectors"`
+	DuplicateKeyVectors  []fixtureMalleability    `json:"duplicate_key_vectors"`
 	SizeLimits           struct {
 		MaxPayloadBytes int `json:"max_payload_bytes"`
 		MaxFieldBytes   int `json:"max_field_bytes"`
@@ -397,6 +398,32 @@ func TestEnvelopeInterop_DepthVectors(t *testing.T) {
 		}
 		if string(r.Reason) != dv.Reason {
 			t.Errorf("%s: got reason=%s want=%s", dv.VectorID, r.Reason, dv.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_DuplicateKeyVectors — R2-DUPKEY. A payload object with
+// two members of the same key (compared after unescaping, at any depth) is
+// bad-json, decided in the parse step: after expired, before
+// envelope-mismatch / bad-sig. encoding/json keeps the LAST value, so the dk*
+// vectors verified ok here before the fix; the dkc* controls (same key in
+// DIFFERENT objects) must stay ok.
+func TestEnvelopeInterop_DuplicateKeyVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.DuplicateKeyVectors) == 0 {
+		t.Fatal("duplicate_key_vectors missing or empty")
+	}
+	for _, v := range f.DuplicateKeyVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: v.Envelope, NowMs: Int64Ptr(f.VerifyNowMs)})
+		want, got := v.Reason, string(r.Reason)
+		if v.ExpectOK {
+			want = "ok"
+		}
+		if r.OK {
+			got = "ok"
+		}
+		if got != want {
+			t.Errorf("%s: got %s, want %s", v.VectorID, got, want)
 		}
 	}
 }

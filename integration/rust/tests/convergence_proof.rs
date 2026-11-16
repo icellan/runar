@@ -120,6 +120,7 @@ fn test_convergence_proof_spend_invalid_rejected() {
         .expect("deploy failed");
 
     // Wrong deltaO — should be rejected
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "proveConvergence",
         &[SdkValue::Int(42)],
@@ -127,5 +128,5 @@ fn test_convergence_proof_spend_invalid_rejected() {
         &*signer,
         None,
     );
-    assert!(result.is_err(), "expected call with wrong delta to be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

@@ -218,7 +218,7 @@ test "P2PKH_WrongSignerRejected" {
     var signer_b = try wallet_b.localSigner();
 
     // Try to unlock with wallet_b's signer -- should be rejected
-    const broadcasts_before = rpc_provider.broadcast_attempts;
+    const probe = rpc_provider.rejectionProbe();
     const result = contract.call(
         "unlock",
         &[_]runar.StateValue{
@@ -239,7 +239,7 @@ test "P2PKH_WrongSignerRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+        try rpc_provider.expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED);
         std.log.warn("P2PKH correctly rejected unlock with wrong signer", .{});
     }
 }

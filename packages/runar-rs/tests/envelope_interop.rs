@@ -278,6 +278,42 @@ fn payload_depth_vectors() {
     }
 }
 
+/// R2-DUPKEY. A payload object with two members of the same key (compared
+/// after unescaping, at any depth) is bad-json, decided in the parse step:
+/// after expired, before envelope-mismatch / bad-sig. serde_json's `Value`
+/// keeps the LAST value, so the dk* vectors verified ok here before the fix;
+/// the dkc* controls (same key in DIFFERENT objects) must stay ok.
+#[test]
+fn duplicate_key_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["duplicate_key_vectors"]
+        .as_array()
+        .expect("duplicate_key_vectors missing");
+    assert!(!vectors.is_empty(), "duplicate_key_vectors empty");
+    let mut failures = Vec::new();
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap();
+        let env = envelope_from_value(&v["envelope"]);
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        let want = if v["expect_ok"].as_bool().unwrap() {
+            "ok"
+        } else {
+            v["reason"].as_str().unwrap()
+        };
+        let got = if r.ok { "ok" } else { r.reason.as_ref().unwrap().as_str() };
+        if got != want {
+            failures.push(format!("{id}: got {got}, want {want}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
 /// signature, and the TS reference accepts it: BIP-62's low-S rule is
 /// transaction-script policy, not part of the envelope protocol. Ruby used to

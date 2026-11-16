@@ -195,6 +195,7 @@ fn test_escrow_release_wrong_signer_rejected() {
 
     // Call release with walletB — checkSig should fail
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "release",
         &[SdkValue::Auto, SdkValue::Auto],
@@ -202,7 +203,7 @@ fn test_escrow_release_wrong_signer_rejected() {
         &*signer_b,
         None,
     );
-    assert!(result.is_err(), "release with wrong signer should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 #[test]
@@ -233,6 +234,7 @@ fn test_escrow_refund_wrong_signer_rejected() {
 
     // Call refund with walletB — checkSig should fail
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "refund",
         &[SdkValue::Auto, SdkValue::Auto],
@@ -240,5 +242,5 @@ fn test_escrow_refund_wrong_signer_rejected() {
         &*signer_b,
         None,
     );
-    assert!(result.is_err(), "refund with wrong signer should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

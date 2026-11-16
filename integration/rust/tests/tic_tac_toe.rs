@@ -274,12 +274,13 @@ fn test_tic_tac_toe_wrong_player_rejected() {
     ).expect("join failed");
 
     // Player O tries to move on player X's turn — should fail
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "move",
         &[SdkValue::Int(4), SdkValue::Bytes(po.clone()), SdkValue::Auto],
         &mut provider, &*signer_o, None,
     );
-    assert!(result.is_err(), "move by wrong player should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -314,10 +315,11 @@ fn test_tic_tac_toe_join_after_playing_rejected() {
     // Try joining again — status is now 1 (playing), assert(status==0) should fail
     let intruder = create_wallet();
     let (intruder_signer, _) = create_funded_wallet(&mut provider);
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "join",
         &[SdkValue::Bytes(intruder.pub_key_hex.clone()), SdkValue::Auto],
         &mut provider, &*intruder_signer, Some(&paying(10000 + 5000 + 5000)),
     );
-    assert!(result.is_err(), "join after game started should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

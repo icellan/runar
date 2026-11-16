@@ -215,6 +215,7 @@ fn test_oracle_price_feed_below_threshold_rejected() {
     use num_traits::ToPrimitive;
     let padding_i64: i64 = rabin_result.padding.to_i64().expect("padding too large for i64");
 
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "settle",
         &[
@@ -227,7 +228,7 @@ fn test_oracle_price_feed_below_threshold_rejected() {
         &*receiver_signer,
         None,
     );
-    assert!(result.is_err(), "settle with price below threshold should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 #[test]
@@ -267,6 +268,7 @@ fn test_oracle_price_feed_wrong_receiver_rejected() {
 
     // Call settle with a different signer — should be rejected
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "settle",
         &[
@@ -279,5 +281,5 @@ fn test_oracle_price_feed_wrong_receiver_rejected() {
         &*signer_b,
         None,
     );
-    assert!(result.is_err(), "settle with wrong receiver should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

@@ -600,7 +600,12 @@ pub fn verifyEnvelope(allocator: std.mem.Allocator, opts: VerifyEnvelopeOpts) !V
     if (payloadExceedsMaxDepth(env.payload)) {
         return .{ .ok = false, .reason = .bad_json };
     }
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, env.payload, .{}) catch {
+    // R2-DUPKEY: a duplicate key in any payload object (compared after
+    // unescaping) is bad-json. std.json's default already refuses it with
+    // error.DuplicateField; spelled out so a future default cannot move it.
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, env.payload, .{
+        .duplicate_field_behavior = .@"error",
+    }) catch {
         return .{ .ok = false, .reason = .bad_json };
     };
     errdefer parsed.deinit();

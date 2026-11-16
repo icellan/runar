@@ -104,19 +104,17 @@ describe('GK-BUG-009: inner nonce/expiresAt must be a JSON integer token', () =>
     expect(r.reason).toBe('envelope-mismatch');
   });
 
-  it('reads the LAST duplicate member, as JSON.parse does', () => {
-    const lastBad = verifyEnvelope({
-      envelope: signed(`{"expiresAt":${EXP},"nonce":7,"nonce":7.0}`, 7, EXP),
-      nowMs: NOW,
-    });
-    expect(lastBad.ok).toBe(false);
-    expect(lastBad.reason).toBe('envelope-mismatch');
-
-    const lastGood = verifyEnvelope({
-      envelope: signed(`{"expiresAt":${EXP},"nonce":7.0,"nonce":7}`, 7, EXP),
-      nowMs: NOW,
-    });
-    expect(lastGood.ok, `reason=${lastGood.reason}`).toBe(true);
+  // R2-DUPKEY superseded the keep-last rule this used to pin: a duplicate
+  // member is bad-json in every tier, whichever spelling comes last.
+  it('a duplicate nonce member is bad-json, whichever spelling comes last (R2-DUPKEY)', () => {
+    for (const payload of [
+      `{"expiresAt":${EXP},"nonce":7,"nonce":7.0}`,
+      `{"expiresAt":${EXP},"nonce":7.0,"nonce":7}`,
+    ]) {
+      const r = verifyEnvelope({ envelope: signed(payload, 7, EXP), nowMs: NOW });
+      expect(r.ok, payload).toBe(false);
+      expect(r.reason, payload).toBe('bad-json');
+    }
   });
 
   it('ignores nested members and string contents named nonce', () => {

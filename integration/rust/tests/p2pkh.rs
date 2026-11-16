@@ -128,6 +128,7 @@ fn test_p2pkh_wrong_signer_rejected() {
 
     // Call unlock with a different signer — should be rejected
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "unlock",
         &[SdkValue::Auto, SdkValue::Auto],
@@ -135,5 +136,5 @@ fn test_p2pkh_wrong_signer_rejected() {
         &*signer_b,
         None,
     );
-    assert!(result.is_err(), "unlock with wrong signer should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

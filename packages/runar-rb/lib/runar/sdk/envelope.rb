@@ -91,6 +91,53 @@ module Runar
         false
       end
 
+      # R2-DUPKEY. Does any object in +payload+ carry the same key twice?
+      #
+      # JSON.parse keeps the LAST of two equal keys, so a payload
+      # {"nonce":1,"nonce":<outer>} verified ok here while a keep-first tier
+      # said envelope-mismatch. Runs only on text JSON.parse has ACCEPTED (and
+      # the depth guard has bounded), so it can read the grammar directly. Keys
+      # are compared after unescaping -- each key's quoted text goes back
+      # through JSON.parse -- so "a" and "\u0061" collide. One key set per open
+      # object: the same key in sibling or nested objects is not a duplicate.
+      # Flat scan over bytes; every delimiter is ASCII, and no UTF-8
+      # continuation byte can equal one.
+      def self.payload_has_duplicate_key?(payload)
+        frames = [] # nil = array, Hash = { keys: {}, expect_key: bool }
+        i = 0
+        n = payload.bytesize
+        while i < n
+          b = payload.getbyte(i)
+          case b
+          when 0x22 # quote: scan to the closing quote
+            j = i + 1
+            while j < n
+              c = payload.getbyte(j)
+              break if c == 0x22
+              j += c == 0x5c ? 2 : 1
+            end
+            top = frames.last
+            if top && top[:expect_key]
+              key = JSON.parse(payload.byteslice(i, j - i + 1).force_encoding(Encoding::UTF_8))
+              return true if top[:keys].key?(key)
+              top[:keys][key] = true
+              top[:expect_key] = false
+            end
+            i = j
+          when 0x7b # {
+            frames.push({ keys: {}, expect_key: true })
+          when 0x5b # [
+            frames.push(nil)
+          when 0x7d, 0x5d # } ]
+            frames.pop
+          when 0x2c # ,
+            frames.last[:expect_key] = true if frames.last
+          end
+          i += 1
+        end
+        false
+      end
+
       # ---------------------------------------------------------------------
       # CanonicalJSON
       # ---------------------------------------------------------------------
@@ -404,6 +451,9 @@ module Runar
           return { ok: false, reason: 'bad-json', data: nil }
         end
         return { ok: false, reason: 'bad-json', data: nil } unless parsed.is_a?(Hash)
+        # R2-DUPKEY: a duplicate key is bad-json, decided here with every other
+        # parse failure (after expired, before envelope-mismatch).
+        return { ok: false, reason: 'bad-json', data: nil } if payload_has_duplicate_key?(envelope.payload)
 
         # 4. Inner nonce / expiresAt must match outer fields. GK-BUG-009: and
         #    each must be a JSON integer token in i64 range. JSON.parse gives

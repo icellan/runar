@@ -151,6 +151,27 @@ def test_payload_depth_vectors(fixture: dict) -> None:
             )
 
 
+def test_duplicate_key_vectors(fixture: dict) -> None:
+    """R2-DUPKEY. A payload object with two members of the same key (compared
+    after unescaping, at any depth) is bad-json, decided in the parse step:
+    after expired, before envelope-mismatch / bad-sig. json.loads keeps the
+    LAST value, so before the fix dk1..dk10 verified ok (dk8 mismatch, dk11
+    bad-sig). The dkc* controls (same key in DIFFERENT objects) stay ok.
+    """
+    vectors = fixture["duplicate_key_vectors"]
+    assert vectors, "duplicate_key_vectors missing or empty"
+    failures = []
+    for v in vectors:
+        vid = v["_vector_id"]
+        env = SignedEnvelope.from_dict(v["envelope"])
+        r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
+        want = "ok" if v["expect_ok"] else v["reason"]
+        got = "ok" if r.ok else r.reason.value
+        if got != want:
+            failures.append(f"{vid}: got {got}, want {want}")
+    assert not failures, "\n".join(failures)
+
+
 def test_malleability_vectors(fixture: dict) -> None:
     """F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
     signature, and the TS reference accepts it: BIP-62's low-S rule is

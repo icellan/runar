@@ -207,8 +207,9 @@ fn test_state_covenant_wrong_pre_state_root_rejected() {
     let wrong_root = format!("ff{}", &hex_zeros32()[2..]);
     args[3] = SdkValue::Bytes(wrong_root);
 
+    let probe = provider.rejection_probe();
     let result = contract.call("advanceState", &args, &mut provider, &*signer, None);
-    assert!(result.is_err(), "expected rejection for wrong pre-state root");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 #[test]
@@ -230,11 +231,9 @@ fn test_state_covenant_invalid_block_number_rejected() {
     let mut args2 = build_call_args(&tree, &pre, 0);
     args2[1] = SdkValue::Int(0); // force block number 0
 
+    let probe = provider.rejection_probe();
     let result = contract.call("advanceState", &args2, &mut provider, &*signer, None);
-    assert!(
-        result.is_err(),
-        "expected rejection for non-increasing block number"
-    );
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 #[test]
@@ -248,11 +247,9 @@ fn test_state_covenant_invalid_babybear_proof_rejected() {
     let mut args = build_call_args(&tree, &hex_zeros32(), 1);
     args[6] = SdkValue::Int(99999); // wrong proofFieldC
 
+    let probe = provider.rejection_probe();
     let result = contract.call("advanceState", &args, &mut provider, &*signer, None);
-    assert!(
-        result.is_err(),
-        "expected rejection for invalid Baby Bear proof"
-    );
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 #[test]
@@ -268,9 +265,7 @@ fn test_state_covenant_invalid_merkle_proof_rejected() {
     let wrong_leaf = format!("aa{}", &hex_zeros32()[2..]);
     args[7] = SdkValue::Bytes(wrong_leaf);
 
+    let probe = provider.rejection_probe();
     let result = contract.call("advanceState", &args, &mut provider, &*signer, None);
-    assert!(
-        result.is_err(),
-        "expected rejection for invalid Merkle proof"
-    );
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

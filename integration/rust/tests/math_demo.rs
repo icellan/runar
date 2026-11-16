@@ -284,6 +284,13 @@ fn test_math_divide_by_zero() {
         })
         .expect("deploy failed");
 
+    // This spend never reaches the node: the SDK's ANF interpreter aborts on
+    // a zero divisor exactly as OP_DIV does on chain, and the SDK refuses to
+    // build a transaction whose method body it cannot evaluate (NEW-006) --
+    // as in the Zig suite. Assert THAT refusal and that nothing was
+    // broadcast; a bare is_err() also passed on an accepted tx whose
+    // confirming mine failed (GK-BUG-004).
+    let before = provider.broadcast_attempts;
     let result = contract.call(
         "divideBy",
         &[SdkValue::Int(0)],
@@ -291,7 +298,15 @@ fn test_math_divide_by_zero() {
         &*signer,
         wrong_state(0).as_ref(),
     );
-    assert!(result.is_err(), "expected divide by zero to fail");
+    let err = match result {
+        Ok(_) => panic!("divide by zero was ACCEPTED"),
+        Err(e) => e,
+    };
+    assert_eq!(provider.broadcast_attempts, before, "divideBy(0) reached the node: {err}");
+    assert!(
+        err.contains("the ANF interpreter could not evaluate the method body"),
+        "expected the SDK's fail-closed interpreter refusal, got: {err}"
+    );
 }
 
 #[test]
@@ -313,6 +328,7 @@ fn test_math_wrong_state() {
         .expect("deploy failed");
 
     // Claim value=999 instead of 100
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "divideBy",
         &[SdkValue::Int(10)],
@@ -320,7 +336,7 @@ fn test_math_wrong_state() {
         &*signer,
         wrong_state(999).as_ref(),
     );
-    assert!(result.is_err(), "expected wrong state to fail");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 #[test]

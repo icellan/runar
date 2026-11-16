@@ -33,8 +33,10 @@ public final class RpcProvider implements Provider {
      * ambiguous: the SDK throws the same {@code RuntimeException} for a
      * build-time refusal, a UTXO-fetch failure and a consensus rejection, so a
      * negative test can pass green while the transaction under attack was never
-     * constructed. Asserting {@code broadcastAttempts() >= 1} pins the
-     * rejection to the node.
+     * constructed. The count alone does not pin the rejection to the node
+     * either: an ACCEPTED tx whose confirming mine fails also throws (GK-BUG-004)
+     * after an attempt. {@link NodeRejection#assertNodeRejected} reads
+     * {@link #broadcastLog()} for that.
      */
     private int broadcastAttempts;
 
@@ -51,6 +53,32 @@ public final class RpcProvider implements Provider {
 
     /** How many transactions the SDK has handed to the node through this provider. */
     public int broadcastAttempts() { return broadcastAttempts; }
+
+    /** What one {@link #broadcastRaw} came to. */
+    public enum BroadcastKind {
+        /** sendrawtransaction returned a txid and the confirming mine (if any) succeeded. */
+        ACCEPTED,
+        /**
+         * sendrawtransaction ACCEPTED the tx, then the auto-mine failed
+         * (GK-BUG-004). broadcastRaw throws, but the node took the spend: this
+         * is not a rejection.
+         */
+        ACCEPTED_MINE_FAILED,
+        /** The node refused the tx at sendrawtransaction; {@code detail} is its message. */
+        NODE_REJECTED,
+        /** Anything else (transport, malformed reply): the node never ruled on it. */
+        OTHER,
+    }
+
+    /** One entry per {@link #broadcastRaw} call, in order. */
+    public record BroadcastOutcome(BroadcastKind kind, String detail) {}
+
+    private final List<BroadcastOutcome> broadcastLog = new ArrayList<>();
+
+    /** Every broadcast's outcome so far; index i is attempt i+1. */
+    public List<BroadcastOutcome> broadcastLog() { return List.copyOf(broadcastLog); }
+
+    private static final String NODE_REFUSAL_PREFIX = "RPC sendrawtransaction: ";
 
     @Override
     public List<UTXO> listUtxos(String address) {
@@ -84,7 +112,18 @@ public final class RpcProvider implements Provider {
         broadcastAttempts++;
         int sizeBytes = txHex == null ? 0 : txHex.length() / 2;
         System.out.println("[runar-integration] tx broadcast: " + sizeBytes + " bytes");
-        String result = rpc.call("sendrawtransaction", txHex);
+        String result;
+        try {
+            result = rpc.call("sendrawtransaction", txHex);
+        } catch (RuntimeException e) {
+            // RpcClient reports a node-side refusal as "RPC <method>: <message>";
+            // a transport failure as "<method>: <io message>".
+            String msg = String.valueOf(e.getMessage());
+            broadcastLog.add(msg.startsWith(NODE_REFUSAL_PREFIX)
+                ? new BroadcastOutcome(BroadcastKind.NODE_REJECTED, msg.substring(NODE_REFUSAL_PREFIX.length()))
+                : new BroadcastOutcome(BroadcastKind.OTHER, msg));
+            throw e;
+        }
         // sendrawtransaction returns a bare JSON string (the txid).
         String txid = result.trim();
         if (txid.startsWith("\"") && txid.endsWith("\"")) {
@@ -97,10 +136,12 @@ public final class RpcProvider implements Provider {
                 // GK-BUG-004: the tx is in the mempool but the confirming block
                 // never came; returning the txid would report a confirmation
                 // that did not happen. Same message as the Java SDK RPCProvider.
-                throw new RpcClient.RpcException(
-                    "broadcast succeeded (txid " + txid + ") but auto-mine failed: " + e.getMessage(), e);
+                String msg = "broadcast succeeded (txid " + txid + ") but auto-mine failed: " + e.getMessage();
+                broadcastLog.add(new BroadcastOutcome(BroadcastKind.ACCEPTED_MINE_FAILED, msg));
+                throw new RpcClient.RpcException(msg, e);
             }
         }
+        broadcastLog.add(new BroadcastOutcome(BroadcastKind.ACCEPTED, txid));
         return txid;
     }
 

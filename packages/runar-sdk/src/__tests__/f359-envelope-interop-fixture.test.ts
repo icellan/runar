@@ -64,6 +64,12 @@ const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
   verify_now_ms: number;
   valid_envelope: SignedEnvelope;
   rejection_vectors: Array<{ _vector_id?: string; reason: VerifyEnvelopeReason; envelope: SignedEnvelope }>;
+  duplicate_key_vectors: Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: VerifyEnvelopeReason;
+    envelope: SignedEnvelope;
+  }>;
   allowlist_vectors: Array<{
     _vector_id: string;
     expected_keys: string[] | null;
@@ -102,6 +108,23 @@ describe('envelope interop fixture replay under the frozen clock (F-359)', () =>
       expect(r.ok, `expected rejection ${v.reason} (${id})`).toBe(false);
       expect(r.reason, `rejection ${v.reason} (${id})`).toBe(v.reason);
     }
+  });
+
+  // R2-DUPKEY: a payload object with two members of the same key (compared
+  // after unescaping, at any depth) is bad-json, decided in the parse step:
+  // after expired, before envelope-mismatch / bad-sig. JSON.parse keeps the
+  // LAST value, so the dk* vectors verified ok before the fix; the dkc*
+  // controls (same key in DIFFERENT objects) must stay ok.
+  it('gives every duplicate_key_vectors entry its listed verdict (R2-DUPKEY)', () => {
+    expect(fixture.duplicate_key_vectors.length).toBeGreaterThan(0);
+    const failures: string[] = [];
+    for (const v of fixture.duplicate_key_vectors) {
+      const r = verifyEnvelope({ envelope: v.envelope, nowMs: fixture.verify_now_ms });
+      const want = v.expect_ok ? 'ok' : v.reason;
+      const got = r.ok ? 'ok' : r.reason;
+      if (got !== want) failures.push(`${v._vector_id}: got ${got}, want ${want}`);
+    }
+    expect(failures).toEqual([]);
   });
 
   // GK-BUG-008: a supplied allowlist is used as given, so an EMPTY list

@@ -411,6 +411,47 @@ test "interop: shared payload depth bound" {
     }
 }
 
+// R2-DUPKEY. A payload object with two members of the same key (compared
+// after unescaping, at any depth) is bad-json, decided in the parse step:
+// after expired, before envelope-mismatch / bad-sig. std.json's Value parser
+// already refuses a duplicate field by default (ParseOptions
+// .duplicate_field_behavior = .@"error"), so this tier pins that behaviour
+// rather than changing it; the dkc* controls (same key in DIFFERENT objects)
+// must stay ok.
+test "interop: duplicate-key vectors" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const vs = parsed.value.object.get("duplicate_key_vectors").?.array;
+    try std.testing.expect(vs.items.len > 0);
+    var failures: usize = 0;
+    for (vs.items) |v| {
+        const obj = v.object;
+        const vid = obj.get("_vector_id").?.string;
+        const e = obj.get("envelope").?.object;
+        const env = envelope.SignedEnvelope{
+            .payload = e.get("payload").?.string,
+            .sig = e.get("sig").?.string,
+            .pubkey = e.get("pubkey").?.string,
+            .nonce = e.get("nonce").?.integer,
+            .expiresAt = e.get("expiresAt").?.integer,
+        };
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        const want: []const u8 = if (obj.get("expect_ok").?.bool) "ok" else obj.get("reason").?.string;
+        const got: []const u8 = if (r.ok) "ok" else r.reason.?.wire();
+        if (!std.mem.eql(u8, want, got)) {
+            std.debug.print("{s}: got {s}, want {s}\n", .{ vid, got, want });
+            failures += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
 // F-296. The DoS size bound is hard-coded per tier; the fixture's
 // `size_limits` is the shared source of truth and every tier pins its own
 // constants to it. Then `size_vectors` is replayed: one byte over each limit

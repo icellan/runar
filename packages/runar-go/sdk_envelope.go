@@ -717,6 +717,18 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	if err := dec.Decode(&parsed); err != nil || parsed == nil {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
 	}
+	// The payload must be exactly ONE JSON value. Decode reads the first and
+	// leaves the rest unread, so "{...}{}" or "{...} 1" verified ok in this
+	// tier alone (fixture vectors tj1..tj3); every other tier's parser
+	// refuses text after the value.
+	if _, err := dec.Token(); err != io.EOF {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
+	// R2-DUPKEY: a duplicate key is bad-json, decided here with every other
+	// parse failure (after expired, before envelope-mismatch).
+	if payloadHasDuplicateKey(env.Payload) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
 
 	// 4. Inner-payload nonce/expiresAt must match outer fields.
 	innerNonce, innerExpiresAt, ok := readNonceExpiresAt(parsed)
@@ -765,6 +777,64 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	}
 
 	return VerifyEnvelopeResult{OK: true, Data: parsed}
+}
+
+// payloadHasDuplicateKey reports whether any object in payload carries the
+// same key twice. R2-DUPKEY: encoding/json keeps the LAST of two equal keys,
+// so a payload {"nonce":1,"nonce":<outer>} verified ok here while a
+// keep-first tier said envelope-mismatch. It walks the decoder's token
+// stream, which hands object keys over already unescaped ("a" and "\u0061"
+// are one key, as is a surrogate-pair escape and the raw code point). One key
+// set per open object: the same key in sibling or nested objects is fine.
+// Runs only on a payload Decode has already accepted, under the depth guard,
+// so any token error here is unreachable and is treated as malformed.
+func payloadHasDuplicateKey(payload string) bool {
+	type frame struct {
+		keys      map[string]struct{} // nil for an array
+		expectKey bool
+	}
+	dec := json.NewDecoder(stringReader(payload))
+	dec.UseNumber()
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return false
+		}
+		if err != nil {
+			return true
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		switch v := tok.(type) {
+		case json.Delim:
+			switch v {
+			case '{':
+				stack = append(stack, &frame{keys: map[string]struct{}{}, expectKey: true})
+				continue
+			case '[':
+				stack = append(stack, &frame{})
+				continue
+			default: // '}' or ']' closes a value of the parent
+				stack = stack[:len(stack)-1]
+			}
+		case string:
+			if top != nil && top.keys != nil && top.expectKey {
+				if _, dup := top.keys[v]; dup {
+					return true
+				}
+				top.keys[v] = struct{}{}
+				top.expectKey = false
+				continue
+			}
+		}
+		// A complete value ended: the enclosing object now wants a key.
+		if len(stack) > 0 && stack[len(stack)-1].keys != nil {
+			stack[len(stack)-1].expectKey = true
+		}
+	}
 }
 
 // readNonceExpiresAt extracts nonce + expiresAt from a parsed payload that
