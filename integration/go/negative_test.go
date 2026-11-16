@@ -44,9 +44,13 @@ func expectRejected(t *testing.T, source, fileName string, ctorVals []interface{
 		t.Fatalf("deploy: %v", err)
 	}
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call(methodName, methodArgs, provider, signer, nil)
 	if err == nil {
 		t.Fatal("SECURITY: wrong value was accepted on-chain — expected rejection")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 }
 

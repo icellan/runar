@@ -107,11 +107,15 @@ func TestRollupGroth16WAMSM_AdvanceState_NegativeTamper(t *testing.T) {
 				hexStateRoot(1),
 				int64(1),
 			}
+			before := provider.BroadcastAttempts
 			_, _, err = contract.Call("advanceState", args, provider, signer, &runar.CallOptions{
 				Groth16WAWitness: witness,
 			})
 			if err == nil {
 				t.Fatalf("tampering PublicInputs[%d] should fail the MSM check, got nil error", i)
+			}
+			if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+				t.Fatalf("not a node rejection: %v", bad)
 			}
 			t.Logf("tamper PublicInputs[%d] rejected as expected: %v", i, err)
 		})

@@ -128,9 +128,13 @@ func TestBB_FieldAdd_WrongResult_Rejected(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("verify", []interface{}{big.NewInt(3), big.NewInt(7)}, provider, signer, nil)
 	if err == nil {
 		t.Fatalf("expected call with wrong expected to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }

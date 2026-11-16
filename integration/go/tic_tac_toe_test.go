@@ -264,11 +264,15 @@ func TestTicTacToe_WrongPlayerRejected(t *testing.T) {
 
 	// After join, turn=1 (X's turn). Try to move with O's key — should fail
 	// because assertCorrectPlayer checks player == playerX when turn==1
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("move",
 		[]interface{}{int64(4), playerO.PubKeyHex(), nil},
 		provider, playerOSigner, nil)
 	if err == nil {
 		t.Fatalf("expected move with wrong player to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected wrong player: %v", err)
 }
@@ -302,11 +306,15 @@ func TestTicTacToe_JoinAfterPlayingRejected(t *testing.T) {
 	}
 
 	// Try to join again — should fail because status != 0
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("join",
 		[]interface{}{playerO.PubKeyHex(), nil},
 		provider, playerOSigner, &runar.CallOptions{Satoshis: 15000}) // N-027: paid, so only the status guard can reject it
 	if err == nil {
 		t.Fatalf("expected second join to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected second join: %v", err)
 }

@@ -3,6 +3,7 @@ package helpers
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 
@@ -23,6 +24,73 @@ type RPCProvider struct {
 	// was never broadcast. It is cumulative and never reset, so an absolute
 	// `>= 1` check proves nothing — the deploy already satisfies it.
 	BroadcastAttempts int
+
+	// BroadcastLog records what each attempt came to, one entry per attempt
+	// (so len(BroadcastLog) == BroadcastAttempts). CheckNodeRejected reads it:
+	// since a failed confirming mine is an error (GK-BUG-004), "the call
+	// errored after an attempt" no longer implies the node refused anything.
+	BroadcastLog []BroadcastOutcome
+}
+
+// BroadcastKind classifies one broadcast attempt by which RPC failed, never by
+// the error's text.
+type BroadcastKind int
+
+const (
+	// BroadcastAccepted: sendrawtransaction accepted the tx (and, where the
+	// provider mines, the confirming block came).
+	BroadcastAccepted BroadcastKind = iota
+	// BroadcastAcceptedMineFailed: the node ACCEPTED the tx, then the
+	// confirming mine (or Teranode's ledger bookkeeping) failed.
+	BroadcastAcceptedMineFailed
+	// BroadcastNodeRejected: sendrawtransaction answered with the node's own
+	// JSON-RPC error; Detail is the node's message.
+	BroadcastNodeRejected
+	// BroadcastOther: the node never ruled on the tx (unreachable, bad reply).
+	BroadcastOther
+)
+
+func (k BroadcastKind) String() string {
+	switch k {
+	case BroadcastAccepted:
+		return "accepted"
+	case BroadcastAcceptedMineFailed:
+		return "accepted-then-mine-failed"
+	case BroadcastNodeRejected:
+		return "node-rejected"
+	default:
+		return "other"
+	}
+}
+
+// BroadcastOutcome is one entry of RPCProvider.BroadcastLog.
+type BroadcastOutcome struct {
+	Kind   BroadcastKind
+	Detail string
+}
+
+// sendLogged broadcasts rawTx, counts the attempt and logs whether the node
+// accepted it, refused it (with its message) or never answered. It does not
+// mine.
+func (p *RPCProvider) sendLogged(rawTx string) (string, error) {
+	// Count the ATTEMPT, before the node can reject it — that is exactly what
+	// separates a consensus rejection from an SDK-side assembly failure.
+	p.BroadcastAttempts++
+	txid, err := SendRawTransaction(rawTx)
+	if err != nil {
+		var nodeErr *RPCNodeError
+		switch {
+		case txid != "":
+			// Accepted by the node; only the Teranode ledger record failed.
+			p.BroadcastLog = append(p.BroadcastLog, BroadcastOutcome{BroadcastAcceptedMineFailed, err.Error()})
+		case errors.As(err, &nodeErr) && nodeErr.Method == "sendrawtransaction":
+			p.BroadcastLog = append(p.BroadcastLog, BroadcastOutcome{BroadcastNodeRejected, nodeErr.Message})
+		default:
+			p.BroadcastLog = append(p.BroadcastLog, BroadcastOutcome{BroadcastOther, err.Error()})
+		}
+		return txid, err
+	}
+	return txid, nil
 }
 
 // NewRPCProvider creates a provider that talks to the regtest node via JSON-RPC.
@@ -66,15 +134,20 @@ func (p *RPCProvider) GetTransaction(txid string) (*runar.TransactionData, error
 }
 
 func (p *RPCProvider) Broadcast(tx *transaction.Transaction) (string, error) {
-	rawTx := tx.Hex()
-	// Count the ATTEMPT, before the node can reject it — that is exactly what
-	// separates a consensus rejection from an SDK-side assembly failure.
-	p.BroadcastAttempts++
-	txid, err := SendRawTransaction(rawTx)
+	txid, err := p.sendLogged(tx.Hex())
 	if err != nil {
-		return "", err
+		return txid, err
 	}
-	_ = Mine(1) // auto-mine for regtest
+	// R3-GO-BROADCAST-MINE: this was `_ = Mine(1)`. The tx is in the mempool
+	// but the confirming block never came; returning success would report a
+	// confirmation that did not happen (GK-BUG-004). Same message as the Go
+	// SDK RPCProvider.
+	if err := Mine(1); err != nil {
+		msg := fmt.Errorf("broadcast succeeded (txid %s) but auto-mine failed: %w", txid, err)
+		p.BroadcastLog = append(p.BroadcastLog, BroadcastOutcome{BroadcastAcceptedMineFailed, msg.Error()})
+		return txid, msg
+	}
+	p.BroadcastLog = append(p.BroadcastLog, BroadcastOutcome{BroadcastAccepted, txid})
 	return txid, nil
 }
 
@@ -121,12 +194,11 @@ func NewBatchRPCProvider() *BatchRPCProvider {
 }
 
 func (p *BatchRPCProvider) Broadcast(tx *transaction.Transaction) (string, error) {
-	rawTx := tx.Hex()
-	p.BroadcastAttempts++
-	txid, err := SendRawTransaction(rawTx)
+	txid, err := p.sendLogged(tx.Hex())
 	if err != nil {
-		return "", err
+		return txid, err
 	}
+	p.BroadcastLog = append(p.BroadcastLog, BroadcastOutcome{BroadcastAccepted, txid})
 	p.pendingCount++
 	return txid, nil
 }

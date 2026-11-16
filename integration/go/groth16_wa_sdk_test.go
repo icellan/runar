@@ -223,9 +223,13 @@ func TestGroth16WASDK_RejectsTamperedWitness(t *testing.T) {
 	receiverWallet := helpers.NewWallet()
 	receiverScriptHex := runar.BuildP2PKHScript(receiverWallet.Address)
 
+	before := provider.BroadcastAttempts
 	_, _, err = g.CallWithWitness(provider, nil, badW, "", receiverScriptHex)
 	if err == nil {
 		t.Fatalf("expected regtest node to reject tampered witness; got nil error")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("tampered witness correctly rejected: %v", err)
 }

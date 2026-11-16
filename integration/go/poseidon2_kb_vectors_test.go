@@ -252,11 +252,15 @@ func TestP2KB_MerkleDepth1_WrongRoot_Rejected(t *testing.T) {
 				t.Fatalf("deploy: %v", err)
 			}
 
+			before := provider.BroadcastAttempts
 			_, _, err := contract.Call("verify", spendArgs(), provider, signer, nil)
 			if err == nil {
 				t.Fatalf("SECURITY FAILURE: an expected root differing from the true root "+
 					"ONLY in limb %d was ACCEPTED on-chain — limb %d is not authenticated "+
 					"(root truncation, CL-BUG-099)", limb, limb)
+			}
+			if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+				t.Fatalf("not a node rejection: %v", bad)
 			}
 			t.Logf("limb %d perturbation correctly rejected: %v", limb, err)
 		})
