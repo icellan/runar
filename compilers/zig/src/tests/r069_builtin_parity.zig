@@ -165,53 +165,69 @@ test "R-069: right() lowers to the peer tiers' end-relative split" {
 // Preimage field extractors.
 // ---------------------------------------------------------------------------
 
-/// The preimage is a readonly PROPERTY, not a parameter: a public method's
-/// SigHashPreimage parameter must reach checkPreimage() on every path
-/// (GK-GAP-010), and checkPreimage's OP_PUSH_TX blob would drown the few
-/// extractor bytes these probes pin. The extractor bytes are unchanged; the
-/// prefix gains the property's constructor-slot `00` and the byte-string
-/// probes lose the `7c` that ordered a parameter under `expected`.
+/// The preimage is a method PARAMETER the probe asserts with
+/// `assert(checkPreimage(p))` before the extractor reads it: GK-GAP-010 makes
+/// that check mandatory, and R3-GK010-GAPS refuses a readonly SigHashPreimage
+/// property (a preimage fixed in the locking script can never pass
+/// checkPreimage). The emitted script is therefore EXACTLY
 ///
-/// Numeric extractor probe: `assert(<fn>(this.p) > 0n)`.
+///     00009d                       assert(this.seed === this.seed)
+///     76ab | 78ab                  OP_DUP / OP_OVER the preimage, OP_CODESEPARATOR
+///     CHECK_PREIMAGE_BINDING_HEX   the OP_PUSH_TX check
+///     69                           OP_VERIFY
+///     <suffix>                     the extractor probe
+///
+/// and `<suffix>` is the pre-GK-GAP-010 parameter-form pin with its leading
+/// `00009d` dropped: the extractor bytes are unchanged.
+const CHECK_PREIMAGE_BINDING_HEX = "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
+
+fn expectCheckedProbeHex(source: []const u8, prologue: []const u8, suffix: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const expected = try std.mem.concat(allocator, u8, &.{ "00009d", prologue, CHECK_PREIMAGE_BINDING_HEX, "69", suffix });
+    defer allocator.free(expected);
+    const hex = try compileProbe(allocator, source);
+    defer allocator.free(hex);
+    try std.testing.expectEqualStrings(expected, hex);
+}
+
+/// Numeric extractor probe: `assert(<fn>(p) > 0n)` after the check.
 fn numericExtractorSource(comptime fn_name: []const u8) []const u8 {
-    return "import { SmartContract, assert, " ++ fn_name ++ " } from 'runar-lang';\n" ++
+    return "import { SmartContract, assert, checkPreimage, " ++ fn_name ++ " } from 'runar-lang';\n" ++
         "import type { SigHashPreimage } from 'runar-lang';\n" ++
         "\n" ++
         "class Probe extends SmartContract {\n" ++
         "  readonly seed: bigint;\n" ++
-        "  readonly p: SigHashPreimage;\n" ++
         "\n" ++
-        "  constructor(seed: bigint, p: SigHashPreimage) {\n" ++
-        "    super(seed, p);\n" ++
+        "  constructor(seed: bigint) {\n" ++
+        "    super(seed);\n" ++
         "    this.seed = seed;\n" ++
-        "    this.p = p;\n" ++
         "  }\n" ++
         "\n" ++
-        "  public run() {\n" ++
+        "  public run(p: SigHashPreimage) {\n" ++
         "    assert(this.seed === this.seed);\n" ++
-        "    assert(" ++ fn_name ++ "(this.p) > 0n);\n" ++
+        "    assert(checkPreimage(p));\n" ++
+        "    assert(" ++ fn_name ++ "(p) > 0n);\n" ++
         "  }\n" ++
         "}\n";
 }
 
-/// Byte-string extractor probe: `assert(<fn>(this.p) === expected)`.
+/// Byte-string extractor probe: `assert(<fn>(p) === expected)` after the check.
 fn bytesExtractorSource(comptime fn_name: []const u8) []const u8 {
-    return "import { SmartContract, assert, " ++ fn_name ++ " } from 'runar-lang';\n" ++
+    return "import { SmartContract, assert, checkPreimage, " ++ fn_name ++ " } from 'runar-lang';\n" ++
         "import type { SigHashPreimage } from 'runar-lang';\n" ++
         "\n" ++
         "class Probe extends SmartContract {\n" ++
         "  readonly seed: bigint;\n" ++
-        "  readonly p: SigHashPreimage;\n" ++
         "\n" ++
-        "  constructor(seed: bigint, p: SigHashPreimage) {\n" ++
-        "    super(seed, p);\n" ++
+        "  constructor(seed: bigint) {\n" ++
+        "    super(seed);\n" ++
         "    this.seed = seed;\n" ++
-        "    this.p = p;\n" ++
         "  }\n" ++
         "\n" ++
-        "  public run(expected: ByteString) {\n" ++
+        "  public run(p: SigHashPreimage, expected: ByteString) {\n" ++
         "    assert(this.seed === this.seed);\n" ++
-        "    assert(" ++ fn_name ++ "(this.p) === expected);\n" ++
+        "    assert(checkPreimage(p));\n" ++
+        "    assert(" ++ fn_name ++ "(p) === expected);\n" ++
         "  }\n" ++
         "}\n";
 }
@@ -219,32 +235,32 @@ fn bytesExtractorSource(comptime fn_name: []const u8) []const u8 {
 test "R-069: extractVersion lowers to <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM" {
     // W1: the trailing `01007e81` is the zero-pad, so the unsigned 32-bit
     // nVersion field is not read as a negative script number.
-    try expectProbeHex(numericExtractorSource("extractVersion"), "00009d00547f7501007e8100a0");
+    try expectCheckedProbeHex(numericExtractorSource("extractVersion"), "76ab", "547f7501007e8100a0");
 }
 
 test "R-069: extractInputIndex lowers to the peer tiers' vout slice" {
-    try expectProbeHex(numericExtractorSource("extractInputIndex"), "00009d0001647f77547f758100a0");
+    try expectCheckedProbeHex(numericExtractorSource("extractInputIndex"), "76ab", "01647f77547f758100a0");
 }
 
 test "R-069: extractAmount lowers to the peer tiers' end-relative 8-byte slice" {
-    try expectProbeHex(numericExtractorSource("extractAmount"), "00009d00820134947f77587f758100a0");
+    try expectCheckedProbeHex(numericExtractorSource("extractAmount"), "76ab", "820134947f77587f758100a0");
 }
 
 test "R-069: extractSequence lowers to the peer tiers' end-relative 4-byte slice" {
     // W1: zero-padded before OP_BIN2NUM — nSequence is unsigned.
-    try expectProbeHex(numericExtractorSource("extractSequence"), "00009d0082012c947f77547f7501007e8100a0");
+    try expectCheckedProbeHex(numericExtractorSource("extractSequence"), "76ab", "82012c947f77547f7501007e8100a0");
 }
 
 test "R-069: extractHashSequence lowers to the peer tiers' 36/32 absolute slice" {
-    try expectProbeHex(bytesExtractorSource("extractHashSequence"), "00009d0001247f7701207f757c87");
+    try expectCheckedProbeHex(bytesExtractorSource("extractHashSequence"), "78ab", "7c01247f7701207f757c87");
 }
 
 test "R-069: extractOutputs lowers to the peer tiers' end-relative 32-byte slice" {
-    try expectProbeHex(bytesExtractorSource("extractOutputs"), "00009d00820128947f7701207f757c87");
+    try expectCheckedProbeHex(bytesExtractorSource("extractOutputs"), "78ab", "7c820128947f7701207f757c87");
 }
 
 test "R-069: extractScriptCode lowers to the peer tiers' variable-length slice" {
-    try expectProbeHex(bytesExtractorSource("extractScriptCode"), "00009d0001687f77820134947f757c87");
+    try expectCheckedProbeHex(bytesExtractorSource("extractScriptCode"), "78ab", "7c01687f77820134947f757c87");
 }
 
 // ---------------------------------------------------------------------------
@@ -512,7 +528,11 @@ fn expectExtractorValue(source: []const u8, core_hex: []const u8, expected_hex: 
 
     const emitted = try compileProbe(allocator, source);
     defer allocator.free(emitted);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, core_hex) != null);
+    // Search only AFTER the checkPreimage blob + OP_VERIFY: the blob itself
+    // contains `01007e81`, which would satisfy a whole-script search.
+    const blob_at = std.mem.indexOf(u8, emitted, CHECK_PREIMAGE_BINDING_HEX) orelse return error.NoCheckPreimageBlob;
+    const tail = emitted[blob_at + CHECK_PREIMAGE_BINDING_HEX.len + 2 ..];
+    try std.testing.expect(std.mem.indexOf(u8, tail, core_hex) != null);
 
     const got = try runExtractorCore(allocator, core_hex);
     defer allocator.free(got);

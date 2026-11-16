@@ -253,9 +253,37 @@ var validPropTypes = map[string]bool{
 	"P384Point":       true,
 }
 
+// ReadonlyPreimagePropertyMessage is the diagnostic every tier shares
+// (R3-GK010-GAPS).
+func ReadonlyPreimagePropertyMessage(name string) string {
+	return fmt.Sprintf("readonly property '%s' cannot hold a SigHashPreimage: a preimage fixed in the locking script "+
+		"can never pass checkPreimage(), so every field an extractor reads from it is unverified", name)
+}
+
+// holdsSigHashPreimage reports SigHashPreimage or a (nested) FixedArray of it.
+func holdsSigHashPreimage(t TypeNode) bool {
+	switch tt := t.(type) {
+	case FixedArrayType:
+		return holdsSigHashPreimage(tt.Element)
+	case PrimitiveType:
+		return tt.Name == "SigHashPreimage"
+	}
+	return false
+}
+
 func (ctx *validationContext) validateProperties() {
 	for _, prop := range ctx.contract.Properties {
 		ctx.validatePropertyType(prop.Type, prop.SourceLocation)
+
+		// R3-GK010-GAPS: a readonly property is a constant in the locking
+		// script, and a sighash preimage commits to the outpoint of the
+		// transaction that carries that script, so checkPreimage() on it can
+		// never pass and every field an extractor reads from it is
+		// unverified. Refused at the declaration (before FixedArray
+		// expansion, so the name is the user's).
+		if prop.Readonly && holdsSigHashPreimage(prop.Type) {
+			ctx.addErrorWithLoc(ReadonlyPreimagePropertyMessage(prop.Name), &prop.SourceLocation)
+		}
 
 		// txPreimage is an implicit property of StatefulSmartContract and must not be declared explicitly
 		if ctx.contract.ParentClass == "StatefulSmartContract" && prop.Name == "txPreimage" {

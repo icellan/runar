@@ -29,6 +29,19 @@ module RunarCompiler
         expr.args[0].is_a?(ByteStringLiteral)
     end
 
+    # The diagnostic every tier shares (R3-GK010-GAPS).
+    def self.readonly_preimage_property_message(name)
+      "readonly property '#{name}' cannot hold a SigHashPreimage: a preimage fixed in the locking script " \
+        "can never pass checkPreimage(), so every field an extractor reads from it is unverified"
+    end
+
+    # SigHashPreimage, or a (nested) FixedArray of it.
+    def self.holds_sig_hash_preimage?(type)
+      return holds_sig_hash_preimage?(type.element) if type.is_a?(FixedArrayType)
+
+      type.is_a?(PrimitiveType) && type.name == "SigHashPreimage"
+    end
+
     # Output of the validation pass.
     class ValidationResult
       attr_reader :errors, :warnings
@@ -119,6 +132,16 @@ module RunarCompiler
       def validate_properties
         @contract.properties.each do |prop|
           validate_property_type(prop.type, prop.source_location)
+
+          # R3-GK010-GAPS: a readonly property is a constant in the locking
+          # script, and a sighash preimage commits to the outpoint of the
+          # transaction that carries that script, so checkPreimage() on it can
+          # never pass and every field an extractor reads from it is
+          # unverified. Refused at the declaration (before FixedArray
+          # expansion, so the name is the user's).
+          if prop.readonly && Frontend.holds_sig_hash_preimage?(prop.type)
+            add_error(Frontend.readonly_preimage_property_message(prop.name), loc: prop.source_location)
+          end
 
           # V27: txPreimage is an implicit property of StatefulSmartContract
           if @contract.parent_class == "StatefulSmartContract" && prop.name == "txPreimage"

@@ -74,6 +74,9 @@ const CONTROL =
 
 /// Over-rejection guard. Every legitimate property type in one stateless
 /// contract — if the new arm is too broad, this stops compiling.
+/// SigHashPreimage is the exception: a READONLY preimage property is refused
+/// on its own grounds (R3-GK010-GAPS), so its type is guarded by the stateful
+/// MUTABLE_PREIMAGE_TYPE control below instead.
 const ALL_LEGAL_TYPES =
     \\import { SmartContract, assert, ByteString, PubKey, Sig, Sha256, Ripemd160, Addr, SigHashPreimage, RabinSig, RabinPubKey, Point, P256Point, P384Point, FixedArray } from 'runar-lang';
     \\
@@ -86,7 +89,6 @@ const ALL_LEGAL_TYPES =
     \\  readonly f: Sha256;
     \\  readonly g: Ripemd160;
     \\  readonly h: Addr;
-    \\  readonly i: SigHashPreimage;
     \\  readonly j: RabinSig;
     \\  readonly k: RabinPubKey;
     \\  readonly l: Point;
@@ -94,10 +96,10 @@ const ALL_LEGAL_TYPES =
     \\  readonly n: P384Point;
     \\  readonly o: FixedArray<bigint, 3> = [1n, 2n, 3n];
     \\
-    \\  constructor(a: bigint, b: boolean, c: ByteString, d: PubKey, e: Sig, f: Sha256, g: Ripemd160, h: Addr, i: SigHashPreimage, j: RabinSig, k: RabinPubKey, l: Point, m: P256Point, n: P384Point) {
-    \\    super(a, b, c, d, e, f, g, h, i, j, k, l, m, n);
+    \\  constructor(a: bigint, b: boolean, c: ByteString, d: PubKey, e: Sig, f: Sha256, g: Ripemd160, h: Addr, j: RabinSig, k: RabinPubKey, l: Point, m: P256Point, n: P384Point) {
+    \\    super(a, b, c, d, e, f, g, h, j, k, l, m, n);
     \\    this.a = a; this.b = b; this.c = c; this.d = d; this.e = e;
-    \\    this.f = f; this.g = g; this.h = h; this.i = i; this.j = j;
+    \\    this.f = f; this.g = g; this.h = h; this.j = j;
     \\    this.k = k; this.l = l; this.m = m; this.n = n;
     \\  }
     \\
@@ -105,6 +107,22 @@ const ALL_LEGAL_TYPES =
     \\    assert(x >= this.a);
     \\    assert(this.b);
     \\    assert(this.o[0] >= 0n);
+    \\  }
+    \\}
+;
+
+/// SigHashPreimage as a property type: a mutable state field must still
+/// validate and compile.
+const MUTABLE_PREIMAGE_TYPE =
+    \\import { StatefulSmartContract, assert, SigHashPreimage } from 'runar-lang';
+    \\
+    \\export class PreimageState extends StatefulSmartContract {
+    \\  i: SigHashPreimage;
+    \\
+    \\  constructor(i: SigHashPreimage) { super(i); this.i = i; }
+    \\
+    \\  public go(x: bigint) {
+    \\    assert(x >= 0n);
     \\  }
     \\}
 ;
@@ -205,19 +223,24 @@ test "N-109 control: the bigint twin still compiles" {
 }
 
 test "N-109 control: every legitimate property type still validates and compiles" {
+    try expectValidatesAndCompiles(ALL_LEGAL_TYPES, "AllTypes.runar.ts");
+    try expectValidatesAndCompiles(MUTABLE_PREIMAGE_TYPE, "PreimageState.runar.ts");
+}
+
+fn expectValidatesAndCompiles(src: []const u8, file_name: []const u8) !void {
     const a = std.testing.allocator;
 
     {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
-        const errors = try validateErrors(arena.allocator(), ALL_LEGAL_TYPES, "AllTypes.runar.ts");
+        const errors = try validateErrors(arena.allocator(), src, file_name);
         if (errors.len > 0) {
             for (errors) |d| std.debug.print("  unexpected validation error: {s}\n", .{d.message});
         }
         try std.testing.expectEqual(@as(usize, 0), errors.len);
     }
 
-    const result = try compiler_api.compileSource(a, ALL_LEGAL_TYPES, "AllTypes.runar.ts");
+    const result = try compiler_api.compileSource(a, src, file_name);
     defer a.free(result.script_hex);
     defer if (result.artifact_json) |j| a.free(j);
     defer {

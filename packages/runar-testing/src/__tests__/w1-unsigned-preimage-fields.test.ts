@@ -39,8 +39,9 @@ import {
   Hash,
   TransactionSignature,
 } from '@bsv/sdk';
-import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
-import { ScriptExecutionContract } from '../script-execution.js';
+import { newConsensusSpend, CONSENSUS_TX_VERSION, CONSENSUS_SPEND_CONTEXT } from '../consensus-spend.js';
+import { encodeScriptNumber } from '../vm/utils.js';
+import { afterPreimageChecks } from './helpers/after-preimage-checks.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -111,37 +112,80 @@ function synthPreimage(opts: {
 // Part A — differential decode of all four fields
 // ---------------------------------------------------------------------------
 
-const DECODE_SRC = `import {
-  SmartContract, assert, SigHashPreimage,
-  extractVersion, extractSequence, extractLocktime, extractSigHashType,
-} from 'runar-lang';
+type Field = 'ver' | 'seq' | 'lock' | 'sht';
+const FIELDS: Field[] = ['ver', 'seq', 'lock', 'sht'];
+
+const EXTRACTOR: Record<Field, string> = {
+  ver: 'extractVersion',
+  seq: 'extractSequence',
+  lock: 'extractLocktime',
+  sht: 'extractSigHashType',
+};
+
+/** One single-method contract per field: `go(n, p)` asserts `<extractor>(p) === n`. */
+const decodeSrc = (field: Field) => `import { SmartContract, assert, SigHashPreimage, checkPreimage, ${EXTRACTOR[field]} } from 'runar-lang';
 
 export class W1Decode extends SmartContract {
   readonly tag: bigint;
-  readonly p: SigHashPreimage;
-  constructor(tag: bigint, p: SigHashPreimage) { super(tag, p); this.tag = tag; this.p = p; }
-  public ver(n: bigint) { assert(extractVersion(this.p) === n); }
-  public seq(n: bigint) { assert(extractSequence(this.p) === n); }
-  public lock(n: bigint) { assert(extractLocktime(this.p) === n); }
-  public sht(n: bigint) { assert(extractSigHashType(this.p) === n); }
+  constructor(tag: bigint) { super(tag); this.tag = tag; }
+  public go(n: bigint, p: SigHashPreimage) {
+    assert(checkPreimage(p));
+    assert(${EXTRACTOR[field]}(p) === n);
+  }
 }
 `;
 
 /**
- * The preimage is a readonly PROPERTY baked in per probe: a public method's
- * SigHashPreimage parameter must reach checkPreimage() on every path
- * (GK-GAP-010), which a synthetic preimage cannot pass. The extractors under
- * test lower the same either way.
+ * The preimage is a parameter the method asserts with checkPreimage() first
+ * (GK-GAP-010; a readonly SigHashPreimage property is refused, R3-GK010-GAPS),
+ * and a synthetic preimage cannot pass that check. So the locking script under
+ * test is the compiled code AFTER the check — split off by an exact structural
+ * match (`OP_DUP OP_CODESEPARATOR <blob> OP_VERIFY`, see
+ * helpers/after-preimage-checks.ts) — and it runs on `Spend.validate()` with
+ * the unlocking pushes `n, p`: the compiled extractor on the stack an
+ * accepting checkPreimage leaves.
  */
-const decodeContractFor = (p: string) =>
-  ScriptExecutionContract.fromSource(DECODE_SRC, { tag: 1n, p }, 'W1Decode.runar.ts');
+const decodeTail = new Map<Field, string>();
+function decodeLockFor(field: Field): string {
+  let tail = decodeTail.get(field);
+  if (tail === undefined) {
+    const r = compile(decodeSrc(field), { fileName: 'W1Decode.runar.ts', constructorArgs: { tag: 1n } });
+    if (!r.success || !r.scriptHex) {
+      throw new Error(r.diagnostics.filter((d) => d.severity === 'error').map((d) => d.message).join('; '));
+    }
+    tail = afterPreimageChecks(r.scriptHex, ['76ab']);
+    decodeTail.set(field, tail);
+  }
+  return tail;
+}
+
+/** Minimal push of a script number (MINIMALDATA: OP_0 / OP_1..OP_16 / OP_1NEGATE). */
+function pushNumHex(n: bigint): string {
+  const b = encodeScriptNumber(n);
+  if (b.length === 0) return '00';
+  if (b.length === 1 && b[0]! >= 1 && b[0]! <= 16) return (0x50 + b[0]!).toString(16);
+  if (b.length === 1 && b[0] === 0x81) return '4f';
+  return pushDataHex(b);
+}
+
+function decodeExecute(field: Field, p: Uint8Array, n: bigint): { success: boolean; error?: string } {
+  const spend = newConsensusSpend({
+    ...CONSENSUS_SPEND_CONTEXT,
+    lockingScript: LockingScript.fromHex(decodeLockFor(field)),
+    otherInputs: [],
+    outputs: [],
+    unlockingScript: UnlockingScript.fromHex(pushNumHex(n) + pushDataHex(p)),
+  });
+  try {
+    return { success: spend.validate() };
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 /** The four boundary values: last signed-positive, first signed-negative, the
  *  SDK non-final default, and the finality sentinel. */
 const PROBES = [0x7fffffff, 0x80000000, 0xfffffffe, 0xffffffff] as const;
-
-type Field = 'ver' | 'seq' | 'lock' | 'sht';
-const FIELDS: Field[] = ['ver', 'seq', 'lock', 'sht'];
 
 describe('W1 — the four 32-bit preimage fields decode UNSIGNED', () => {
   /** Build a preimage whose `field` carries `v` and whose other three fields
@@ -160,8 +204,7 @@ describe('W1 — the four 32-bit preimage fields decode UNSIGNED', () => {
       const label = `0x${v.toString(16).padStart(8, '0')}`;
 
       it(`${field}: ${label} decodes to ${v >>> 0}`, () => {
-        const p = bytesToHex(preimageFor(field, v));
-        const r = decodeContractFor(p).execute(field, [BigInt(v >>> 0)]);
+        const r = decodeExecute(field, preimageFor(field, v), BigInt(v >>> 0));
         expect(r.error, r.error).toBeUndefined();
         expect(r.success).toBe(true);
       });
@@ -169,8 +212,7 @@ describe('W1 — the four 32-bit preimage fields decode UNSIGNED', () => {
       const signed = signMagnitude32(v);
       if (signed !== BigInt(v >>> 0)) {
         it(`${field}: ${label} does NOT decode to the sign-magnitude misread ${signed}`, () => {
-          const p = bytesToHex(preimageFor(field, v));
-          const r = decodeContractFor(p).execute(field, [signed]);
+          const r = decodeExecute(field, preimageFor(field, v), signed);
           expect(r.success).toBe(false);
         });
       }

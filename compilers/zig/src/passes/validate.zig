@@ -264,6 +264,17 @@ fn isValidPropertyType(t: RunarType) bool {
     };
 }
 
+/// The diagnostic every tier shares (R3-GK010-GAPS).
+pub const READONLY_PREIMAGE_PROPERTY_FMT = "readonly property '{s}' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified";
+
+/// `SigHashPreimage`, or a (nested) FixedArray of it. A nested FixedArray
+/// property records its leaf type in `fixed_array_element` (the inner length
+/// lives in `fixed_array_nested_length`).
+fn holdsSigHashPreimage(prop: PropertyNode) bool {
+    return prop.type_info == .sig_hash_preimage or
+        (prop.type_info == .fixed_array and prop.fixed_array_element == .sig_hash_preimage);
+}
+
 // ============================================================================
 // Property validation
 // ============================================================================
@@ -321,6 +332,21 @@ fn validateProperties(
             try errors.append(allocator, .{
                 .message = "unsupported type in property declaration",
                 .severity = .@"error",
+            });
+        }
+
+        // R3-GK010-GAPS: a readonly property is a constant in the locking
+        // script, and a sighash preimage commits to the outpoint of the
+        // transaction that carries that script, so checkPreimage() on it can
+        // never pass and every field an extractor reads from it is
+        // unverified. Refused at the declaration (before FixedArray
+        // expansion, so the name is the user's).
+        if (prop.readonly and holdsSigHashPreimage(prop)) {
+            try errors.append(allocator, .{
+                .message = try std.fmt.allocPrint(allocator, READONLY_PREIMAGE_PROPERTY_FMT, .{prop.name}),
+                .location = prop.source_loc,
+                .severity = .@"error",
+                .owned_message = true,
             });
         }
 

@@ -143,35 +143,42 @@ class R069BuiltinParityTest {
     // ------------------------------------------------------------------
 
     /**
-     * The preimage is a readonly PROPERTY, not a parameter: a public method's
-     * SigHashPreimage parameter must reach checkPreimage() on every path
-     * (GK-GAP-010), and checkPreimage's OP_PUSH_TX blob would drown the
-     * extractor bytes pinned here. The extractor bytes are unchanged; the
-     * prefix gains the property's constructor-slot {@code 00}.
+     * The preimage is a method PARAMETER the probe asserts with
+     * {@code assert(checkPreimage(p))} before the extractor reads it: GK-GAP-010
+     * makes that check mandatory, and R3-GK010-GAPS refuses a readonly
+     * SigHashPreimage property (a preimage fixed in the locking script can never
+     * pass checkPreimage). The script is therefore exactly {@code 00009d}
+     * (the seed assert), {@code 76ab} (OP_DUP OP_CODESEPARATOR), the OP_PUSH_TX
+     * blob, {@code 69} (OP_VERIFY), then the extractor probe: the
+     * pre-GK-GAP-010 parameter-form pin with its leading {@code 00009d} dropped.
      */
     private static final String SRC_EXTRACT_VERSION = """
-        import { SmartContract, assert, extractVersion } from 'runar-lang';
+        import { SmartContract, assert, checkPreimage, extractVersion } from 'runar-lang';
         import type { SigHashPreimage } from 'runar-lang';
 
         class Probe extends SmartContract {
           readonly seed: bigint;
-          readonly p: SigHashPreimage;
 
-          constructor(seed: bigint, p: SigHashPreimage) {
-            super(seed, p);
+          constructor(seed: bigint) {
+            super(seed);
             this.seed = seed;
-            this.p = p;
           }
 
-          public run() {
+          public run(p: SigHashPreimage) {
             assert(this.seed === this.seed);
-            assert(extractVersion(this.p) > 0n);
+            assert(checkPreimage(p));
+            assert(extractVersion(p) > 0n);
           }
         }
         """;
 
-    /** OP_4 OP_SPLIT OP_DROP OP_BIN2NUM OP_0 OP_GREATERTHAN. */
-    private static final String EXPECTED_EXTRACT_VERSION = "00009d00547f7501007e8100a0";
+    /** The OP_PUSH_TX check every peer tier emits for {@code checkPreimage} (lowS variant). */
+    private static final String CHECK_PREIMAGE_BINDING_HEX =
+        "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
+
+    /** OP_4 OP_SPLIT OP_DROP OP_BIN2NUM OP_0 OP_GREATERTHAN, after the check. */
+    private static final String EXPECTED_EXTRACT_VERSION =
+        "00009d" + "76ab" + CHECK_PREIMAGE_BINDING_HEX + "69" + "547f7501007e8100a0";
 
     @Test
     void extractVersionLowersToTheLeadingFourByteSlice() throws Exception {
@@ -215,7 +222,11 @@ class R069BuiltinParityTest {
     void extractVersionActuallyYieldsNVersion() throws Exception {
         String hex = PipelineTestSupport.hex(SRC_EXTRACT_VERSION, FILE);
         String core = "547f7501007e81"; // <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM (W1)
-        assertTrue(hex.contains(core), "extractVersion core sequence not emitted");
+        // Search only AFTER the check blob + OP_VERIFY: the blob itself contains `01007e81`.
+        int blobAt = hex.indexOf(CHECK_PREIMAGE_BINDING_HEX);
+        assertTrue(blobAt >= 0, "checkPreimage blob not emitted");
+        String tail = hex.substring(blobAt + CHECK_PREIMAGE_BINDING_HEX.length() + 2);
+        assertTrue(tail.contains(core), "extractVersion core sequence not emitted");
         assertEquals("02", MiniVm.runOn(core, PREIMAGE_HEX));
     }
 
