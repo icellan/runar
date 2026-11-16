@@ -1183,9 +1183,22 @@ rpc.setTransport(http.rpcTransport());
 const prov = rpc.provider();
 ```
 
-`initRegtest` enables `auto_mine` so a `generatetoaddress` 1 block
-follows every broadcast. Use `RPCProvider.init` for testnet/mainnet
-nodes that already have a confirmation path.
+`initRegtest` enables `auto_mine`: every accepted broadcast is followed by
+one mined block (`generate`, falling back to `getnewaddress` +
+`generatetoaddress`, as the Go RPCProvider does). A failed mine after an
+accepted broadcast is `error.MineFailed`, not a silent success; the tx is in
+the mempool and `rpc.lastError()` names its txid and the mine failure. Use
+`RPCProvider.init` for testnet/mainnet nodes that already have a
+confirmation path.
+
+`getUtxos` reads `listunspent` (amount in BTC, rounded to satoshis; each
+script held to the MAX_SCRIPT_BYTES bound) and `getRawTransaction` /
+`getTransaction` read `getrawtransaction`. The node's JSON-RPC `error` reply
+is `error.RPCError` with its code and message in `rpc.last_error_code` /
+`rpc.lastError()`; through the `Provider` interface a `-5` (no such
+transaction) is `NotFound` and anything else `NetworkError` /
+`BroadcastFailed`. A transport must hand back the body of an HTTP 500 reply,
+since that is how a node sends a JSON-RPC error; both bundled transports do.
 
 `HttpTransport` is a small struct with one `post` callback:
 
@@ -1588,10 +1601,15 @@ pub const RPCProvider = struct {
     pub fn buildRequestBody(self: *RPCProvider, allocator: std.mem.Allocator, method: []const u8, params_json: []const u8) RPCError![]u8;
     pub fn rpcCall(self: *RPCProvider, allocator: std.mem.Allocator, method: []const u8, params_json: []const u8) RPCError![]u8;
     pub fn broadcast(self: *RPCProvider, allocator: std.mem.Allocator, tx_hex: []const u8) RPCError![]u8;
+    pub fn mine(self: *RPCProvider, allocator: std.mem.Allocator, n: u32) RPCError!void;
+    pub fn getUtxos(self: *RPCProvider, allocator: std.mem.Allocator, address: []const u8) RPCError![]UTXO;
+    pub fn getRawTransaction(self: *RPCProvider, allocator: std.mem.Allocator, txid: []const u8) RPCError![]u8;
+    pub fn lastError(self: *const RPCProvider) []const u8;
+    pub fn provider(self: *RPCProvider) Provider;
     pub fn deinit(_: *RPCProvider) void;
 };
 
-pub const RPCError = error{ TransportError, ProtocolError, RPCError, OutOfMemory, InvalidResponse };
+pub const RPCError = error{ TransportError, ProtocolError, RPCError, OutOfMemory, InvalidResponse, MineFailed, ScriptSizeExceeded };
 
 pub const WhatsOnChainProvider = struct {
     pub const Network = enum { mainnet, testnet };
