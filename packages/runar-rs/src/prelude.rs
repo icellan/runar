@@ -524,6 +524,14 @@ pub fn sha256_finalize(state: &[u8], remaining: &[u8], msg_bit_len: i64) -> Byte
     // The compiled script's two-block path pads to 120 bytes, so it accepts
     // 0..=119 bytes of `remaining` and aborts on more (F-142).
     assert!(remaining.len() <= 119, "sha256_finalize: remaining must be 0-119 bytes");
+    // GK-BUG-013: the compiled script refuses a msgBitLen outside [0, 2^64)
+    // (the 9th byte of its 9-byte OP_NUM2BIN form must be 0x00). An i64 cannot
+    // reach 2^64, so only a negative needs refusing; `as u64` below would wrap it.
+    assert!(
+        msg_bit_len >= 0,
+        "sha256_finalize: msgBitLen must be in [0, 2^64), got {}",
+        msg_bit_len
+    );
 
     let rem_len = remaining.len();
 

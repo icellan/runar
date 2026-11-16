@@ -718,6 +718,13 @@ func Sha256Finalize(state, remaining ByteString, msgBitLen int64) ByteString {
 	if len(remaining) > 119 {
 		panic("Sha256Finalize: remaining must be 0-119 bytes")
 	}
+	// GK-BUG-013: the compiled script refuses a msgBitLen outside [0, 2^64)
+	// (the 9th byte of its 9-byte OP_NUM2BIN form must be 0x00). An int64
+	// cannot reach 2^64, so only a negative needs refusing; uint64() below
+	// would wrap it to 2^64 - |n|.
+	if msgBitLen < 0 {
+		panic(fmt.Sprintf("Sha256Finalize: msgBitLen must be in [0, 2^64), got %d", msgBitLen))
+	}
 
 	// Start padding: append 0x80
 	padded := append([]byte(nil), []byte(remaining)...)

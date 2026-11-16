@@ -3512,9 +3512,12 @@ private def shaEmitCompress : List StackOp := shaCompressOpsGen true
 [..., state(32 BE), remaining(var len), msgBitLen(bigint)].
 Stack on exit: [..., hash(32 BE)]. Mirrors TS `emitSha256Finalize`. -/
 private def shaEmitFinalize : List StackOp :=
-  -- Step 1: convert msgBitLen → 8-byte BE; save to alt
+  -- Step 1: convert msgBitLen → 8-byte BE; save to alt. GK-BUG-013: the 9th
+  -- byte of the 9-byte OP_NUM2BIN form (the sign / 2^64 byte) must be 0x00,
+  -- i.e. msgBitLen ∈ [0, 2^64); it used to be dropped unchecked.
   [ shaPushI 9, shaOpc "OP_NUM2BIN"
-  , shaPushI 8, shaOpc "OP_SPLIT", .drop
+  , shaPushI 8, shaOpc "OP_SPLIT"
+  , .push (.bytes (ByteArray.mk #[0x00])), shaOpc "OP_EQUALVERIFY"
   , shaPushI 4, shaOpc "OP_SPLIT" ]
   ++ shaReverseBytes4
   ++ [.swap]

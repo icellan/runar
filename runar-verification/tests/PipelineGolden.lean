@@ -724,15 +724,26 @@ the constants had been honest all along.
 -- two `nVersion != 1` -> `nVersion > 1` doc-comment edits (-2 bytes); the
 -- same three shards were re-run on that model and again returned `[fresh]`,
 -- byte-exact.
+-- 2026-11-16 (GK-BUG-013): the model fingerprint moved to
+-- v1:65f:7257276b:05651e2f45016f76 (Stack/Lower.lean: `shaEmitFinalize`
+-- checks the 9th byte of msgBitLen's 9-byte OP_NUM2BIN form with
+-- `<00> OP_EQUALVERIFY` instead of dropping it, so sha256Finalize refuses a
+-- msgBitLen outside [0, 2^64), as all seven compiler tiers now do). Sharded
+-- live regens (`RUNAR_VERIFICATION_REGEN=1 RUNAR_VERIFICATION_SHARD=1|8|22
+-- RUNAR_VERIFICATION_SHARDS=22`) returned all three `.regenLive` anchors
+-- `[fresh]` and byte-equal to their expected-script.hex (none calls
+-- sha256Finalize), so only their fingerprints move. The same runs
+-- live-compiled every `baselineMatches` fixture byte-exact, including the
+-- moved sha256-finalize golden (69509 B) and the new ternary-expression.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
+  ⟨"babybear", .regenLive, "v1:65f:7257276b:05651e2f45016f76"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:65f:7257276b:05651e2f45016f76"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -755,7 +766,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
+  ⟨"state-covenant", .regenLive, "v1:65f:7257276b:05651e2f45016f76"⟩,
 ]
 
 /--

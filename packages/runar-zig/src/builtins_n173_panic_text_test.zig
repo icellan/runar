@@ -20,11 +20,16 @@
 //! diagnostic, independently hardcoded here (not derived from builtins.zig),
 //! plus a control case proving the probe itself does not panic on a
 //! valid-length call.
-//! Does NOT prove: that these are the only call sites needing the suffix —
-//! sha256Finalize's "total bit length must be non-negative" check has no
-//! shared counterpart in any other tier and is deliberately left unchanged;
-//! the on-chain script's behavior (the conformance suite's job, untouched by
-//! this item); any tier other than Zig.
+//! GK-BUG-013 added the `sha256Finalize-bitlen` case: a msgBitLen outside
+//! [0, 2^64) now carries the diagnostic all seven tiers share,
+//! "sha256Finalize: msgBitLen must be in [0, 2^64), got <N>" (it was the
+//! Zig-only "total bit length must be non-negative"). `Bigint` is i64 here,
+//! so a negative is the only out-of-domain value Zig can be handed.
+//!
+//! Does NOT prove: that these are the only call sites needing the suffix;
+//! the on-chain script's behavior (the conformance suite's job, see
+//! conformance/negatives/gk-bug-013-sha256-finalize-bitlen-domain.test.ts);
+//! any tier other than Zig.
 
 const std = @import("std");
 
@@ -38,6 +43,7 @@ const cases = [_]Case{
     .{ .arg = "sha256Compress-block", .expected = "sha256Compress: block must be 64 bytes, got 63" },
     .{ .arg = "sha256Finalize-state", .expected = "sha256Finalize: state must be 32 bytes, got 31" },
     .{ .arg = "sha256Finalize-remaining", .expected = "sha256Finalize: remaining must be 0-119 bytes, got 120" },
+    .{ .arg = "sha256Finalize-bitlen", .expected = "sha256Finalize: msgBitLen must be in [0, 2^64), got -24" },
     .{ .arg = "blake3Compress-chaining", .expected = "blake3Compress: chaining value must be 32 bytes, got 31" },
     .{ .arg = "blake3Compress-block", .expected = "blake3Compress: block must be 64 bytes, got 63" },
     .{ .arg = "blake3Hash-message", .expected = "blake3Hash: message must be <= 64 bytes, got 65" },

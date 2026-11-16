@@ -38,6 +38,7 @@ const sha256_k_le = [_][4]u8{
 };
 
 const byte_80 = [_]u8{0x80};
+const byte_00 = [_]u8{0x00};
 
 fn u32ToLE(comptime n: u32) [4]u8 {
     return .{
@@ -475,7 +476,12 @@ fn appendFinalizeProgram(emitter: *Emitter) Sha256EmitterError!void {
     try emitter.binOp("OP_NUM2BIN");
     try emitter.emitPushInt(8);
     try emitter.split();
-    try emitter.drop();
+    // GK-BUG-013: msgBitLen must be in [0, 2^64). The 9th byte is the
+    // script-number sign (0x80 for a negative) or the 2^64 byte; dropping it let
+    // -L and 2^64 + L alias L. Require it to be 0x00 (a 1-byte push, not OP_0).
+    try emitter.emitPushData(byte_00[0..]);
+    try emitter.emitOp("OP_EQUALVERIFY");
+    emitter.depth -= 2;
     try emitter.emitPushInt(4);
     try emitter.split();
     try emitter.reverseBytes4();
@@ -623,7 +629,30 @@ test "sha256 finalize op-count golden" {
     var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
     defer list.deinit(allocator);
     try appendBuiltinInstructions(&list, allocator, .finalize);
-    try std.testing.expectEqual(@as(usize, 63946), list.items.len);
+    // GK-BUG-013: 63946 -> 63947 (the dropped 9th byte became <00> OP_EQUALVERIFY).
+    try std.testing.expectEqual(@as(usize, 63947), list.items.len);
+}
+
+// GK-BUG-013: `<9> OP_NUM2BIN <8> OP_SPLIT` leaves the msgBitLen sign byte (or
+// the 2^64 byte) on top. It must be required to equal 0x00, not dropped.
+test "sha256 finalize checks the ninth NUM2BIN byte is zero" {
+    const allocator = std.testing.allocator;
+    var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer list.deinit(allocator);
+    try appendBuiltinInstructions(&list, allocator, .finalize);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .push_int = 9 }, list.items[0]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_NUM2BIN" }, list.items[1]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .push_int = 8 }, list.items[2]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_SPLIT" }, list.items[3]);
+    const zero = [_]u8{0x00};
+    try std.testing.expectEqualDeep(Sha256Instruction{ .push_data = zero[0..] }, list.items[4]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_EQUALVERIFY" }, list.items[5]);
+    for (list.items[0..6]) |inst| {
+        switch (inst) {
+            .op_name => |name| try std.testing.expect(!std.mem.eql(u8, name, "OP_DROP")),
+            else => {},
+        }
+    }
 }
 
 test "sha256 compress emits expected opcode families" {

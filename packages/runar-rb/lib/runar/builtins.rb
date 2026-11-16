@@ -228,6 +228,12 @@ module Runar
       if remaining_bytes.bytesize > 119
         raise ArgumentError, "sha256_finalize: remaining must be 0-119 bytes, got #{remaining_bytes.bytesize}"
       end
+      # GK-BUG-013: the compiled script requires the 9th byte of msgBitLen's
+      # 9-byte OP_NUM2BIN form to be 0x00, i.e. 0 <= msg_bit_len < 2^64.
+      # pack('Q>') below would silently wrap anything else modulo 2^64.
+      unless msg_bit_len.is_a?(Integer) && msg_bit_len >= 0 && msg_bit_len < (1 << 64)
+        raise ArgumentError, "sha256Finalize: msgBitLen must be in [0, 2^64), got #{msg_bit_len}"
+      end
 
       # Append the 0x80 padding byte
       padded = remaining_bytes + "\x80".b

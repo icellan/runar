@@ -630,8 +630,10 @@ BuiltinFunction_Hash
 ```
 
 `sha256Compress` / `sha256Finalize` expose the SHA-256 compression function so a
-contract can verify a digest over data it never holds in full. BLAKE3 is
-single-block (0–64 B) — see `docs/language-reference.md`.
+contract can verify a digest over data it never holds in full. `sha256Finalize`
+aborts unless `msgBitLen` is in [0, 2^64), the range its 8-byte length field can
+hold (GK-BUG-013: a negative or 2^64-or-larger value used to alias an honest
+length). BLAKE3 is single-block (0–64 B) — see `docs/language-reference.md`.
 
 ### Signature Verification
 

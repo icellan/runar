@@ -95,7 +95,8 @@ interpreter — real secp256k1, real BIP-143 sighash, real `OP_CHECKSIG` /
   bytes it ran — which is what makes it route (A) evidence for that golden. A
   reject may set `vmErrorPattern` to pin the failure class as well as the
   verdict. Used by `bn254-pairing` (the BN254 four-pair pairing check, a
-  ~4.7 MB script).
+  ~4.7 MB script). A `stateless-signed` reject may set `vmErrorPattern` too
+  (GK-BUG-013's `sha256-finalize` rows pin the sign-byte `OP_EQUALVERIFY`).
 
 Each fixture carries ≥1 accept and ≥1 reject/near-miss, ENFORCED in code by
 `coverage-claims.test.ts` (same `acceptOnly` opt-out convention as above). A

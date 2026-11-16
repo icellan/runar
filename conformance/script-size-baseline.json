@@ -81,7 +81,7 @@
     "schnorr-zkp": 874166,
     "selector": 747,
     "sha256-compress": 23153,
-    "sha256-finalize": 69507,
+    "sha256-finalize": 69509,
     "shift-ops": 13,
     "sighash-single-stateful": 1345,
     "sphincs-wallet": 188591,
