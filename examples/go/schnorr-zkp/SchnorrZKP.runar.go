@@ -63,6 +63,10 @@ func (c *SchnorrZKP) Verify(rPoint runar.Point, s runar.Bigint) {
 	// Verify R is on the curve
 	runar.Assert(runar.EcOnCurve(rPoint))
 
+	// Verify P is on the curve: the identity O (all-zero) would make
+	// R + e*P collapse to R (GK-BUG-011).
+	runar.Assert(runar.EcOnCurve(c.PubKey))
+
 	// Derive challenge via Fiat-Shamir: e = Bin2Num(Hash256(R || P))
 	e := runar.Bin2Num(runar.Hash256(runar.Cat(rPoint, c.PubKey)))
 

@@ -114,43 +114,67 @@
         {
           "name": "t8",
           "value": {
+            "kind": "load_prop",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "args": [
+              "t8"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "assert",
+            "value": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
             "kind": "load_param",
             "name": "rPoint"
           }
         },
         {
-          "name": "t9",
+          "name": "t12",
           "value": {
             "kind": "load_prop",
             "name": "pubKey"
           }
         },
         {
-          "name": "t10",
+          "name": "t13",
           "value": {
             "args": [
-              "t8",
-              "t9"
+              "t11",
+              "t12"
             ],
             "func": "cat",
             "kind": "call"
           }
         },
         {
-          "name": "t11",
+          "name": "t14",
           "value": {
             "args": [
-              "t10"
+              "t13"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t12",
+          "name": "t15",
           "value": {
             "args": [
-              "t11"
+              "t14"
             ],
             "func": "bin2num",
             "kind": "call"
@@ -160,21 +184,21 @@
           "name": "e",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t12"
+            "value": "@ref:t15"
           }
         },
         {
-          "name": "t13",
+          "name": "t16",
           "value": {
             "kind": "load_param",
             "name": "s"
           }
         },
         {
-          "name": "t14",
+          "name": "t17",
           "value": {
             "args": [
-              "t13"
+              "t16"
             ],
             "func": "ecMulGen",
             "kind": "call"
@@ -184,21 +208,21 @@
           "name": "sG",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t14"
+            "value": "@ref:t17"
           }
         },
         {
-          "name": "t15",
+          "name": "t18",
           "value": {
             "kind": "load_prop",
             "name": "pubKey"
           }
         },
         {
-          "name": "t16",
+          "name": "t19",
           "value": {
             "args": [
-              "t15",
+              "t18",
               "e"
             ],
             "func": "ecMul",
@@ -209,21 +233,21 @@
           "name": "eP",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t16"
+            "value": "@ref:t19"
           }
         },
         {
-          "name": "t17",
+          "name": "t20",
           "value": {
             "kind": "load_param",
             "name": "rPoint"
           }
         },
         {
-          "name": "t18",
+          "name": "t21",
           "value": {
             "args": [
-              "t17",
+              "t20",
               "eP"
             ],
             "func": "ecAdd",
@@ -234,49 +258,49 @@
           "name": "rhs",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t18"
+            "value": "@ref:t21"
           }
         },
         {
-          "name": "t19",
+          "name": "t22",
           "value": {
             "args": [
               "sG"
             ],
             "func": "ecPointX",
             "kind": "call"
-          }
-        },
-        {
-          "name": "t20",
-          "value": {
-            "args": [
-              "rhs"
-            ],
-            "func": "ecPointX",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t21",
-          "value": {
-            "kind": "bin_op",
-            "left": "t19",
-            "op": "===",
-            "right": "t20"
-          }
-        },
-        {
-          "name": "t22",
-          "value": {
-            "kind": "assert",
-            "value": "t21"
           }
         },
         {
           "name": "t23",
           "value": {
             "args": [
+              "rhs"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "kind": "bin_op",
+            "left": "t22",
+            "op": "===",
+            "right": "t23"
+          }
+        },
+        {
+          "name": "t25",
+          "value": {
+            "kind": "assert",
+            "value": "t24"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "args": [
               "sG"
             ],
             "func": "ecPointY",
@@ -284,7 +308,7 @@
           }
         },
         {
-          "name": "t24",
+          "name": "t27",
           "value": {
             "args": [
               "rhs"
@@ -294,19 +318,19 @@
           }
         },
         {
-          "name": "t25",
+          "name": "t28",
           "value": {
             "kind": "bin_op",
-            "left": "t23",
+            "left": "t26",
             "op": "===",
-            "right": "t24"
+            "right": "t27"
           }
         },
         {
-          "name": "t26",
+          "name": "t29",
           "value": {
             "kind": "assert",
-            "value": "t25"
+            "value": "t28"
           }
         }
       ],

@@ -16,6 +16,9 @@ class SchnorrZKP < Runar::SmartContract
     # Value: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
     assert within(s, 1, 115792089237316195423570985008687907852837564279074904382605163141518161494337)
     assert ec_on_curve(r_point)
+    # P must be on the curve: the identity O (all-zero) would make R + e*P
+    # collapse to R (GK-BUG-011).
+    assert ec_on_curve(@pub_key)
     e = bin2num(hash256(cat(r_point, @pub_key)))
     s_g = ec_mul_gen(s)
     e_p = ec_mul(@pub_key, e)

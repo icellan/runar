@@ -51,6 +51,10 @@ class SchnorrZKP(SmartContract):
         # Verify R is on the curve
         assert_(ec_on_curve(r_point))
 
+        # Verify P is on the curve: the identity O (all-zero) would make
+        # R + e*P collapse to R (GK-BUG-011).
+        assert_(ec_on_curve(self.pub_key))
+
         # Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P))
         e = bin2num(hash256(cat(r_point, self.pub_key)))
 

@@ -73,6 +73,13 @@ class SchnorrZKP extends SmartContract {
     // Verify R is on the curve
     assert(ecOnCurve(rPoint));
 
+    // Verify P is on the curve. The identity O is the all-zero blob, which
+    // ecMul deliberately lets through (ecMul(O, e) = O) and ecAdd treats as
+    // the identity (R + O = R): with pubKey = O the check below collapses to
+    // s*G == R and (rPoint = G, s = 1) spends with no discrete log.
+    // ecOnCurve(O) is false, so this refuses that deployment (GK-BUG-011).
+    assert(ecOnCurve(this.pubKey));
+
     // Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P))
     const e = bin2num(hash256(cat(rPoint, this.pubKey)));
 
