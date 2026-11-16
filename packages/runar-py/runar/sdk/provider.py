@@ -89,14 +89,17 @@ _EMPTY_VALIDATION_REPORT = {
 # The ONE tolerated failure class, and only because this tier can currently
 # validate NO Rúnar covenant at all — correct or broken alike.
 #
-# runar-py's OP_PUSH_TX preimage does not match the BIP-143 sighash bsv-sdk
-# recomputes, so a stateful contract's covenant input always aborts at the
-# covenant's OP_CHECKSIGVERIFY. This is pre-existing, independent of any SDK
-# change, and already pinned by the xfail in
-# ``tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend``
-# (its control shows a plain stateful Counter with no raw outputs fails
-# identically). Such an input is recorded as UNVALIDATABLE — never as
-# validated.
+# bsv-sdk (2.4.0, the latest release) sighashes the wrong scriptCode for any
+# script carrying a top-level ``OP_RETURN <data>``: ``Script.from_chunks``
+# re-encodes the OP_RETURN chunk as a data push (dropping the 0x6a), and
+# ``Spend.subscript_after_code_separator`` builds the scriptCode with it. Every
+# stateful Rúnar contract ends in ``OP_RETURN <state>``, so its covenant input
+# always aborts at the covenant's OP_CHECKSIGVERIFY, under both bsv-sdk VM
+# paths. runar-py's preimage is the node's (the real bytes); the two differ in
+# that one byte only. Pinned by the R2-GAP008 tests in
+# ``tests/test_gk_gap_008_covenant_carveout.py`` and the strict xfail in
+# ``tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend``.
+# Such an input is recorded as UNVALIDATABLE — never as validated.
 #
 # GK-GAP-008: the carve-out used to match ANY Spend error mentioning
 # OP_CHECKSIGVERIFY, so a wrong-key checkSig in any contract (stateless
@@ -110,7 +113,7 @@ _EMPTY_VALIDATION_REPORT = {
 # script check when the script layer is available.
 #
 # ``tests/test_mock_broadcast_validation.py`` pins the incompatibility so this
-# carve-out goes RED the moment it is fixed and can then be deleted.
+# carve-out goes RED the moment bsv-sdk is fixed and can then be deleted.
 # ``tests/test_gk_gap_008_covenant_carveout.py`` pins its scope.
 _COVENANT_PUSHTX_MARKER = 'OP_CHECKSIGVERIFY'
 
