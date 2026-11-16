@@ -47,6 +47,16 @@ describe('GK-DOC-008: SLH-DSA 192/256 is documented as SHA-256-only, not FIPS 20
     });
   }
 
+  // The repo CLAUDE.md is read by every contributor's tooling; its Style line
+  // said "6 FIPS 205 parameter sets" for verifySLHDSA_SHA2_*.
+  it('CLAUDE.md: the verifySLHDSA_SHA2_* line does not call all six sets FIPS 205 and cites #137', () => {
+    const line = read('CLAUDE.md').split('\n').find((l) => l.includes('verifySLHDSA_SHA2_*'));
+    expect(line).toBeDefined();
+    expect(line).not.toMatch(/6 FIPS 205 parameter sets/);
+    expect(line).toMatch(/not FIPS 205/);
+    expect(line).toMatch(/#137/);
+  });
+
   it('builtins.ts: the 192/256 JSDoc blocks drop the security label and cite #137', () => {
     const src = read('packages/runar-lang/src/builtins.ts');
     for (const fn of ['192s', '192f', '256s', '256f']) {
