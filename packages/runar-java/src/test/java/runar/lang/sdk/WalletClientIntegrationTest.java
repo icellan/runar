@@ -122,4 +122,112 @@ class WalletClientIntegrationTest {
                 "listOutputs[" + i + "]: missing canonical outpoint/satoshis/lockingScript: " + outMap);
         }
     }
+
+    /**
+     * GK-GAP-014: the SDK's own BRC-100 path ({@link WalletProvider#listWalletUtxos},
+     * i.e. wallet {@code listOutputs}) against the live endpoint, through a
+     * minimal JSON-over-HTTP {@link BRC100Wallet} adapter. Cross-checked with
+     * the raw {@code listOutputs} response: the SDK must return exactly the
+     * spendable outputs locked to the identity key's P2PKH script, as UTXOs
+     * with the outpoint split into txid / vout. Against the in-repo mock wallet
+     * (N-480) that is its one 1000-sat output, so the check is not vacuous.
+     *
+     * <p>Read-only on purpose: {@code ensureFunding} / {@code deployWithWallet}
+     * would create a funded action on a real wallet, and the mock wallet does
+     * not serve {@code createAction}. Those are covered by
+     * {@code WalletBrc100ActionsTest} against {@link MockBRC100Wallet}.
+     */
+    @Test
+    void walletProviderListsWalletOutputsOverTheLiveEndpoint() throws Exception {
+        String endpoint = System.getenv("RUNAR_WALLET_ENDPOINT");
+        String basket = env("RUNAR_WALLET_BASKET", "runar-integration-test");
+        HttpBrc100Wallet wallet = new HttpBrc100Wallet(endpoint);
+        WalletProvider wp = new WalletProvider(wallet, new MockProvider(), "identity", basket, null);
+
+        String expectedScript = ScriptUtils.buildP2PKHScript(
+            java.util.HexFormat.of().formatHex(wp.pubKey()));
+
+        // Raw view of the same call the SDK makes.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> raw = (Map<String, Object>) post(endpoint, "listOutputs",
+            "{\"basket\":" + JsonWriter.write(basket) + ",\"tags\":[\"funding\"],\"limit\":100}");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rawOutputs = (List<Map<String, Object>>) raw.getOrDefault("outputs", List.of());
+        long expectedCount = rawOutputs.stream()
+            .filter(o -> Boolean.TRUE.equals(o.get("spendable")))
+            .filter(o -> expectedScript.equalsIgnoreCase(String.valueOf(o.get("lockingScript"))))
+            .count();
+
+        List<UTXO> utxos = wp.listWalletUtxos();
+
+        assertEquals(expectedCount, utxos.size(),
+            "listWalletUtxos disagrees with the raw listOutputs response: " + rawOutputs + " vs " + utxos);
+        for (UTXO u : utxos) {
+            assertTrue(u.txid().matches("^[0-9a-f]{64}$"), "txid: " + u.txid());
+            assertTrue(u.outputIndex() >= 0);
+            assertTrue(u.satoshis() > 0, "satoshis: " + u.satoshis());
+            assertEquals(expectedScript, u.scriptHex().toLowerCase());
+        }
+    }
+
+    /** Minimal BRC-100 JSON-over-HTTP adapter: getPublicKey + listOutputs only. */
+    private final class HttpBrc100Wallet implements BRC100Wallet {
+        private final String endpoint;
+
+        HttpBrc100Wallet(String endpoint) {
+            this.endpoint = endpoint;
+        }
+
+        @Override
+        public byte[] sign(byte[] sighash, String derivationPath) {
+            throw new UnsupportedOperationException("read-only test adapter");
+        }
+
+        @Override
+        public byte[] pubKey(String derivationPath) {
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> r = (Map<String, Object>) post(endpoint, "getPublicKey",
+                    "{\"identityKey\":true}");
+                return java.util.HexFormat.of().parseHex(String.valueOf(r.get("publicKey")));
+            } catch (Exception e) {
+                throw new IllegalStateException("getPublicKey: " + e.getMessage(), e);
+            }
+        }
+
+        @Override
+        public String address(String derivationPath) {
+            throw new UnsupportedOperationException("read-only test adapter");
+        }
+
+        @Override
+        public List<WalletOutput> listOutputs(String basket, List<String> tags, int limit) {
+            try {
+                StringBuilder t = new StringBuilder("[");
+                for (int i = 0; i < tags.size(); i++) {
+                    if (i > 0) t.append(',');
+                    t.append(JsonWriter.write(tags.get(i)));
+                }
+                t.append(']');
+                @SuppressWarnings("unchecked")
+                Map<String, Object> r = (Map<String, Object>) post(endpoint, "listOutputs",
+                    "{\"basket\":" + JsonWriter.write(basket) + ",\"tags\":" + t + ",\"limit\":" + limit + "}");
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> outs = (List<Map<String, Object>>) r.getOrDefault("outputs", List.of());
+                List<WalletOutput> result = new java.util.ArrayList<>();
+                for (Map<String, Object> o : outs) {
+                    Object sats = o.get("satoshis");
+                    result.add(new WalletOutput(
+                        sats instanceof Number n ? n.longValue() : 0L,
+                        o.get("lockingScript") == null ? "" : String.valueOf(o.get("lockingScript")),
+                        Boolean.TRUE.equals(o.get("spendable")),
+                        String.valueOf(o.get("outpoint"))
+                    ));
+                }
+                return result;
+            } catch (Exception e) {
+                throw new IllegalStateException("listOutputs: " + e.getMessage(), e);
+            }
+        }
+    }
 }

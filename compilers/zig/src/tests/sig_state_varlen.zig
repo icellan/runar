@@ -24,7 +24,10 @@
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
-/// Mutating method — drives the state-continuation WRITE path.
+/// Mutating method — drives the state-continuation WRITE path. The field is
+/// rewritten from itself: a public SigHashPreimage parameter must reach
+/// checkPreimage on every path (GK-GAP-010), which the ByteString control
+/// could not mirror.
 fn writeSrc(allocator: std.mem.Allocator, prop_type: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator,
         \\class VarLenStateWrite extends StatefulSmartContract {{
@@ -35,11 +38,11 @@ fn writeSrc(allocator: std.mem.Allocator, prop_type: []const u8) ![]u8 {
         \\    this.tag = tag;
         \\  }}
         \\
-        \\  public update(next: {s}) {{
-        \\    this.tag = next;
+        \\  public update() {{
+        \\    this.tag = this.tag;
         \\  }}
         \\}}
-    , .{ prop_type, prop_type, prop_type });
+    , .{ prop_type, prop_type });
 }
 
 /// Terminal read of the field — drives `methodReadsVarLenState`.

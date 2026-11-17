@@ -145,12 +145,18 @@ RSpec.describe 'MathDemo' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
+    # This spend never reaches the node: the SDK's ANF interpreter aborts on a
+    # zero divisor exactly as OP_DIV does on chain, and the SDK refuses to
+    # build the transaction -- as in the Rust, Zig, Go, Python and TS suites.
+    # Assert THAT refusal and that nothing was broadcast.
+    before = provider.broadcast_log.length
     expect do
       contract.call(
         'divideBy', [0], provider, wallet[:signer],
         Runar::SDK::CallOptions.new(new_state: { 'value' => 0 })
       )
-    end.to raise_error(StandardError)
+    end.to raise_error(RuntimeError, /division by zero/)
+    expect(provider.broadcast_log.length).to eq(before)
   end
 
   it 'rejects claiming value=999 instead of 100 after divideBy(10)' do
@@ -162,12 +168,12 @@ RSpec.describe 'MathDemo' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'divideBy', [10], provider, wallet[:signer],
         Runar::SDK::CallOptions.new(new_state: { 'value' => 999 })
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'normalises: sign(-42) = -1' do

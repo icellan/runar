@@ -726,9 +726,9 @@ type loweringContext struct {
 	// the common no-collision case (byte-identical output).
 	renamedParams map[string]string
 
-	// Mode 3: when true, calls to assertGroth16WitnessAssisted in the
-	// method body are treated as no-ops by lowerCall. The actual verifier
-	// ops were already emitted as a method-entry preamble.
+	// Mode 3: when true, calls to assertGroth16WitnessAssistedWithMSM in
+	// the method body are treated as no-ops by lowerCall. The actual
+	// verifier ops were already emitted as a method-entry preamble.
 	skipGroth16WAMarker bool
 
 	// sp1FriParams is an optional override for the SP1 FRI verifier
@@ -1963,8 +1963,13 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 	// marker is void-returning in the type-checker, so no later binding
 	// references its name and the missing slot is invisible to the rest
 	// of the lowering.
-	if (funcName == "assertGroth16WitnessAssisted" || funcName == "assertGroth16WitnessAssistedWithMSM") && ctx.skipGroth16WAMarker {
+	if funcName == "assertGroth16WitnessAssistedWithMSM" && ctx.skipGroth16WAMarker {
 		return
+	}
+	// GK-BUG-006: the raw marker is refused wherever it appears, including a
+	// private method the preamble scan does not walk.
+	if funcName == "assertGroth16WitnessAssisted" {
+		panic(groth16WARawMarkerRefusal)
 	}
 
 	// groth16PublicInput(i) — DSL intrinsic that copies the i-th SP1
@@ -5807,9 +5812,10 @@ func (ctx *loweringContext) lowerLog2(bindingName string, args []string, binding
 type LowerToStackOptions struct {
 	// Groth16WAConfig is a pre-loaded witness-assisted Groth16 verifier
 	// configuration (verifying key + threshold). When non-nil, any method
-	// containing a call to assertGroth16WitnessAssisted is emitted with
-	// EmitGroth16VerifierWitnessAssisted as a method-entry preamble using
-	// this config.
+	// containing a call to assertGroth16WitnessAssistedWithMSM is emitted
+	// with EmitGroth16VerifierWitnessAssistedWithMSM as a method-entry
+	// preamble using this config. (assertGroth16WitnessAssisted is refused
+	// whatever this holds — GK-BUG-006.)
 	//
 	// The compiler-level layer is responsible for loading the SP1 vk.json
 	// file and building the Groth16Config (the codegen package cannot
@@ -6138,48 +6144,176 @@ func methodUsesCheckPreimageRec(
 	return false
 }
 
-// methodUsesGroth16WAPreamble scans a method's bindings for the
-// assertGroth16WitnessAssisted marker call. If present, the method is
-// emitted with the witness-assisted Groth16 verifier as a method-entry
-// preamble. The marker may appear anywhere in the body (typically as the
-// first statement, but the codegen does not enforce this — the preamble
-// is always inserted at the very start of the method, before regular
-// arg binding).
+// groth16WARawMarkerRefusal is the GK-BUG-006 diagnostic for the raw marker.
+// EmitGroth16VerifierWitnessAssisted never sees the public inputs (its only
+// check on prepared_inputs is an on-curve test), so a verifier built from it
+// accepts an honest proof of ANY statement the spender picks. The emitter
+// stays an internal/test primitive; contracts cannot reach it.
+const groth16WARawMarkerRefusal = "assertGroth16WitnessAssisted() is refused: the raw witness-assisted Groth16 " +
+	"verifier never sees the public inputs, so it accepts an honest proof of any statement the spender " +
+	"chooses (GK-BUG-006). Call assertGroth16WitnessAssistedWithMSM() instead and bind the statement with " +
+	"pinnedPublicInputs in the vk.json or groth16PublicInput(i) assertions in the method body"
+
+// methodUsesGroth16WAPreamble scans a method's bindings for either
+// witness-assisted Groth16 marker call. If present, the method is emitted
+// with the witness-assisted Groth16 verifier as a method-entry preamble
+// (or refused, for the raw marker — see groth16WARawMarkerRefusal). The
+// marker may appear anywhere in the body (typically as the first
+// statement, but the codegen does not enforce this — the preamble is
+// always inserted at the very start of the method, before regular arg
+// binding).
 func methodUsesGroth16WAPreamble(bindings []ir.ANFBinding) bool {
-	return groth16WAMarkerRec(bindings) != ""
+	raw, msm := groth16WAMarkers(bindings)
+	return raw || msm
 }
 
 // methodUsesGroth16WAPreambleWithMSM returns true when the method's body
 // contains the MSM-binding marker assertGroth16WitnessAssistedWithMSM.
-// Determines which of the two preamble codegen paths to invoke.
 func methodUsesGroth16WAPreambleWithMSM(bindings []ir.ANFBinding) bool {
-	return groth16WAMarkerRec(bindings) == "assertGroth16WitnessAssistedWithMSM"
+	_, msm := groth16WAMarkers(bindings)
+	return msm
 }
 
-// groth16WAMarkerRec walks if/loop arms (R-158). A top-level-only scan
-// silently selected the unsound no-preamble variant when the marker sat
-// inside a branch — the same class methodUsesCheckPreimageRec already
-// closed for check_preimage.
-func groth16WAMarkerRec(bindings []ir.ANFBinding) string {
-	for _, b := range bindings {
-		if b.Value.Kind == "call" && (b.Value.Func == "assertGroth16WitnessAssisted" || b.Value.Func == "assertGroth16WitnessAssistedWithMSM") {
-			return b.Value.Func
-		}
-		if b.Value.Kind == "if" {
-			if k := groth16WAMarkerRec(b.Value.Then); k != "" {
-				return k
-			}
-			if k := groth16WAMarkerRec(b.Value.Else); k != "" {
-				return k
-			}
-		}
-		if b.Value.Kind == "loop" {
-			if k := groth16WAMarkerRec(b.Value.Body); k != "" {
-				return k
-			}
+// groth16WAUnboundStatementMessage is frontend.Groth16WAUnboundStatementMessage
+// (codegen does not import the frontend); the two texts must stay identical.
+func groth16WAUnboundStatementMessage(method string) string {
+	return fmt.Sprintf("method '%s' calls assertGroth16WitnessAssistedWithMSM() but does not bind the proved statement: "+
+		"the five public inputs are the spender's choice, so the verifier would accept an honest proof of any statement. "+
+		"Pin at least one slot with pinnedPublicInputs in the --groth16-wa-vk vk.json, or add a top-level "+
+		"assert(groth16PublicInput(i) == <value>) to the method, where <value> is built from literals and readonly "+
+		"contract properties only (no method parameter, local, mutable property or other groth16PublicInput)", method)
+}
+
+// groth16WAStatementBoundInBody is the ANF form of the R2-MSM-UNBOUND body
+// rule (frontend/groth16_wa_binding.go): some TOP-LEVEL binding is an assert
+// whose value is a bin_op === / == with one operand a groth16PublicInput call
+// on a load_const in [0, 4] and the other fixed. Fixed: load_const (an
+// @ref: alias is followed), load_prop of a readonly property, unary_op /
+// bin_op over fixed refs, and a call (not groth16PublicInput) with at least
+// one argument, all fixed. A ref that is not an earlier top-level binding of
+// this method (a parameter named directly, a branch-local) is not fixed, and
+// neither is a name the method binds more than once or inside an if / loop
+// arm (a reassigned local). Locals are bindings here, so this accepts a superset of the frontend rule.
+func groth16WAStatementBoundInBody(body []ir.ANFBinding, properties []ir.ANFProperty) bool {
+	props := make(map[string]bool, len(properties))
+	for _, p := range properties {
+		if p.Readonly { // a mutable property can be assigned from a parameter
+			props[p.Name] = true
 		}
 	}
-	return ""
+	// A name bound more than once in the method, or inside an if / loop arm,
+	// does not hold one value: `defs` resolves by name at the assert, so a
+	// later or nested re-binding (a local reassigned from a parameter) would
+	// otherwise pass for the fixed first binding. Such a name is never fixed.
+	seen := make(map[string]int)
+	var count func(bs []ir.ANFBinding, nested bool)
+	count = func(bs []ir.ANFBinding, nested bool) {
+		for _, b := range bs {
+			seen[b.Name]++
+			if nested {
+				seen[b.Name]++
+			}
+			count(b.Value.Then, true)
+			count(b.Value.Else, true)
+			count(b.Value.Body, true)
+		}
+	}
+	count(body, false)
+	defs := make(map[string]ir.ANFValue, len(body))
+	var fixed func(ref string, depth int) bool
+	fixed = func(ref string, depth int) bool {
+		v, ok := defs[ref]
+		if !ok || depth > 64 || seen[ref] > 1 {
+			return false
+		}
+		switch v.Kind {
+		case "load_const":
+			if v.ConstString != nil && strings.HasPrefix(*v.ConstString, "@ref:") {
+				return fixed((*v.ConstString)[5:], depth+1)
+			}
+			return true
+		case "load_prop":
+			return props[v.Name]
+		case "unary_op":
+			return fixed(v.Operand, depth+1)
+		case "bin_op":
+			return fixed(v.Left, depth+1) && fixed(v.Right, depth+1)
+		case "call":
+			if v.Func == "groth16PublicInput" || len(v.Args) == 0 {
+				return false
+			}
+			for _, a := range v.Args {
+				if !fixed(a, depth+1) {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	pubRead := func(ref string) bool {
+		v, ok := defs[ref]
+		if !ok || seen[ref] > 1 || v.Kind != "call" || v.Func != "groth16PublicInput" || len(v.Args) != 1 {
+			return false
+		}
+		idx, ok := defs[v.Args[0]]
+		if !ok || seen[v.Args[0]] > 1 || idx.Kind != "load_const" {
+			return false
+		}
+		var n *big.Int
+		switch {
+		case idx.ConstBigInt != nil:
+			n = idx.ConstBigInt
+		case idx.ConstInt != nil:
+			n = big.NewInt(*idx.ConstInt)
+		default:
+			return false
+		}
+		return n.Sign() >= 0 && n.Cmp(big.NewInt(4)) <= 0
+	}
+	for _, b := range body {
+		if b.Value.Kind == "assert" {
+			if eq, ok := defs[b.Value.ValueRef]; ok && seen[b.Value.ValueRef] == 1 && eq.Kind == "bin_op" && (eq.Op == "===" || eq.Op == "==") {
+				if (pubRead(eq.Left) && fixed(eq.Right, 0)) || (pubRead(eq.Right) && fixed(eq.Left, 0)) {
+					return true
+				}
+			}
+		}
+		defs[b.Name] = b.Value
+	}
+	return false
+}
+
+// groth16WAMarkers reports which witness-assisted Groth16 markers a method
+// body calls, walking if/loop arms (R-158: a top-level-only scan silently
+// selected the unsound no-preamble variant when the marker sat inside a
+// branch — the same class methodUsesCheckPreimageRec closed for
+// check_preimage). It collects EVERY marker rather than returning the first
+// one met (GK-BUG-006): a method mixing the two used to get whichever came
+// first.
+func groth16WAMarkers(bindings []ir.ANFBinding) (raw, msm bool) {
+	for _, b := range bindings {
+		if b.Value.Kind == "call" {
+			switch b.Value.Func {
+			case "assertGroth16WitnessAssisted":
+				raw = true
+			case "assertGroth16WitnessAssistedWithMSM":
+				msm = true
+			}
+		}
+		var arms [][]ir.ANFBinding
+		if b.Value.Kind == "if" {
+			arms = append(arms, b.Value.Then, b.Value.Else)
+		}
+		if b.Value.Kind == "loop" {
+			arms = append(arms, b.Value.Body)
+		}
+		for _, arm := range arms {
+			r, m := groth16WAMarkers(arm)
+			raw, msm = raw || r, msm || m
+		}
+	}
+	return raw, msm
 }
 
 // emitGroth16WAPreamble emits the witness-assisted BN254 Groth16 verifier
@@ -6201,60 +6335,41 @@ func groth16WAMarkerRec(bindings []ir.ANFBinding) string {
 //  1. OP_TOALTSTACK × N — move N named params from main top to alt top
 //     (in reverse declaration order, so the bottommost named param ends
 //     up on the alt-stack top).
-//  2. EmitGroth16VerifierWitnessAssisted[WithMSM] — runs the full verifier.
-//     The raw variant leaves only the truthy marker on main. The MSM
-//     variant additionally leaves _pub_0 .. _pub_4 UNDER the truthy
-//     marker (so the method body can reference the SP1 public-input
-//     scalars via groth16PublicInput(i)).
+//  2. EmitGroth16VerifierWitnessAssistedWithMSM — runs the full verifier
+//     and leaves _pub_0 .. _pub_4 UNDER the truthy marker (so the method
+//     body can reference the SP1 public-input scalars via
+//     groth16PublicInput(i)). The raw EmitGroth16VerifierWitnessAssisted
+//     is never used here: contracts cannot reach it (GK-BUG-006).
 //  3. OP_DROP — discard the truthy marker.
-//  4. (MSM only) OP_TOALTSTACK × 5 — stash _pub_0 .. _pub_4 on the
-//     altstack temporarily, above the named params.
-//  5. OP_FROMALTSTACK × N — restore the named params in REVERSE pop
+//  4. OP_FROMALTSTACK × N — restore the named params in REVERSE pop
 //     order, so the original main-stack layout is reproduced.
-//  6. (MSM only) OP_FROMALTSTACK × 5 — restore _pub_0 .. _pub_4 on top
-//     of the named params (final main stack: [..., named_params...,
-//     _pub_0, _pub_1, _pub_2, _pub_3, _pub_4]).
+//  5. 5 × (push depth, OP_ROLL) — lift _pub_0 .. _pub_4 above the named
+//     params (final main stack: [..., named_params..., _pub_0, _pub_1,
+//     _pub_2, _pub_3, _pub_4]).
 //
 // Stack-model invariant: sm.depth() == N before the preamble, and
-// sm.depth() == N + 5 after the MSM-binding preamble (N + 0 after the
-// raw preamble). During the preamble the model and the runtime stack
-// diverge wildly (the verifier internally manipulates hundreds of
-// intermediates), but nothing inside the preamble consults sm so the
-// divergence is safe. At the end, runtime main depth == sm.depth() —
+// sm.depth() == N + 5 after it. During the preamble the model and the
+// runtime stack diverge wildly (the verifier internally manipulates
+// hundreds of intermediates), but nothing inside the preamble consults sm
+// so the divergence is safe. At the end, runtime main depth == sm.depth() —
 // agreement is restored before normal lowerBindings runs.
 //
-// Source: codegen.EmitGroth16VerifierWitnessAssisted[WithMSM] in
+// Source: codegen.EmitGroth16VerifierWitnessAssistedWithMSM in
 // bn254_groth16.go.
-func emitGroth16WAPreamble(ctx *loweringContext, config Groth16Config, useMSM bool) {
+func emitGroth16WAPreamble(ctx *loweringContext, config Groth16Config) {
 	namedDepth := ctx.sm.depth()
 
 	for i := 0; i < namedDepth; i++ {
 		ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
 	}
 
-	if useMSM {
-		EmitGroth16VerifierWitnessAssistedWithMSM(func(op StackOp) {
-			ctx.ops = append(ctx.ops, op)
-		}, config)
-	} else {
-		EmitGroth16VerifierWitnessAssisted(func(op StackOp) {
-			ctx.ops = append(ctx.ops, op)
-		}, config)
-	}
+	EmitGroth16VerifierWitnessAssistedWithMSM(func(op StackOp) {
+		ctx.ops = append(ctx.ops, op)
+	}, config)
 
 	ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_DROP"})
 
-	if !useMSM {
-		// Raw variant: nothing on main from the verifier, alt still holds
-		// the named params. Pop them back in reverse push order so the
-		// original main layout is reproduced.
-		for i := 0; i < namedDepth; i++ {
-			ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-		}
-		return
-	}
-
-	// MSM variant: main currently holds [_pub_0, _pub_1, _pub_2, _pub_3,
+	// Main currently holds [_pub_0, _pub_1, _pub_2, _pub_3,
 	// _pub_4] (top = _pub_4) and alt holds the named params [named_shallow
 	// (bottom) ... named_deep (top)] from the initial shuttle.
 	//
@@ -6435,24 +6550,31 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	// runs, the witness items are gone and the declared method params
 	// are at the top of stack — exactly the layout the rest of the
 	// lowering pipeline expects.
-	if methodUsesGroth16WAPreamble(method.Body) {
+	if raw, msm := groth16WAMarkers(method.Body); raw || msm {
+		// GK-BUG-006: the raw marker is refused outright (see
+		// groth16WARawMarkerRefusal), and so is a method mixing the two,
+		// which used to get whichever marker the scan met first.
+		if raw && msm {
+			return nil, fmt.Errorf(
+				"method %q calls both assertGroth16WitnessAssisted() and assertGroth16WitnessAssistedWithMSM(); a method may use one witness-assisted Groth16 verifier, and the raw one is refused: %s",
+				method.Name, groth16WARawMarkerRefusal,
+			)
+		}
+		if raw {
+			return nil, fmt.Errorf("method %q: %s", method.Name, groth16WARawMarkerRefusal)
+		}
 		if opts.Groth16WAConfig == nil {
 			return nil, fmt.Errorf(
-				"method %q calls assertGroth16WitnessAssisted but no Groth16WAConfig was supplied to the codegen (set CompileOptions.Groth16WAVKey to a SP1 vk.json path)",
+				"method %q calls assertGroth16WitnessAssistedWithMSM but no Groth16WAConfig was supplied to the codegen (set CompileOptions.Groth16WAVKey to a SP1 vk.json path)",
 				method.Name,
 			)
 		}
-		useMSM := methodUsesGroth16WAPreambleWithMSM(method.Body)
-		if !useMSM && opts.Groth16WAConfig.HasPinnedPublicInputs() {
-			// The raw variant never sees the public-input scalars, so a
-			// pin would be silently unenforced. Refuse rather than emit a
-			// verifier that does not do what the vk.json says.
-			return nil, fmt.Errorf(
-				"method %q calls assertGroth16WitnessAssisted but the Groth16 vk.json pins public inputs (pinnedPublicInputs); only assertGroth16WitnessAssistedWithMSM enforces pins — call that instead, or remove the field",
-				method.Name,
-			)
+		// R2-MSM-UNBOUND: the --ir copy of the typecheck rule (see
+		// frontend/groth16_wa_binding.go). --ir input never runs the frontend.
+		if !opts.Groth16WAConfig.HasPinnedPublicInputs() && !groth16WAStatementBoundInBody(method.Body, properties) {
+			return nil, fmt.Errorf("%s", groth16WAUnboundStatementMessage(method.Name))
 		}
-		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig, useMSM)
+		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig)
 		ctx.skipGroth16WAMarker = true
 	}
 

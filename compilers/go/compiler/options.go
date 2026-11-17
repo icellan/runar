@@ -55,17 +55,21 @@ type CompileOptions struct {
 	IncludeIR bool
 
 	// Groth16WAVKey is the path to a SP1-format Groth16 vk.json file. When
-	// non-empty, any method that calls runar.AssertGroth16WitnessAssisted is
-	// lowered with a witness-assisted BN254 Groth16 verifier preamble whose
-	// verifying key is loaded from this file. The VK becomes baked-in
-	// pushdata in the resulting locking script.
+	// non-empty, any method that calls runar.AssertGroth16WitnessAssistedWithMSM
+	// is lowered with the MSM-binding witness-assisted BN254 Groth16 verifier
+	// preamble whose verifying key (and optional pinnedPublicInputs) is
+	// loaded from this file. The VK becomes baked-in pushdata in the
+	// resulting locking script.
 	//
-	// When empty, calls to runar.AssertGroth16WitnessAssisted are rejected
-	// at stack-lowering time with an error pointing back at this option.
+	// When empty, calls to runar.AssertGroth16WitnessAssistedWithMSM are
+	// rejected at stack-lowering time with an error pointing back at this
+	// option. runar.AssertGroth16WitnessAssisted (the raw verifier, which
+	// binds no public input) is refused whatever this holds (GK-BUG-006).
 	//
 	// See compilers/go/codegen/bn254_groth16.go for the underlying emitter
-	// (EmitGroth16VerifierWitnessAssisted) and packages/runar-go/bn254witness
-	// for the matching prover-side witness generator.
+	// (EmitGroth16VerifierWitnessAssistedWithMSM) and
+	// packages/runar-go/bn254witness for the matching prover-side witness
+	// generator (BuildFromProofWithInputs).
 	Groth16WAVKey string
 
 	// SP1FriParams is an optional override for the SP1 FRI verifier

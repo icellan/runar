@@ -162,9 +162,13 @@ func TestConvergenceProof_WrongDelta_Rejected(t *testing.T) {
 
 	// Wrong deltaO — should be rejected
 	wrongDelta := big.NewInt(42)
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("proveConvergence", []interface{}{wrongDelta}, provider, signer, nil)
 	if err == nil {
 		t.Fatalf("expected call with wrong delta to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }

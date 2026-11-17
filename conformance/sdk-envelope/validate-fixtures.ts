@@ -245,7 +245,274 @@ function main(): void {
     if (!ok) fail(`${v._vector_id}: _canonical_sig does not verify for the payload`);
   }
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls validate against the TS reference.`);
+  // 7. GK-BUG-009 integer-token vectors (it*). Each must carry a signature
+  //    that verifies for its EXACT payload text (not a canonicalized copy,
+  //    which would normalise the token away), so a tier that accepts the
+  //    non-integer token returns ok:true instead of falling through to
+  //    bad-sig — the assertion cannot pass by accident.
+  const intTokenVectors = (fixture.rejection_vectors as Array<{
+    _vector_id?: string;
+    reason: string;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>).filter((v) => /^(it|nt)\d/.test(v._vector_id ?? ''));
+  if (!intTokenVectors.some((v) => /^it\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no it* (GK-BUG-009) vectors');
+  if (!intTokenVectors.some((v) => /^nt\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no nt* (GK-BUG-009 number grammar) vectors');
+  for (const v of intTokenVectors) {
+    // it*: a valid JSON number that is not an integer token -> envelope-mismatch.
+    // nt*: not a JSON number token at all (01, 1.) -> bad-json at parse time.
+    const want = v._vector_id!.startsWith('nt') ? 'bad-json' : 'envelope-mismatch';
+    if (v.reason !== want) fail(`${v._vector_id}: reason must be ${want}`);
+    const d = Hash.sha256(Utils.toArray(v.envelope.payload, 'utf8'));
+    const ok = ecdsaVerifyRaw(
+      new BigNumber(d),
+      Signature.fromDER(Utils.toArray(v.envelope.sig, 'hex')),
+      PublicKey.fromDER(Utils.toArray(v.envelope.pubkey, 'hex')),
+    );
+    if (!ok) fail(`${v._vector_id}: signature does not verify for its payload text`);
+  }
+
+  // 8. GK-BUG-008 allowlist vectors. Must carry the row Go failed (an EMPTY
+  //    list -> pubkey-not-allowed) and the null control (no allowlist -> ok).
+  const allowlistVectors = fixture.allowlist_vectors as Array<{
+    _vector_id?: string;
+    expected_keys: string[] | null;
+    expect_ok: boolean;
+    reason?: string;
+  }>;
+  if (!Array.isArray(allowlistVectors) || allowlistVectors.length === 0) fail('allowlist_vectors missing or empty');
+  if (!allowlistVectors.some((v) => Array.isArray(v.expected_keys) && v.expected_keys.length === 0 && !v.expect_ok && v.reason === 'pubkey-not-allowed')) {
+    fail('allowlist_vectors must carry an empty-list vector rejected as pubkey-not-allowed');
+  }
+  if (!allowlistVectors.some((v) => v.expected_keys === null && v.expect_ok)) {
+    fail('allowlist_vectors must carry a null (not supplied) control that is accepted');
+  }
+
+  // 9. R2-DUPKEY duplicate-key vectors. Each payload must be well-formed JSON
+  //    (JSON.parse accepts it) within the depth bound, so a duplicate key is
+  //    the ONLY thing wrong with it; a duplicate must really be present in
+  //    every rejected vector and absent from every dkc* control; and every
+  //    signature must verify for the exact payload text, except the
+  //    *-precedes-bad-sig vector that pins bad-json ahead of bad-sig (its
+  //    signature must NOT verify).
+  const verifiesFor = (e: { payload: string; sig: string; pubkey: string }): boolean => {
+    try {
+      return ecdsaVerifyRaw(
+        new BigNumber(Hash.sha256(Utils.toArray(e.payload, 'utf8'))),
+        Signature.fromDER(Utils.toArray(e.sig, 'hex')),
+        PublicKey.fromDER(Utils.toArray(e.pubkey, 'hex')),
+      );
+    } catch {
+      return false;
+    }
+  };
+  // Independent duplicate-key oracle: a small recursive-descent reader over
+  // text JSON.parse has already accepted (so no error paths), keys decoded
+  // with JSON.parse, one key set per object.
+  const hasDuplicateKey = (text: string): boolean => {
+    let i = 0;
+    let dup = false;
+    const ws = (): void => {
+      while (' \t\n\r'.includes(text[i] ?? 'x')) i++;
+    };
+    const str = (): string => {
+      const start = i++;
+      while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+      i++;
+      return JSON.parse(text.slice(start, i)) as string;
+    };
+    const value = (): void => {
+      ws();
+      const c = text[i];
+      if (c === '{') {
+        i++;
+        const keys = new Set<string>();
+        ws();
+        if (text[i] === '}') {
+          i++;
+          return;
+        }
+        for (;;) {
+          ws();
+          const k = str();
+          if (keys.has(k)) dup = true;
+          keys.add(k);
+          ws();
+          i++; // ':'
+          value();
+          ws();
+          if (text[i++] === '}') return;
+        }
+      } else if (c === '[') {
+        i++;
+        ws();
+        if (text[i] === ']') {
+          i++;
+          return;
+        }
+        for (;;) {
+          value();
+          ws();
+          if (text[i++] === ']') return;
+        }
+      } else if (c === '"') {
+        str();
+      } else {
+        while (i < text.length && !',]} \t\n\r'.includes(text[i]!)) i++;
+      }
+    };
+    value();
+    return dup;
+  };
+  const dupVectors = fixture.duplicate_key_vectors as Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: string;
+    envelope: { payload: string; sig: string; pubkey: string; nonce: number; expiresAt: number };
+  }>;
+  if (!Array.isArray(dupVectors) || dupVectors.length === 0) fail('duplicate_key_vectors missing or empty');
+  const verifyNowMs = fixture.verify_now_ms as number;
+  let sawDupControl = false;
+  let sawDupBeforeBadSig = false;
+  let sawExpiryBeforeDup = false;
+  for (const v of dupVectors) {
+    const id = v._vector_id;
+    try {
+      JSON.parse(v.envelope.payload);
+    } catch {
+      fail(`${id}: payload is not well-formed JSON, so it would be bad-json for a reason other than the duplicate`);
+    }
+    if (measureDepth(v.envelope.payload) > depthLimit) fail(`${id}: payload deeper than payload_depth_limit`);
+    if (hasDuplicateKey(v.envelope.payload) !== !v.expect_ok) {
+      fail(`${id}: expect_ok=${v.expect_ok} but the payload ${v.expect_ok ? 'HAS' : 'has NO'} duplicate key`);
+    }
+    if (v.envelope.pubkey !== ALICE_PUB_HEX) fail(`${id}: pubkey is not the documented signer`);
+    const sigOk = verifiesFor(v.envelope);
+    const expired = v.envelope.expiresAt < verifyNowMs - 5_000;
+    if (v.expect_ok) {
+      if (!sigOk) fail(`${id}: control signature does not verify`);
+      sawDupControl = true;
+    } else if (expired) {
+      if (v.reason !== 'expired') fail(`${id}: expired envelope must carry reason expired`);
+      sawExpiryBeforeDup = true;
+    } else if (id.includes('precedes-bad-sig')) {
+      if (sigOk) fail(`${id}: the bad-json-before-bad-sig vector must carry a signature that does NOT verify`);
+      if (v.reason !== 'bad-json') fail(`${id}: unverifiable duplicate must still be bad-json (precedes bad-sig)`);
+      sawDupBeforeBadSig = true;
+    } else if (!sigOk) {
+      fail(`${id}: signature does not verify for its exact payload text`);
+    } else if (v.reason !== 'bad-json') {
+      fail(`${id}: reason must be bad-json`);
+    }
+  }
+  if (!sawDupControl) fail('duplicate_key_vectors carries no accepted (dkc*) control');
+  if (!sawDupBeforeBadSig) fail('duplicate_key_vectors carries no bad-json-before-bad-sig precedence vector');
+  if (!sawExpiryBeforeDup) fail('duplicate_key_vectors carries no expired-before-bad-json precedence vector');
+
+  // 10. R2-JAVA-JSON string-grammar vectors (jj*), NaN / Infinity literal
+  //     vectors (pj*), trailing-data vectors (tj*) and comment vectors (cj*).
+  //     Each payload must be rejected by JSON.parse (raw control character,
+  //     malformed \u escape, non-JSON constant, text after the value, comment) and carry a signature that verifies for its exact text, so a
+  //     tier that accepts the string returns ok:true rather than bad-sig.
+  const jjVectors = (fixture.rejection_vectors as Array<{
+    _vector_id?: string;
+    reason: string;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>).filter((v) => /^(jj|pj|tj|cj)\d/.test(v._vector_id ?? ''));
+  if (!jjVectors.some((v) => /^jj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no jj* (R2-JAVA-JSON) vectors');
+  if (!jjVectors.some((v) => /^pj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no pj* (NaN / Infinity) vectors');
+  if (!jjVectors.some((v) => /^tj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no tj* (trailing data) vectors');
+  if (!jjVectors.some((v) => /^cj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no cj* (comment) vectors');
+  for (const v of jjVectors) {
+    if (v.reason !== 'bad-json') fail(`${v._vector_id}: reason must be bad-json`);
+    let parsedOk = true;
+    try {
+      JSON.parse(v.envelope.payload);
+    } catch {
+      parsedOk = false;
+    }
+    if (parsedOk) fail(`${v._vector_id}: JSON.parse ACCEPTS the payload, so it pins nothing`);
+    if (!verifiesFor(v.envelope)) fail(`${v._vector_id}: signature does not verify for its payload text`);
+  }
+
+  // 11. R3-GO-UTF8 invalid-UTF-8 vectors (ju*) + the multi-byte control
+  //     (juc1). The payload rides as payload_hex. Each ju* payload must be
+  //     refused by a strict UTF-8 decode, juc1 accepted; every signature must
+  //     verify over sha256 of exactly those bytes, so a tier that accepts a ju*
+  //     payload returns ok:true rather than bad-sig.
+  const utf8Vectors = fixture.invalid_utf8_vectors as Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: string;
+    payload_hex: string;
+    sig: string;
+    pubkey: string;
+    nonce: number;
+    expiresAt: number;
+  }>;
+  if (!Array.isArray(utf8Vectors) || utf8Vectors.length === 0) fail('invalid_utf8_vectors missing or empty');
+  if (!utf8Vectors.some((v) => v.expect_ok)) fail('invalid_utf8_vectors carries no accepted (juc*) control');
+  const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+  for (const v of utf8Vectors) {
+    const id = v._vector_id;
+    const bytes = Utils.toArray(v.payload_hex, 'hex');
+    let decoded: string | null = null;
+    try {
+      decoded = strictUtf8.decode(Uint8Array.from(bytes));
+    } catch {
+      decoded = null;
+    }
+    if (v.expect_ok && decoded === null) fail(`${id}: control payload is not well-formed UTF-8`);
+    if (!v.expect_ok && decoded !== null) fail(`${id}: payload IS well-formed UTF-8, so it pins nothing`);
+    if (!v.expect_ok && v.reason !== 'bad-json') fail(`${id}: reason must be bad-json`);
+    if (v.pubkey !== ALICE_PUB_HEX) fail(`${id}: pubkey is not the documented signer`);
+    if (v.nonce !== fixture.nonce || v.expiresAt !== fixture.expires_at) fail(`${id}: nonce/expiresAt are not the fixture's`);
+    let sigOk = false;
+    try {
+      sigOk = ecdsaVerifyRaw(
+        new BigNumber(Hash.sha256(bytes)),
+        Signature.fromDER(Utils.toArray(v.sig, 'hex')),
+        PublicKey.fromDER(Utils.toArray(v.pubkey, 'hex')),
+      );
+    } catch {
+      sigOk = false;
+    }
+    if (!sigOk) fail(`${id}: signature does not verify over sha256(payload bytes)`);
+  }
+
+  // 12. R3-OUTER-DUPKEY outer-envelope wire texts. Each od* must carry a
+  //     duplicate member, and a keep-LAST decode (JSON.parse) of it must yield
+  //     an envelope whose inner nonce/expiresAt match and whose signature
+  //     verifies -- so a tier that silently keeps the last member accepts it.
+  //     odc1 carries no duplicate and its exact-case members are valid_envelope.
+  const outerVectors = fixture.outer_duplicate_key_vectors as Array<{
+    _vector_id: string;
+    expect_decode_ok: boolean;
+    wire_text: string;
+  }>;
+  if (!Array.isArray(outerVectors) || outerVectors.length === 0) fail('outer_duplicate_key_vectors missing or empty');
+  if (!outerVectors.some((v) => v.expect_decode_ok)) fail('outer_duplicate_key_vectors carries no decodable (odc*) control');
+  for (const v of outerVectors) {
+    const id = v._vector_id;
+    let lastWins: { payload: string; sig: string; pubkey: string; nonce: number; expiresAt: number };
+    try {
+      lastWins = JSON.parse(v.wire_text);
+    } catch {
+      fail(`${id}: wire_text is not well-formed JSON`);
+    }
+    if (hasDuplicateKey(v.wire_text) !== !v.expect_decode_ok) {
+      fail(`${id}: expect_decode_ok=${v.expect_decode_ok} but the wire text ${v.expect_decode_ok ? 'HAS' : 'has NO'} duplicate member`);
+    }
+    const inner = JSON.parse(lastWins.payload) as { nonce: number; expiresAt: number };
+    if (inner.nonce !== lastWins.nonce || inner.expiresAt !== lastWins.expiresAt) {
+      fail(`${id}: keep-last decode is envelope-mismatch, so the vector has no teeth`);
+    }
+    if (!verifiesFor(lastWins)) fail(`${id}: keep-last decode does not verify, so the vector has no teeth`);
+    if (v.expect_decode_ok && lastWins.payload !== fixture.valid_envelope.payload) {
+      fail(`${id}: control's exact-case payload is not valid_envelope's`);
+    }
+  }
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors + ${dupVectors.length} duplicate-key vectors + ${jjVectors.length} JSON-grammar vectors + ${utf8Vectors.length} invalid-UTF-8 vectors + ${outerVectors.length} outer-envelope duplicate-key vectors validate against the TS reference.`);
 }
 
 main();

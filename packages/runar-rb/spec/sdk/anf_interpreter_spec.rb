@@ -938,9 +938,9 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
       expect(mod.eval_call('log2', [9])).to eq(3)  # floor
     end
 
-    it 'casts to bool (1 for truthy, 0 for falsy)' do
-      expect(mod.eval_call('bool', [1])).to eq(1)
-      expect(mod.eval_call('bool', [0])).to eq(0)
+    it 'casts to bool (true for truthy, false for falsy; GK-BUG-010)' do
+      expect(mod.eval_call('bool', [1])).to be(true)
+      expect(mod.eval_call('bool', [0])).to be(false)
     end
 
     it 'computes mulDiv' do

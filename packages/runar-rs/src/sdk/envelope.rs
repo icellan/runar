@@ -326,6 +326,64 @@ impl VerifyEnvelopeReason {
 pub const MAX_ENVELOPE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ENVELOPE_FIELD_BYTES: usize = 4 * 1024 * 1024;
 
+/// R2-DUPKEY: does any object in the payload carry the same key twice?
+///
+/// serde_json's `Value` keeps the LAST of two equal keys, so a payload
+/// `{"nonce":1,"nonce":<outer>}` verified ok here while a keep-first tier said
+/// envelope-mismatch. Decided on the TEXT because the parsed map no longer
+/// shows the duplicate. Runs only on text serde_json has already ACCEPTED,
+/// under the depth guard, so it can read the grammar directly. Keys are
+/// compared after unescaping (each key's quoted text goes back through
+/// serde_json), so "a", "\u0061" and a surrogate-pair spelling of one code
+/// point all collide. One key set per open object: the same key in sibling or
+/// nested objects is fine. Flat scan over bytes; every delimiter is ASCII and
+/// no UTF-8 continuation byte can equal one.
+fn payload_has_duplicate_key(payload: &str) -> bool {
+    // None = array frame; Some((keys, expect_key)) = object frame.
+    let mut frames: Vec<Option<(std::collections::HashSet<String>, bool)>> = Vec::new();
+    let b = payload.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'"' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                if j >= b.len() {
+                    return true; // unterminated: unreachable on parsed text
+                }
+                if let Some(Some((keys, expect_key))) = frames.last_mut() {
+                    if *expect_key {
+                        let key = match serde_json::from_str::<String>(&payload[i..=j]) {
+                            Ok(k) => k,
+                            Err(_) => return true, // unreachable on parsed text; malformed anyway
+                        };
+                        if !keys.insert(key) {
+                            return true;
+                        }
+                        *expect_key = false;
+                    }
+                }
+                i = j;
+            }
+            b'{' => frames.push(Some((std::collections::HashSet::new(), true))),
+            b'[' => frames.push(None),
+            b'}' | b']' => {
+                frames.pop();
+            }
+            b',' => {
+                if let Some(Some((_, expect_key))) = frames.last_mut() {
+                    *expect_key = true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Maximum payload nesting `verify_envelope` will parse: the number of containers
 /// enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
 /// R-260.
@@ -344,7 +402,7 @@ pub const MAX_ENVELOPE_FIELD_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
 /// so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-/// also far above what the wire needs: the deepest of the 199 checked-in
+/// also far above what the wire needs: the deepest of the 201 checked-in
 /// conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
 /// tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
 /// bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -471,6 +529,11 @@ pub fn verify_envelope(opts: VerifyEnvelopeOpts<'_>) -> VerifyEnvelopeResult {
         Ok(Value::Object(m)) => m,
         _ => return reject(VerifyEnvelopeReason::BadJson, None),
     };
+    // R2-DUPKEY: a duplicate key is bad-json, decided here with every other
+    // parse failure (after expired, before envelope-mismatch).
+    if payload_has_duplicate_key(&env.payload) {
+        return reject(VerifyEnvelopeReason::BadJson, None);
+    }
 
     // 4. Inner nonce / expiresAt must match outer fields.
     let inner_nonce = parsed.get("nonce").and_then(|v| v.as_i64());

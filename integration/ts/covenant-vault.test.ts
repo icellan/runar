@@ -47,7 +47,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 describe('CovenantVault', () => {
   it('should compile the CovenantVault contract', () => {
@@ -157,8 +157,8 @@ describe('CovenantVault', () => {
     // Call spend with walletB — checkSig will fail on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('spend', [null, null], provider, wrongSigner),
-    ).rejects.toThrow();
+    );
   });
 });

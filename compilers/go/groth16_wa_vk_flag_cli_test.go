@@ -13,15 +13,15 @@ import (
 // `--source`/`--ir` compile path (as opposed to the separate `groth16-wa`
 // subcommand, which synthesizes a bare fixed-VK verifier and takes no
 // source file at all) had no way to set CompileOptions.Groth16WAVKey, so a
-// user contract that calls runar.AssertGroth16WitnessAssisted among other
-// business logic could never be compiled from the CLI — only from the Go
-// library API (see integration/go/helpers.CompileToSDKArtifactWithGroth16WAVKey).
+// user contract that calls runar.AssertGroth16WitnessAssistedWithMSM among
+// other business logic could never be compiled from the CLI — only from the
+// Go library API (see integration/go/helpers.CompileToSDKArtifactWithGroth16WAVKey).
 //
 // GAP-CX-GAP-004.
 //
 // What this proves: the `--groth16-wa-vk` flag on the main --source/--ir
 // compile path wires through to CompileOptions.Groth16WAVKey end to end —
-// a contract calling assertGroth16WitnessAssisted fails without the flag
+// a contract calling assertGroth16WitnessAssistedWithMSM fails without the flag
 // (for the documented reason) and succeeds, emitting a script of the
 // expected order of magnitude, with it; this holds for both --source and
 // --ir inputs.
@@ -152,8 +152,9 @@ func buildGroth16WAVKFlagCLI(t *testing.T) string {
 func groth16WAVKFlagSourcePath(t *testing.T) string {
 	t.Helper()
 	// StatelessGroth16WA is the minimal contract that calls
-	// runar.AssertGroth16WitnessAssisted: no state, no constructor args,
-	// just the Mode 3 preamble plus one trivial assert.
+	// runar.AssertGroth16WitnessAssistedWithMSM: no state, one readonly
+	// constructor arg (the program verifying-key hash its body pins public
+	// input 0 to), just the Mode 3 preamble plus that assert.
 	abs, err := filepath.Abs(filepath.Join("..", "..", "integration", "go", "contracts", "StatelessGroth16WA.runar.go"))
 	if err != nil {
 		t.Fatalf("resolve source path: %v", err)

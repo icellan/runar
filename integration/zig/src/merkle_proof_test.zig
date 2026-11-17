@@ -202,7 +202,7 @@ test "MerkleProof_Sha256_WrongLeaf_Rejected" {
     defer allocator.free(deploy_txid);
 
     // Call with wrong leaf — should be rejected on-chain
-    const broadcasts_before = rpc_provider.broadcast_attempts;
+    const probe = rpc_provider.rejectionProbe();
     const result = contract.call(
         "verifySha256",
         &[_]runar.StateValue{
@@ -224,7 +224,7 @@ test "MerkleProof_Sha256_WrongLeaf_Rejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+        try rpc_provider.expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED);
         std.log.info("MerkleProof correctly rejected wrong leaf", .{});
     }
 }

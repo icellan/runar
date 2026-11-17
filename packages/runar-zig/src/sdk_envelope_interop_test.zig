@@ -128,8 +128,61 @@ test "interop: every rejection vector returns the listed reason" {
         defer env.deinit(allocator);
         var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
         defer r.deinit();
-        try std.testing.expect(!r.ok);
-        try std.testing.expectEqualStrings(reason_wire, r.reason.?.wire());
+        const vid = if (rv.object.get("_vector_id")) |v| v.string else reason_wire;
+        if (r.ok) {
+            std.debug.print("rejection {s} ({s}): expected ok=false\n", .{ reason_wire, vid });
+            return error.TestUnexpectedResult;
+        }
+        if (!std.mem.eql(u8, reason_wire, r.reason.?.wire())) {
+            std.debug.print("rejection {s} ({s}): got {s}\n", .{ reason_wire, vid, r.reason.?.wire() });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list allows
+// nobody; a JSON null (not supplied) leaves `expected_keys` at its null
+// default and skips the check. al2 is the control that reddens if a fix
+// treats an absent allowlist like an empty one.
+test "interop: allowlist vectors (empty denies, null skips)" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const env = try envelopeFromJson(allocator, parsed.value.object.get("valid_envelope").?.object);
+    defer env.deinit(allocator);
+
+    const avs = parsed.value.object.get("allowlist_vectors").?.array;
+    try std.testing.expect(avs.items.len > 0);
+    for (avs.items) |av| {
+        const obj = av.object;
+        const vid = obj.get("_vector_id").?.string;
+        var opts = envelope.VerifyEnvelopeOpts{ .envelope = &env, .now_ms = now_ms };
+        var keys: std.ArrayList([]const u8) = .empty;
+        defer keys.deinit(allocator);
+        switch (obj.get("expected_keys").?) {
+            .array => |a| {
+                for (a.items) |k| try keys.append(allocator, k.string);
+                opts.expected_keys = keys.items;
+            },
+            else => {},
+        }
+        var r = try envelope.verifyEnvelope(allocator, opts);
+        defer r.deinit();
+        if (obj.get("expect_ok").?.bool) {
+            if (!r.ok) {
+                std.debug.print("{s}: expected ok=true, got reason={s}\n", .{ vid, if (r.reason) |x| x.wire() else "-" });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
     }
 }
 
@@ -358,6 +411,47 @@ test "interop: shared payload depth bound" {
     }
 }
 
+// R2-DUPKEY. A payload object with two members of the same key (compared
+// after unescaping, at any depth) is bad-json, decided in the parse step:
+// after expired, before envelope-mismatch / bad-sig. std.json's Value parser
+// already refuses a duplicate field by default (ParseOptions
+// .duplicate_field_behavior = .@"error"), so this tier pins that behaviour
+// rather than changing it; the dkc* controls (same key in DIFFERENT objects)
+// must stay ok.
+test "interop: duplicate-key vectors" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const vs = parsed.value.object.get("duplicate_key_vectors").?.array;
+    try std.testing.expect(vs.items.len > 0);
+    var failures: usize = 0;
+    for (vs.items) |v| {
+        const obj = v.object;
+        const vid = obj.get("_vector_id").?.string;
+        const e = obj.get("envelope").?.object;
+        const env = envelope.SignedEnvelope{
+            .payload = e.get("payload").?.string,
+            .sig = e.get("sig").?.string,
+            .pubkey = e.get("pubkey").?.string,
+            .nonce = e.get("nonce").?.integer,
+            .expiresAt = e.get("expiresAt").?.integer,
+        };
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        const want: []const u8 = if (obj.get("expect_ok").?.bool) "ok" else obj.get("reason").?.string;
+        const got: []const u8 = if (r.ok) "ok" else r.reason.?.wire();
+        if (!std.mem.eql(u8, want, got)) {
+            std.debug.print("{s}: got {s}, want {s}\n", .{ vid, got, want });
+            failures += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
 // F-296. The DoS size bound is hard-coded per tier; the fixture's
 // `size_limits` is the shared source of truth and every tier pins its own
 // constants to it. Then `size_vectors` is replayed: one byte over each limit
@@ -515,4 +609,71 @@ test "interop: explicit clock skew and now overrides" {
         }
         try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
     }
+}
+
+// GK-BUG-009 (it4). readI64 ran @intFromFloat on a JSON float, which is
+// safety-checked illegal behaviour (a PANIC in Debug/ReleaseSafe, UB in
+// ReleaseFast) for a value outside i64 such as 1e20 — reachable BEFORE the
+// ECDSA check, from any unsigned payload. Replayed on its own so the panic is
+// not masked by an earlier vector failing first in the loop above.
+test "interop: it4 nonce 1e20 is envelope-mismatch, not a panic" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    var found = false;
+    for (parsed.value.object.get("rejection_vectors").?.array.items) |rv| {
+        const vid = if (rv.object.get("_vector_id")) |v| v.string else continue;
+        if (!std.mem.eql(u8, vid, "it4-nonce-exponent-out-of-i64-1e20")) continue;
+        found = true;
+        const env = try envelopeFromJson(allocator, rv.object.get("envelope").?.object);
+        defer env.deinit(allocator);
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        try std.testing.expect(!r.ok);
+        try std.testing.expectEqualStrings("envelope-mismatch", r.reason.?.wire());
+    }
+    try std.testing.expect(found);
+}
+
+// R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. The bytes
+// cannot ride in a JSON string, so the fixture carries them as payload_hex and
+// this tier replays them raw. std.json refuses invalid UTF-8, so Zig already
+// answered bad-json; this pins it against a future scanner default. juc1
+// (well-formed multi-byte UTF-8) is the control.
+test "interop: invalid UTF-8 payload vectors" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const vs = parsed.value.object.get("invalid_utf8_vectors").?.array;
+    try std.testing.expect(vs.items.len > 0);
+    var failures: usize = 0;
+    for (vs.items) |v| {
+        const obj = v.object;
+        const vid = obj.get("_vector_id").?.string;
+        const payload = try envelope.hexToBytes(allocator, obj.get("payload_hex").?.string);
+        defer allocator.free(payload);
+        const env = envelope.SignedEnvelope{
+            .payload = payload,
+            .sig = obj.get("sig").?.string,
+            .pubkey = obj.get("pubkey").?.string,
+            .nonce = obj.get("nonce").?.integer,
+            .expiresAt = obj.get("expiresAt").?.integer,
+        };
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        const want: []const u8 = if (obj.get("expect_ok").?.bool) "ok" else obj.get("reason").?.string;
+        const got: []const u8 = if (r.ok) "ok" else r.reason.?.wire();
+        if (!std.mem.eql(u8, want, got)) {
+            std.debug.print("{s}: got {s}, want {s}\n", .{ vid, got, want });
+            failures += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
 }

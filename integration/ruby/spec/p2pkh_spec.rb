@@ -64,8 +64,8 @@ RSpec.describe 'P2PKH' do # rubocop:disable RSpec/DescribeClass
     contract.deploy(provider, wallet_a[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
     # Try to unlock with wallet_b's signer
-    expect do
+    expect_node_rejected(provider) do
       contract.call('unlock', [nil, nil], provider, wallet_b[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 end

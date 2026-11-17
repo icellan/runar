@@ -43,7 +43,10 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		want int
 	}{
 		{"Sha256Compress", EmitSha256Compress, 21298},
-		{"Sha256Finalize", EmitSha256Finalize, 63946},
+		// GK-BUG-013: 63946 -> 63947. The 9th OP_NUM2BIN byte (the msgBitLen
+		// sign / 2^64 byte) is checked with <00> OP_EQUALVERIFY instead of
+		// OP_DROPped, so msgBitLen must lie in [0, 2^64).
+		{"Sha256Finalize", EmitSha256Finalize, 63947},
 		{"Blake3Compress", EmitBlake3Compress, 10379},
 		{"Blake3Hash", EmitBlake3Hash, 10387},
 		// CL-BUG-095 (Point-length validation) deltas below: a Point/pubkey

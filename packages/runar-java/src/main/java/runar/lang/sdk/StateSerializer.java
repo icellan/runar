@@ -181,7 +181,20 @@ public final class StateSerializer {
             // 02 74727565: 3 bytes longer than the continuation the script's own
             // reader rebuilds, so hash256(outputs) never matched and the first
             // spend was impossible.
-            case "bool", "boolean" -> Boolean.TRUE.equals(value) ? "01" : "00";
+            //
+            // GK-BUG-010: only a Boolean. Boolean.TRUE.equals(value) silently
+            // wrote 00 for Integer 1 and "true", while other tiers used
+            // truthiness: one input, different on-chain bytes per tier.
+            // Refused in all seven, as toBigInteger refuses a non-integer.
+            case "bool", "boolean" -> {
+                if (!(value instanceof Boolean b)) {
+                    throw new IllegalArgumentException(String.format(
+                        "serializeState: state field \"%s\" (%s) must be a boolean, got %s. Coercing "
+                            + "anything else would write a flag the caller never supplied into the state section",
+                        label, fieldType, value == null ? "null" : value.getClass().getSimpleName()));
+                }
+                yield b ? "01" : "00";
+            }
             // Fixed-size byte types: raw hex, no framing needed. P256Point (64)
             // and P384Point (96) belong here because runar-lang's cast
             // constructors hard-assert those widths and all seven compilers emit

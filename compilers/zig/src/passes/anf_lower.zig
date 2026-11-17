@@ -104,6 +104,18 @@ pub const LowerError = error{
     /// `passes/typecheck.zig` refuses it with a located diagnostic; this is the
     /// backstop for callers that lower without typechecking (R-012).
     OutputIndexMustBeZero,
+    /// GK-GAP-013: a malformed intent-intrinsic call -- `extractPrevOutputScript`
+    /// with other than 2 or 3 arguments or a non-literal input index / prefix
+    /// length, `requireOutputP2PKH` with other than 3 arguments or a non-literal
+    /// output index. The typechecker refuses each shape with a located
+    /// diagnostic; lowering used to emit `load_const ""` in place of the hash
+    /// assertion / output pin. This is the backstop for callers that lower
+    /// without typechecking (R-012).
+    ExtractPrevOutputScriptArity,
+    ExtractPrevOutputScriptIndexNotLiteral,
+    ExtractPrevOutputScriptPrefixLenNotLiteral,
+    RequireOutputP2PKHArity,
+    RequireOutputP2PKHIndexNotLiteral,
     /// An output intrinsic (addOutput / addRawOutput / addDataOutput) inside a
     /// for-loop body (R-127). The body lowers into a sub-context whose output
     /// refs never reach the method's continuation hash, and merging them cannot
@@ -2728,12 +2740,12 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     //   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
     //   pushdata tail free to vary (BSVM Mode 3 step-in intent templates).
     if (std.mem.eql(u8, c.callee, "extractPrevOutputScript")) {
-        if (c.args.len != 2 and c.args.len != 3) {
-            return try ctx.emit(makeLoadConstString(ctx.allocator, ""));
-        }
+        // GK-GAP-013: refuse rather than emit an empty constant in place of
+        // the hash assertion.
+        if (c.args.len != 2 and c.args.len != 3) return LowerError.ExtractPrevOutputScriptArity;
         const idx: i64 = switch (c.args[0]) {
             .literal_int => |v| v,
-            else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
+            else => return LowerError.ExtractPrevOutputScriptIndexNotLiteral,
         };
         const param_name = try std.fmt.allocPrint(ctx.allocator, "_prevOutScript_{d}", .{idx});
         try ctx.recordAutoInjectedParam(param_name, .byte_string, "ByteString");
@@ -2748,7 +2760,7 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
         if (c.args.len == 3) {
             const prefix_len: i64 = switch (c.args[2]) {
                 .literal_int => |v| v,
-                else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
+                else => return LowerError.ExtractPrevOutputScriptPrefixLenNotLiteral,
             };
             const zero_ref = try ctx.emit(makeLoadConstInt(0));
             const prefix_len_ref = try ctx.emit(makeLoadConstInt(prefix_len));
@@ -2788,12 +2800,11 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     // makes that true. v1 therefore accepts index 0 ONLY (W2 / OutputInception);
     // see `LowerError.OutputIndexMustBeZero`.
     if (std.mem.eql(u8, c.callee, "requireOutputP2PKH")) {
-        if (c.args.len != 3) {
-            return try ctx.emit(makeLoadConstString(ctx.allocator, ""));
-        }
+        // GK-GAP-013: refuse rather than emit an empty constant in place of the pin.
+        if (c.args.len != 3) return LowerError.RequireOutputP2PKHArity;
         const idx: i64 = switch (c.args[0]) {
             .literal_int => |v| v,
-            else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
+            else => return LowerError.RequireOutputP2PKHIndexNotLiteral,
         };
         // W2 backstop -- see `LowerError.OutputIndexMustBeZero`. The located
         // refusal lives in the typechecker; this covers callers that lower

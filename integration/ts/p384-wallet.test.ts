@@ -32,7 +32,7 @@ import { describe, it, expect } from 'vitest';
 import { compileSource } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 import { createHash, createECDH, createSign, generateKeyPairSync } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
@@ -220,9 +220,9 @@ describe('P-384 on-chain integration', () => {
     await contract.deploy(provider, signer, { satoshis: 500_000 });
 
     // The call must fail because the signature does not verify against kp1's pubkey.
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('spend', [badSigHex, kp1.pubKeyCompressedHex], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 
   // ---------------------------------------------------------------------------

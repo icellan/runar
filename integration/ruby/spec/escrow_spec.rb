@@ -119,9 +119,9 @@ RSpec.describe 'Escrow' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet_a[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call('release', [nil, nil], provider, wallet_b[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects refund with wrong signer (checkSig fails)' do
@@ -141,8 +141,8 @@ RSpec.describe 'Escrow' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet_a[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call('refund', [nil, nil], provider, wallet_b[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 end

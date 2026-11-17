@@ -15,6 +15,9 @@ contract SchnorrZKP is SmartContract {
         // Value: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
         require(within(s, 1, 115792089237316195423570985008687907852837564279074904382605163141518161494337));
         require(ecOnCurve(rPoint));
+        // P must be on the curve: the identity O (all-zero) would make
+        // R + e*P collapse to R (GK-BUG-011).
+        require(ecOnCurve(this.pubKey));
         bigint e = bin2num(hash256(cat(rPoint, this.pubKey)));
         Point sG = ecMulGen(s);
         Point eP = ecMul(this.pubKey, e);

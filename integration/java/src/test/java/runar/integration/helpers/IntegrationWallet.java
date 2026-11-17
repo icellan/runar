@@ -65,20 +65,28 @@ public final class IntegrationWallet {
 
     /**
      * Creates a wallet and funds it with {@code btc} BTC by importing
-     * the address into the node's wallet (SV Node only) and calling
-     * {@code sendtoaddress}. Then mines one block to confirm. On
-     * Teranode (no wallet) this method skips the funding step — tests
-     * must supply their own coinbase UTXO.
+     * the address into the node's wallet and calling {@code sendtoaddress},
+     * then mines one block to confirm. SV Node only.
+     *
+     * @throws IllegalStateException on Teranode: it has no node wallet to
+     *     fund from, and the Java suite has no coinbase-funding path, so
+     *     returning the (unfunded) wallet would only move the failure to a
+     *     confusing "no UTXOs" at deploy time (GK-BUG-003). Teranode
+     *     integration is covered by the Go suite only.
      */
     public static IntegrationWallet createFunded(RpcClient rpc, double btc) {
-        IntegrationWallet w = create();
-        if (!rpc.isTeranode()) {
-            try {
-                rpc.call("importaddress", w.address, "", false);
-            } catch (Exception ignored) { /* already imported */ }
-            rpc.call("sendtoaddress", w.address, Double.valueOf(btc));
-            rpc.mine(1);
+        if (rpc.isTeranode()) {
+            throw new IllegalStateException(
+                "IntegrationWallet.createFunded: Teranode is not supported by the Java integration "
+                    + "suite (no node wallet, no coinbase-funding path). Teranode integration is Go-only: "
+                    + "run integration/go with NODE_TYPE=teranode.");
         }
+        IntegrationWallet w = create();
+        try {
+            rpc.call("importaddress", w.address, "", false);
+        } catch (Exception ignored) { /* already imported */ }
+        rpc.call("sendtoaddress", w.address, Double.valueOf(btc));
+        rpc.mine(1);
         return w;
     }
 

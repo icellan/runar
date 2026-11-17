@@ -29,6 +29,22 @@ func (r *TypeCheckResult) ErrorStrings() []string {
 
 // TypeCheck type-checks a Rúnar AST. Returns the same AST plus any errors.
 func TypeCheck(contract *ContractNode) *TypeCheckResult {
+	return TypeCheckWithOptions(contract, TypeCheckOptions{})
+}
+
+// TypeCheckOptions carries facts from outside the source that a typecheck
+// rule depends on. The zero value is the fail-closed default.
+type TypeCheckOptions struct {
+	// Groth16WAStatementPinned is true when the vk.json the contract will be
+	// compiled with (CompileOptions.Groth16WAVKey / --groth16-wa-vk) pins at
+	// least one public-input slot with pinnedPublicInputs. A caller with no
+	// vk.json in hand (runar.CompileCheck) leaves it false, so a method whose
+	// statement is bound only by the vk.json is refused there.
+	Groth16WAStatementPinned bool
+}
+
+// TypeCheckWithOptions is TypeCheck with the caller's TypeCheckOptions.
+func TypeCheckWithOptions(contract *ContractNode, opts TypeCheckOptions) *TypeCheckResult {
 	checker := newTypeChecker(contract)
 
 	checker.checkPropertyInitializers()
@@ -36,6 +52,8 @@ func TypeCheck(contract *ContractNode) *TypeCheckResult {
 	for _, method := range contract.Methods {
 		checker.checkMethod(method)
 	}
+	checker.errors = append(checker.errors, checkPreimageCheckedOnEveryPath(contract)...)
+	checker.errors = append(checker.errors, checkGroth16WAStatementBound(contract, opts.Groth16WAStatementPinned)...)
 
 	return &TypeCheckResult{
 		Contract: contract,
@@ -151,18 +169,21 @@ var builtinFunctions = map[string]funcSig{
 	// directly. Contracts must use bn254MultiPairing4 with explicit proof
 	// preparation (see Groth16Verifier.runar.go for the correct pattern).
 	//
-	// assertGroth16WitnessAssisted is the Mode 3 entry: it takes no Rúnar
-	// args and returns void. The codegen recognises a method body containing
-	// this call as needing the witness-assisted Groth16 verifier as a
-	// method-entry preamble. The verifying key is supplied at compile time
-	// via CompileOptions.Groth16WAVKey, and the prover-side witness bundle
-	// is pushed onto the stack at spend time by the SDK helper before the
-	// regular ABI argument pushes.
+	// assertGroth16WitnessAssisted (the raw witness-assisted verifier) is
+	// kept in this table so the name stays known — ir.BuiltinArity mirrors
+	// it (R-163) — but every call is REFUSED in inferExprType (GK-BUG-006):
+	// that verifier never sees the public inputs, so it accepts an honest
+	// proof of any statement the spender picks.
 	"assertGroth16WitnessAssisted": {params: []string{}, returnType: "void"},
-	// assertGroth16WitnessAssistedWithMSM is the soundness-strict sibling
-	// of assertGroth16WitnessAssisted. It triggers the witness-assisted
-	// verifier variant that also recomputes the SP1 MSM on-chain and binds
-	// the 5 public-input scalars to compile-time-pinned VK domain values.
+	// assertGroth16WitnessAssistedWithMSM is the Mode 3 entry: it takes no
+	// Rúnar args and returns void. The codegen recognises a method body
+	// containing this call as needing the witness-assisted Groth16 verifier
+	// as a method-entry preamble that also recomputes the SP1 MSM on-chain
+	// and binds the 5 public-input scalars (expose them with
+	// groth16PublicInput, or pin them in the vk.json). The verifying key is
+	// supplied at compile time via CompileOptions.Groth16WAVKey, and the
+	// prover-side witness bundle is pushed onto the stack at spend time by
+	// the SDK helper before the regular ABI argument pushes.
 	"assertGroth16WitnessAssistedWithMSM": {params: []string{}, returnType: "void"},
 	// groth16PublicInput reads one of the 5 SP1 public-input scalars left
 	// on the stack by the MSM-binding preamble. Parameter must be a
@@ -1392,6 +1413,18 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			}
 			return "void"
 		}
+		// GK-BUG-006: the raw witness-assisted Groth16 marker is a compile
+		// error. Stack lowering refuses it too, for --ir input.
+		if id.Name == "assertGroth16WitnessAssisted" {
+			tc.addError("assertGroth16WitnessAssisted() is refused: the raw witness-assisted Groth16 verifier never " +
+				"sees the public inputs, so it accepts an honest proof of any statement the spender chooses (GK-BUG-006). " +
+				"Call assertGroth16WitnessAssistedWithMSM() instead and bind the statement with pinnedPublicInputs in the " +
+				"vk.json or groth16PublicInput(i) assertions in the method body")
+			for _, arg := range e.Args {
+				tc.inferExprType(arg, env)
+			}
+			return "void"
+		}
 		if sig, ok := builtinFunctions[id.Name]; ok {
 			return tc.checkCallArgs(id.Name, sig, e.Args, env)
 		}
@@ -1416,8 +1449,9 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 		// function" error.
 		if id.Name == "groth16Verify" {
 			tc.addError("groth16Verify() is not a lowerable builtin — use bn254MultiPairing4() with explicit proof preparation, " +
-				"or declare the method body as assertGroth16WitnessAssisted() and compile with CompileOptions.Groth16WAVKey set. " +
-				"See integration/go/contracts/Groth16Verifier.runar.go and RollupGroth16WA.runar.go for reference patterns.")
+				"or open the method body with assertGroth16WitnessAssistedWithMSM(), bind the statement with groth16PublicInput(i) " +
+				"assertions or vk.json pinnedPublicInputs, and compile with CompileOptions.Groth16WAVKey set. " +
+				"See integration/go/contracts/Groth16Verifier.runar.go and RollupGroth16WAMSM.runar.go for reference patterns.")
 			for _, arg := range e.Args {
 				tc.inferExprType(arg, env)
 			}

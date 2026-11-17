@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import runar.integration.helpers.ContractCompiler;
 import runar.integration.helpers.IntegrationBase;
 import runar.integration.helpers.IntegrationWallet;
+import runar.integration.helpers.NodeRejection;
 import runar.integration.helpers.RpcProvider;
 import runar.lang.runtime.MockCrypto;
 import runar.lang.sdk.RunarArtifact;
@@ -16,8 +17,6 @@ import runar.lang.sdk.RunarContract;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end regtest tests for {@code ConvergenceProof} -- a stateless
@@ -85,18 +84,14 @@ class ConvergenceProofIntegrationTest extends IntegrationBase {
         RunarContract contract = new RunarContract(a, List.of(td[0], td[1]));
         contract.deploy(provider, wallet.signer(), 5_000L);
 
-        // A negative test must prove the NODE rejected this spend. The SDK
-        // throws the same RuntimeException for a build-time refusal or a
-        // UTXO-fetch failure, so record the broadcast count and assert the
-        // failing call actually reached consensus.
-        int broadcastsBefore0 = provider.broadcastAttempts();
-        assertThrows(RuntimeException.class, () ->
+        // A negative test must prove the NODE rejected this spend: an
+        // exception plus a moved broadcast counter is not enough, because an
+        // ACCEPTED tx whose confirming mine fails throws too (GK-BUG-004).
+        NodeRejection.assertNodeRejected(provider, () ->
             contract.call(
                 "proveConvergence", List.of(new BigInteger(td[3])), null, provider, wallet.signer()
-            )
-        );
-        assertTrue(provider.broadcastAttempts() > broadcastsBefore0,
-            "the rejected call must have been broadcast to the node, not refused by the SDK");
+            ),
+            NodeRejection.SCRIPT_VERIFY_FAILED);
     }
 
     @Test

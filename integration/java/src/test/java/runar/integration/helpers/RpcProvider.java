@@ -9,7 +9,7 @@ import runar.lang.sdk.UTXO;
 
 /**
  * {@link Provider} implementation backed by a Bitcoin SV regtest node
- * (SV Node or Teranode). Used only by the integration tests — parity
+ * (SV Node; the Java suite does not run on Teranode). Used only by the integration tests — parity
  * with the Python {@code RPCProvider}, Rust {@code RpcProvider}, and Go
  * {@code BatchRPCProvider}.
  *
@@ -18,9 +18,8 @@ import runar.lang.sdk.UTXO;
  * this test-only helper fills the gap until the SDK adds one natively.
  *
  * <p>Auto-mining: calling {@link #broadcastRaw} triggers a single-block
- * mine so subsequent UTXO lookups see the broadcast tx. On Teranode
- * this also nudges the validator/blockassembly services to pick up the
- * tx promptly.
+ * mine so subsequent UTXO lookups see the broadcast tx. A failed mine is
+ * an error carrying the broadcast txid, never a silent success.
  */
 public final class RpcProvider implements Provider {
 
@@ -34,8 +33,10 @@ public final class RpcProvider implements Provider {
      * ambiguous: the SDK throws the same {@code RuntimeException} for a
      * build-time refusal, a UTXO-fetch failure and a consensus rejection, so a
      * negative test can pass green while the transaction under attack was never
-     * constructed. Asserting {@code broadcastAttempts() >= 1} pins the
-     * rejection to the node.
+     * constructed. The count alone does not pin the rejection to the node
+     * either: an ACCEPTED tx whose confirming mine fails also throws (GK-BUG-004)
+     * after an attempt. {@link NodeRejection#assertNodeRejected} reads
+     * {@link #broadcastLog()} for that.
      */
     private int broadcastAttempts;
 
@@ -53,19 +54,43 @@ public final class RpcProvider implements Provider {
     /** How many transactions the SDK has handed to the node through this provider. */
     public int broadcastAttempts() { return broadcastAttempts; }
 
+    /** What one {@link #broadcastRaw} came to. */
+    public enum BroadcastKind {
+        /** sendrawtransaction returned a txid and the confirming mine (if any) succeeded. */
+        ACCEPTED,
+        /**
+         * sendrawtransaction ACCEPTED the tx, then the auto-mine failed
+         * (GK-BUG-004). broadcastRaw throws, but the node took the spend: this
+         * is not a rejection.
+         */
+        ACCEPTED_MINE_FAILED,
+        /** The node refused the tx at sendrawtransaction; {@code detail} is its message. */
+        NODE_REJECTED,
+        /** Anything else (transport, malformed reply): the node never ruled on it. */
+        OTHER,
+    }
+
+    /** One entry per {@link #broadcastRaw} call, in order. */
+    public record BroadcastOutcome(BroadcastKind kind, String detail) {}
+
+    private final List<BroadcastOutcome> broadcastLog = new ArrayList<>();
+
+    /** Every broadcast's outcome so far; index i is attempt i+1. */
+    public List<BroadcastOutcome> broadcastLog() { return List.copyOf(broadcastLog); }
+
+    private static final String NODE_REFUSAL_PREFIX = "RPC sendrawtransaction: ";
+
+    /** RPC_INVALID_ADDRESS_OR_KEY: "No such mempool or blockchain transaction". */
+    private static final int RPC_NOT_FOUND = -5;
+
     @Override
     public List<UTXO> listUtxos(String address) {
-        // Use listunspent — works on SV Node with a wallet-imported address.
-        // On Teranode (no wallet) this call returns an empty list; tests
-        // funding Teranode addresses must use the raw-coinbase path in
-        // integration/teranode-compose instead.
-        String result;
-        try {
-            result = rpc.call("listunspent", 0L, 9_999_999L, List.of(address));
-        } catch (Exception e) {
-            // Teranode / wallet-less node: no unspent list available.
-            return List.of();
-        }
+        // listunspent — SV Node with a wallet-imported address. A failure here
+        // (unreachable node, RPC error) propagates: reporting "no UTXOs" for a
+        // node we could not ask turns every transport fault into a misleading
+        // "insufficient funds" downstream (GK-BUG-003). The Java suite does
+        // not run on Teranode (wallet-less); Teranode integration is Go-only.
+        String result = rpc.call("listunspent", 0L, 9_999_999L, List.of(address));
         Object parsed = new JsonReader(result).readValue();
         if (!(parsed instanceof List<?> arr)) return List.of();
         List<UTXO> out = new ArrayList<>();
@@ -90,7 +115,18 @@ public final class RpcProvider implements Provider {
         broadcastAttempts++;
         int sizeBytes = txHex == null ? 0 : txHex.length() / 2;
         System.out.println("[runar-integration] tx broadcast: " + sizeBytes + " bytes");
-        String result = rpc.call("sendrawtransaction", txHex);
+        String result;
+        try {
+            result = rpc.call("sendrawtransaction", txHex);
+        } catch (RuntimeException e) {
+            // RpcClient reports a node-side refusal as "RPC <method>: <message>";
+            // a transport failure as "<method>: <io message>".
+            String msg = String.valueOf(e.getMessage());
+            broadcastLog.add(msg.startsWith(NODE_REFUSAL_PREFIX)
+                ? new BroadcastOutcome(BroadcastKind.NODE_REJECTED, msg.substring(NODE_REFUSAL_PREFIX.length()))
+                : new BroadcastOutcome(BroadcastKind.OTHER, msg));
+            throw e;
+        }
         // sendrawtransaction returns a bare JSON string (the txid).
         String txid = result.trim();
         if (txid.startsWith("\"") && txid.endsWith("\"")) {
@@ -99,36 +135,54 @@ public final class RpcProvider implements Provider {
         if (autoMine) {
             try {
                 rpc.mine(1);
-            } catch (Exception ignored) { /* best effort */ }
+            } catch (RuntimeException e) {
+                // GK-BUG-004: the tx is in the mempool but the confirming block
+                // never came; returning the txid would report a confirmation
+                // that did not happen. Same message as the Java SDK RPCProvider.
+                String msg = "broadcast succeeded (txid " + txid + ") but auto-mine failed: " + e.getMessage();
+                broadcastLog.add(new BroadcastOutcome(BroadcastKind.ACCEPTED_MINE_FAILED, msg));
+                throw new RpcClient.RpcException(msg, e);
+            }
         }
+        broadcastLog.add(new BroadcastOutcome(BroadcastKind.ACCEPTED, txid));
         return txid;
     }
 
     @Override
     public UTXO getUtxo(String txid, int vout) {
+        // R3-JAVA-GETUTXO: this caught every exception and returned null, so an
+        // unreachable node, a node-side RPC failure or a malformed reply all
+        // read as "no such outpoint". Only the node's own not-found answer may
+        // be empty; everything else propagates.
         String result;
         try {
             // Verbose mode: SV Node accepts bool `true`, Teranode accepts int `1`.
             Object verboseFlag = rpc.isTeranode() ? Integer.valueOf(1) : Boolean.TRUE;
             result = rpc.call("getrawtransaction", txid, verboseFlag);
-        } catch (Exception e) {
-            return null;
+        } catch (RpcClient.RpcException e) {
+            if (e.rpcCode() != null && e.rpcCode() == RPC_NOT_FOUND) return null;
+            throw e;
         }
         Object parsed = new JsonReader(result).readValue();
-        if (!(parsed instanceof Map<?, ?> m)) return null;
-        Object vouts = m.get("vout");
-        if (!(vouts instanceof List<?> voutList)) return null;
+        if (!(parsed instanceof Map<?, ?> m) || !(m.get("vout") instanceof List<?> voutList)) {
+            throw new RpcClient.RpcException("getrawtransaction " + txid + ": expected a verbose transaction object, got " + result);
+        }
+        // The transaction exists but has no such output: genuinely not found.
         if (vout < 0 || vout >= voutList.size()) return null;
         Object voutItem = voutList.get(vout);
-        if (!(voutItem instanceof Map<?, ?> vm)) return null;
-        long sats = satoshisFromAmount(vm.get("value"));
         String script = null;
-        Object spk = vm.get("scriptPubKey");
-        if (spk instanceof Map<?, ?> spkMap) {
-            Object hex = spkMap.get("hex");
-            if (hex instanceof String s) script = s;
+        Object value = null;
+        if (voutItem instanceof Map<?, ?> vm) {
+            value = vm.get("value");
+            if (vm.get("scriptPubKey") instanceof Map<?, ?> spkMap && spkMap.get("hex") instanceof String s) {
+                script = s;
+            }
         }
-        if (script == null) return null;
+        if (script == null || !(value instanceof Number)) {
+            throw new RpcClient.RpcException("getrawtransaction " + txid + ": output " + vout
+                + " carries no value / scriptPubKey.hex: " + voutItem);
+        }
+        long sats = satoshisFromAmount(value);
         return new UTXO(txid, vout, sats, script);
     }
 

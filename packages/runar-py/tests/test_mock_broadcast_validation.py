@@ -207,10 +207,11 @@ def test_broadcast_accepts_real_deploy_and_call():
     assert p.last_validated_input_count >= 1, p.last_validation_report
 
     # PIN on the tier's one carve-out. The call's contract input is a Rúnar
-    # OP_PUSH_TX covenant, which bsv-sdk cannot sighash the way runar-py signs
-    # it (pre-existing, see the xfail in test_g1_raw_outputs_spend.py). It is
+    # OP_PUSH_TX covenant, which bsv-sdk sighashes over a mis-encoded
+    # scriptCode (its from_chunks drops the OP_RETURN before the state; see the
+    # R2-GAP008 pins in test_gk_gap_008_covenant_carveout.py). It is
     # recorded as UNVALIDATABLE, never as validated. If this assertion ever
-    # fails because the count dropped to 0, the incompatibility was fixed:
+    # fails because the count dropped to 0, bsv-sdk was fixed:
     # delete the _COVENANT_PUSHTX_MARKER carve-out in provider.py and validate
     # covenant inputs for real.
     assert p.last_validation_report['unvalidatable'] == 1, (

@@ -108,13 +108,13 @@ RSpec.describe 'NULLFAIL multi-method' do # rubocop:disable RSpec/DescribeClass
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 50_000))
 
     new_root = '01' * 32
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'advanceState', [new_root, 1], provider, wallet[:signer],
         Runar::SDK::CallOptions.new(
           new_state: { 'stateRoot' => new_root, 'blockNumber' => 1, 'frozen' => 1 }
         )
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

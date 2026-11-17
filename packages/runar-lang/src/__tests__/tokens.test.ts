@@ -1,119 +1,50 @@
 // ---------------------------------------------------------------------------
-// Tests for runar-lang/tokens — FungibleToken and NonFungibleToken stubs
+// Tests for runar-lang/tokens — the runtime surface of the two token contracts
+//
+// GK-DOC-009: these used to be abstract stubs whose methods threw "cannot be
+// called at runtime". They are now complete StatefulSmartContract contracts.
+// What they compile to, and how they behave under TestContract, is pinned in
+// tests/gk-doc-009-runar-lang-tokens-compile.test.ts (that test needs the
+// compiler, which runar-lang must not depend on). This file only checks the
+// package surface: the classes are exported, are stateful contracts, and
+// store their constructor arguments.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
-import { FungibleToken } from '../tokens/fungible.js';
-import { NonFungibleToken } from '../tokens/nft.js';
-
-const RUNTIME_ERROR_PATTERN = /cannot be called at runtime/;
-
-// Both classes are abstract, so we need concrete subclasses to instantiate them.
-
-class TestFungible extends FungibleToken {
-  constructor(supply: bigint, holder: any) {
-    super(supply, holder);
-  }
-}
-
-class TestNFT extends NonFungibleToken {
-  constructor(owner: any, tokenId: any) {
-    super(owner, tokenId);
-  }
-}
+import { StatefulSmartContract } from '../index.js';
+import { FungibleToken, NonFungibleToken } from '../tokens/index.js';
 
 describe('FungibleToken', () => {
-  const dummy = '' as any;
-
-  it('is abstract and cannot be instantiated directly', () => {
-    // TypeScript enforces this at compile time, but we can verify the
-    // subclass pattern works
-    const token = new TestFungible(1000n, dummy);
-    expect(token).toBeInstanceOf(FungibleToken);
+  it('is a StatefulSmartContract and stores its four properties', () => {
+    const token = new FungibleToken('ownerPK' as never, 100n, 5n, 'deadbeef' as never);
+    expect(token).toBeInstanceOf(StatefulSmartContract);
+    expect(token.owner).toBe('ownerPK');
+    expect(token.balance).toBe(100n);
+    expect(token.mergeBalance).toBe(5n);
+    expect(token.tokenId).toBe('deadbeef');
   });
 
-  it('stores supply and holder from constructor', () => {
-    const token = new TestFungible(500n, 'somePubKey' as any);
-    expect(token.supply).toBe(500n);
-    expect(token.holder).toBe('somePubKey');
-  });
-
-  it('transfer() throws at runtime', () => {
-    const token = new TestFungible(100n, dummy);
-    expect(() => token.transfer(dummy, dummy)).toThrow(RUNTIME_ERROR_PATTERN);
-  });
-
-  it('merge() throws at runtime', () => {
-    const token = new TestFungible(100n, dummy);
-    expect(() => token.merge(dummy, 50n, dummy)).toThrow(RUNTIME_ERROR_PATTERN);
-  });
-
-  it('split() throws at runtime', () => {
-    const token = new TestFungible(100n, dummy);
-    expect(() => token.split(dummy, 50n, dummy, dummy)).toThrow(RUNTIME_ERROR_PATTERN);
-  });
-
-  it('transfer error message mentions "compile"', () => {
-    const token = new TestFungible(100n, dummy);
-    try {
-      token.transfer(dummy, dummy);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect((err as Error).message).toContain('compile');
-      expect((err as Error).message).toContain('FungibleToken');
-    }
-  });
-
-  it('validateGenesis() throws at runtime (via protected access)', () => {
-    // Access protected method via cast
-    const token = new TestFungible(100n, dummy);
-    expect(() => (token as any).validateGenesis(dummy)).toThrow(RUNTIME_ERROR_PATTERN);
+  it('exposes transfer, send and merge spending methods (no split stub)', () => {
+    const proto = FungibleToken.prototype as unknown as Record<string, unknown>;
+    expect(typeof proto.transfer).toBe('function');
+    expect(typeof proto.send).toBe('function');
+    expect(typeof proto.merge).toBe('function');
+    expect(proto.split).toBeUndefined();
   });
 });
 
 describe('NonFungibleToken', () => {
-  const dummy = '' as any;
-
-  it('is abstract and cannot be instantiated directly', () => {
-    const nft = new TestNFT(dummy, dummy);
-    expect(nft).toBeInstanceOf(NonFungibleToken);
-  });
-
-  it('stores owner and tokenId from constructor', () => {
-    const nft = new TestNFT('ownerPK' as any, 'tokenABC' as any);
+  it('is a StatefulSmartContract and stores owner, tokenId and metadata', () => {
+    const nft = new NonFungibleToken('ownerPK' as never, 'tokenABC' as never, 'meta' as never);
+    expect(nft).toBeInstanceOf(StatefulSmartContract);
     expect(nft.owner).toBe('ownerPK');
     expect(nft.tokenId).toBe('tokenABC');
+    expect(nft.metadata).toBe('meta');
   });
 
-  it('transfer() throws at runtime', () => {
-    const nft = new TestNFT(dummy, dummy);
-    expect(() => nft.transfer(dummy, dummy)).toThrow(RUNTIME_ERROR_PATTERN);
-  });
-
-  it('burn() throws at runtime', () => {
-    const nft = new TestNFT(dummy, dummy);
-    expect(() => nft.burn(dummy)).toThrow(RUNTIME_ERROR_PATTERN);
-  });
-
-  it('transfer error message mentions "compile" and "NonFungibleToken"', () => {
-    const nft = new TestNFT(dummy, dummy);
-    try {
-      nft.transfer(dummy, dummy);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect((err as Error).message).toContain('compile');
-      expect((err as Error).message).toContain('NonFungibleToken');
-    }
-  });
-
-  it('burn error message mentions "compile" and "NonFungibleToken"', () => {
-    const nft = new TestNFT(dummy, dummy);
-    try {
-      nft.burn(dummy);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect((err as Error).message).toContain('compile');
-      expect((err as Error).message).toContain('NonFungibleToken');
-    }
+  it('exposes transfer and burn spending methods', () => {
+    const proto = NonFungibleToken.prototype as unknown as Record<string, unknown>;
+    expect(typeof proto.transfer).toBe('function');
+    expect(typeof proto.burn).toBe('function');
   });
 });

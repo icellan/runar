@@ -19,9 +19,21 @@
 //! method references it. See `eliminateDeadBindingsInMethod` and
 //! `conformance/dce/private-return.test.ts`.
 //!
-//! Runs as a standalone pass after constant folding (pass 4.25) and before
-//! EC optimization (pass 4.5). Also used internally by the EC optimizer
-//! to clean up temporaries created during algebraic simplification.
+//! This is the definition of DCE, not a pass the pipeline runs on its own
+//! (GK-DOC-007; the header used to claim otherwise, and compiler_api.zig runs
+//! no whole-program `eliminateDeadCode`). It has two production callers:
+//!
+//!   - `ec_optimizer.zig`'s `optimize`, which runs `eliminateDeadBindingsInMethod`
+//!     over every method only when an EC rewrite fired in some method (the
+//!     N-097 gate, the TS reference's `optimizeEC`), then
+//!     `eliminateDeadBindingsAmongInMethod` for orphans inside if arms and
+//!     loop bodies. A program no EC rewrite touches is never fully DCE'd.
+//!   - `constant_fold.zig`'s `foldConstantsAndPrune` (N-138), which calls
+//!     `eliminateDeadBindingsAmongInMethod` to remove only the operand
+//!     bindings the fold itself orphaned.
+//!
+//! Do not move full DCE ahead of the EC gate: in the TS tier that breaks
+//! compilation of 11 conformance fixtures (R-194).
 
 const std = @import("std");
 const types = @import("../ir/types.zig");

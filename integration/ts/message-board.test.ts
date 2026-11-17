@@ -14,7 +14,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 import { readOnChainState } from './helpers/on-chain-state.js';
 
 describe('MessageBoard', () => {
@@ -81,9 +81,9 @@ describe('MessageBoard', () => {
     // Call burn with wrong signer -- checkSig will fail on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('burn', [null], provider, wrongSigner),
-    ).rejects.toThrow();
+    );
   });
 
   it('should deploy with empty message and post', async () => {

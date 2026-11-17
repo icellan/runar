@@ -130,7 +130,7 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 		contract, provider, prepared := buildDecoupledSpend(t, false)
 		before := provider.BroadcastAttempts
 		_, _, err := contract.FinalizeCall(prepared, nil, provider)
-		if bad := helpers.CheckNodeRejected(provider, before, err); bad != nil {
+		if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
 			t.Fatalf("control-naive: naive theft (matching preimage) was not rejected by the node: %v", bad)
 		}
 		t.Logf("control-naive: naive theft correctly REJECTED by the node: %v", err)
@@ -154,7 +154,7 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 		// reaches provider.Broadcast — so any future SDK change that makes a
 		// hand-modified PreparedCall fail assembly would turn this repo's only
 		// on-chain guard for a confirmed theft bug permanently green.
-		if bad := helpers.CheckNodeRejected(provider, before, err); bad != nil {
+		if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
 			t.Fatalf("BUG-100 guard is not measuring consensus: %v", bad)
 		}
 		t.Logf("BUG-100 fix verified: decoupled-preimage spend correctly REJECTED by the node: %v", err)

@@ -14,7 +14,8 @@ func TestPostQuantumSLHDSANaiveInsecure192f_Compile(t *testing.T) {
 
 // The port is INSECURE by design -- it verifies a free signature over a free
 // message, so any observed (msg, sig) pair replays. What it must NOT be is
-// VACUOUS. runar.VerifySLHDSA_SHA2_192f is real FIPS 205 verification, not a
+// VACUOUS. runar.VerifySLHDSA_SHA2_192f is a real SLH-DSA verifier (SHA-256-only
+// variant, not FIPS 205, #137), not a
 // stub like VerifySP1FRI, and this row is what tells the two apart: a verifier
 // that returned true unconditionally would accept the garbage below, and every
 // compile-only suite in this tree would still report green.

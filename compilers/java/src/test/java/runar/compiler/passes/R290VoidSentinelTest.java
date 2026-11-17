@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import runar.compiler.frontend.ParserDispatch;
@@ -15,6 +16,7 @@ import runar.compiler.ir.anf.If;
 import runar.compiler.ir.anf.LoadConst;
 import runar.compiler.ir.anf.Loop;
 import runar.compiler.ir.ast.ContractNode;
+import runar.compiler.ir.ast.MethodNode;
 
 /**
  * R-290 — {@code inlinePrivateMethodCall} used to emit a
@@ -66,11 +68,39 @@ class R290VoidSentinelTest {
           private helper(): void {
           }
 
-          private helper(): void {
+          private helper2(): void {
             this.addOutput(1000n, this.count);
           }
         }
         """;
+
+    /**
+     * GK-BUG-015: {@code Validate} now refuses a repeated method name, so the
+     * source cannot spell the duplicate any more. {@code AnfLower.run} is a
+     * public entry point, so the backstop is pinned on a hand-built duplicate:
+     * the source declares {@code helper} and {@code helper2}, and this renames
+     * the second on the parsed AST.
+     */
+    private static ContractNode handBuiltDuplicate() throws Exception {
+        ContractNode c = ParserDispatch.parse(EMPTY_INLINED_BODY, "R290Void.runar.ts");
+        List<MethodNode> methods = new ArrayList<>();
+        for (MethodNode m : c.methods()) {
+            methods.add("helper2".equals(m.name())
+                ? new MethodNode("helper", m.params(), m.body(), m.visibility(), m.sourceLocation(),
+                    m.sighashType(), m.bindingVariant())
+                : m);
+        }
+        return new ContractNode(c.name(), c.parentClass(), c.properties(), c.constructor(), methods, c.sourceFile());
+    }
+
+    @Test
+    void validateRefusesTheHandBuiltDuplicate() throws Exception {
+        List<String> errors = Validate.runCollecting(handBuiltDuplicate()).errors();
+        assertTrue(
+            errors.stream().anyMatch(e -> e.contains(
+                "method 'helper' is already declared in this contract and cannot be re-declared")),
+            "validate did not refuse the duplicate: " + errors);
+    }
 
     /**
      * Control: the ordinary shape — one private helper that really does emit
@@ -119,7 +149,7 @@ class R290VoidSentinelTest {
 
     @Test
     void emptyInlinedBodyNeverYieldsASentinel() throws Exception {
-        ContractNode contract = ParserDispatch.parse(EMPTY_INLINED_BODY, "R290Void.runar.ts");
+        ContractNode contract = handBuiltDuplicate();
         AnfProgram program;
         try {
             program = AnfLower.run(contract);

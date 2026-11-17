@@ -106,6 +106,7 @@ public final class Validate {
         boolean callDepthExceeded = ctx.checkNoRecursion();
         ctx.checkReservedNames();
         ctx.checkRedeclarations();
+        ctx.checkDuplicateMethods();
         ctx.warnStrippedReadonlyFields();
         // N-180: the Rabin-provenance and sighash passes walk the private-method
         // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
@@ -606,6 +607,17 @@ public final class Validate {
             for (PropertyNode prop : contract.properties()) {
                 validatePropertyType(prop.type(), prop.sourceLocation());
 
+                // R3-GK010-GAPS: a readonly property is a constant in the
+                // locking script, and a sighash preimage commits to the
+                // outpoint of the transaction that carries that script, so
+                // checkPreimage() on it can never pass and every field an
+                // extractor reads from it is unverified. Refused at the
+                // declaration (before FixedArray expansion, so the name is
+                // the user's).
+                if (prop.readonly() && holdsSigHashPreimage(prop.type())) {
+                    error(readonlyPreimagePropertyMessage(prop.name()), prop.sourceLocation());
+                }
+
                 if (contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT
                     && "txPreimage".equals(prop.name())) {
                     error(
@@ -651,6 +663,21 @@ public final class Validate {
                     );
                 }
             }
+        }
+
+        /** The diagnostic every tier shares (R3-GK010-GAPS). */
+        static String readonlyPreimagePropertyMessage(String name) {
+            return "readonly property '" + name + "' cannot hold a SigHashPreimage: a preimage fixed in the "
+                + "locking script can never pass checkPreimage(), so every field an extractor reads from it "
+                + "is unverified";
+        }
+
+        /** {@code SigHashPreimage}, or a (nested) FixedArray of it. */
+        private static boolean holdsSigHashPreimage(TypeNode t) {
+            if (t instanceof FixedArrayType fa) {
+                return holdsSigHashPreimage(fa.element());
+            }
+            return t instanceof PrimitiveType pt && pt.name() == PrimitiveTypeName.SIG_HASH_PREIMAGE;
         }
 
         private void validatePropertyType(TypeNode t, SourceLocation loc) {
@@ -1873,6 +1900,23 @@ public final class Validate {
         // --------------------------------------------------------------
         // Recursion detection
         // --------------------------------------------------------------
+
+        /**
+         * GK-BUG-015: a contract cannot declare two methods with the same
+         * name. Every name-keyed later pass (side-effect summary, private
+         * method lookup, the affine consumption fixpoint, stack lowering)
+         * assumes one body per name; with two they disagree. Anchored on each
+         * repeat.
+         */
+        void checkDuplicateMethods() {
+            Set<String> seen = new HashSet<>();
+            for (MethodNode m : contract.methods()) {
+                if (!seen.add(m.name())) {
+                    error("method '" + m.name() + "' is already declared in this contract and cannot be re-declared",
+                        m.sourceLocation());
+                }
+            }
+        }
 
         /**
          * N-509: a local cannot be re-declared in the same scope

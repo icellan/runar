@@ -785,8 +785,9 @@ func bn254ComposePoint(t *BN254Tracker, xName, yName, resultName string) {
 // the omega-partner pairs Q = (w*px, -py), (w^2*px, -py) with px != qx, where
 // the slope is 0/0 and the result is a wrong but ON-CURVE point (F-091). The
 // bn254G1Add builtin handles both in EmitBN254G1Add (infinity mask, omega
-// abort); this helper itself is left unguarded for the Groth16 MSM path, whose
-// bytes it must not move.
+// abort); the Groth16 MSM bind calls it through emitG1AffineAddNamed, which
+// aborts on py + qy == 0 mod p first (GK-BUG-007). This helper itself is
+// unguarded: every caller must exclude that input.
 func bn254G1AffineAdd(t *BN254Tracker) {
 	// s_num = px^2 + px*qx + qx^2
 	t.copyToTop("px", "_px_sq_in")
@@ -1204,8 +1205,9 @@ func bn254G1InfinityFlag(t *BN254Tracker) {
 // denominator), doubling and P == -Q (px == qx; the latter is then masked to
 // the all-zero O by bn254G1MaskInfinity), and all-zero operands.
 //
-// Lives in the builtin entry point only, like the infinity mask: the Groth16
-// MSM bind shares bn254G1AffineAdd and keeps its bytes unchanged.
+// Lives in the builtin entry point only, like the infinity mask. The Groth16
+// MSM bind shares bn254G1AffineAdd but cannot represent O at all, so it
+// refuses every py + qy == 0 step instead (emitG1AffineAddNamed, GK-BUG-007).
 func bn254G1OmegaCollisionVerify(t *BN254Tracker) {
 	t.copyToTop("px", "_om_px")
 	t.copyToTop("qx", "_om_qx")

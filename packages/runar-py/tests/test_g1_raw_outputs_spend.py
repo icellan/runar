@@ -136,26 +136,30 @@ def test_send_to_script_outputs_are_raw_state_change_in_order():
 
 @pytest.mark.xfail(
     reason=(
-        "Replaying a Rúnar stateful covenant through bsv-sdk's Spend is blocked "
-        "by a PRE-EXISTING runar-py <-> bsv-sdk OP_PUSH_TX incompatibility that "
-        "is independent of finding G1: input 0 aborts at the OP_PUSH_TX "
-        "OP_CHECKSIGVERIFY (the preimage/subscript runar-py signs does not match "
-        "the BIP-143 sighash bsv-sdk recomputes), NOT at the hashOutputs "
-        "state-check OP_VERIFY that G1 concerns. Control: a plain stateful "
-        "Counter with NO raw outputs fails identically at the same "
-        "OP_CHECKSIGVERIFY under both bsv-sdk VM paths (native + pure-python), so "
-        "output ordering is not the cause. The authoritative G1 proof is the "
-        "deterministic output-order test above; this case documents the "
-        "strongest-available ScriptVM attempt and will XPASS if the OP_PUSH_TX "
-        "incompatibility is ever resolved."
+        "bsv-sdk upstream defect (2.4.0, latest release; filed as "
+        "https://github.com/bsv-blockchain/py-sdk/issues/247), not a runar-py bug and "
+        "independent of finding G1: Script.from_chunks re-encodes the top-level "
+        "OP_RETURN chunk (opcode 0x6a + trailing state) as a data push, and "
+        "Spend.subscript_after_code_separator builds the BIP-143 scriptCode with "
+        "from_chunks, so bsv-sdk sighashes '<len> <state>' where the locking script "
+        "(and the node, and runar-py) has '6a <state>'. Input 0 therefore aborts at "
+        "the OP_PUSH_TX OP_CHECKSIGVERIFY under both bsv-sdk VM paths (native + "
+        "pure-python), before the hashOutputs OP_VERIFY G1 concerns is reached. "
+        "Pinned field by field in test_gk_gap_008_covenant_carveout.py (one "
+        "differing preimage byte, the OP_RETURN). With from_chunks patched to keep "
+        "the opcode, this test passes. The authoritative G1 proof is the "
+        "deterministic output-order test above."
     ),
-    strict=False,
+    # GK-GAP-008: strict, so an XPASS fails the run instead of passing quietly;
+    # when bsv-sdk is fixed, delete this marker, the provider.py carve-out and
+    # the R2-GAP008 pins in test_gk_gap_008_covenant_carveout.py together.
+    strict=True,
 )
 def test_send_to_script_covenant_input0_validates_through_spend():
     """Strongest attempted proof: replay input 0 through bsv-sdk's Spend
     interpreter and assert the covenant OP_PUSH_TX + hashOutputs OP_VERIFY
     passes. Skipped when bsv-sdk (the optional ScriptVM dependency) is absent;
-    xfail while the pre-existing OP_PUSH_TX incompatibility (see marker) holds."""
+    xfail while the bsv-sdk scriptCode defect (see marker) holds."""
     pytest.importorskip("bsv")
     from bsv.script.spend import Spend
     from bsv.transaction import Transaction

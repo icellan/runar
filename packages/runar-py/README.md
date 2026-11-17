@@ -1811,18 +1811,32 @@ Install it with `pip install bsv-sdk` (or `pip install 'runar[dev]'`).
 
 ### One tier-specific carve-out
 
-runar-py's OP_PUSH_TX preimage does not match the BIP-143 sighash `bsv-sdk`
-recomputes, so a stateful contract's **covenant** input always aborts at the
-covenant's `OP_CHECKSIGVERIFY`. This is pre-existing and independent of the SDK
-change — already pinned by the xfail in
-`tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend`,
-whose control shows a plain stateful `Counter` with no raw outputs failing
-identically. Such an input is counted as **`unvalidatable`**, never as
-validated, so it can never satisfy the non-vacuity requirement on its own; the
-call's funding input still executes for real.
+`bsv-sdk` (2.4.0, the latest release) sighashes the wrong scriptCode for a
+script that carries a top-level `OP_RETURN <data>`: `Script.from_chunks`
+re-encodes the `OP_RETURN` chunk as a data push, dropping the `0x6a` opcode, and
+`Spend` builds the BIP-143 scriptCode with it. Every stateful contract ends in
+`OP_RETURN <state>`, so its **covenant** input always aborts at the covenant's
+`OP_CHECKSIGVERIFY`, under both `bsv-sdk` VM paths. runar-py's preimage uses
+the locking script's real bytes, as the node does; the two preimages differ in
+that one byte only. The R2-GAP008 tests in
+`tests/test_gk_gap_008_covenant_carveout.py` pin this, and the strict xfail in
+`tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend`
+tracks it. The defect is filed upstream as
+[bsv-blockchain/py-sdk#247](https://github.com/bsv-blockchain/py-sdk/issues/247).
+Such an input is counted as **`unvalidatable`**, never as
+validated; the call's funding input still executes for real.
+
+The carve-out is narrow (GK-GAP-008). It applies only when the failing opcode
+is an `OP_CHECKSIGVERIFY` in the locking script whose preceding chunk pushes
+one of the fixed OP_PUSH_TX verification keys (the Any-S C=1 key or compressed
+G). A wrong signature at any other `OP_CHECKSIGVERIFY` (a user `checkSig`, in
+a stateless or stateful contract) is a rejection. And when `bsv-sdk` is
+installed, a transaction in which no known input actually executed (every one
+unvalidatable) is rejected as validating nothing; value conservation alone
+does not count. `tests/test_gk_gap_008_covenant_carveout.py` pins both rules.
 `tests/test_mock_broadcast_validation.py` asserts the carve-out fires exactly
-once for a real deploy+call, so it goes RED the moment the incompatibility is
-fixed and the carve-out can be deleted.
+once for a real deploy+call, so it goes RED the moment `bsv-sdk` is fixed and
+the carve-out can be deleted.
 
 ### The opt-out, and how it is governed
 

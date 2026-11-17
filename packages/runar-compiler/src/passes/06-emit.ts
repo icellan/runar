@@ -691,9 +691,10 @@ export function emit(program: StackProgram): EmitResult {
   // kept the preimage small but hid the dispatch preamble and every preceding
   // method body from `scriptCode` — and those hidden bytes are exactly the
   // ones the spender-supplied `_codePart` witness claims to reproduce. With
-  // the separator at offset 0, `scriptCode == lockingScript[1:]`, so the
-  // script can pin `_codePart` byte for byte (see `emitCodePartAuthentication`
-  // in 05-stack-lower.ts).
+  // the separator at the start of the script, `scriptCode` covers everything
+  // after it (`lockingScript[2:]` with the layout below), so the script can
+  // pin `_codePart` byte for byte (see `emitCodePartAuthentication` in
+  // 05-stack-lower.ts).
   //
   // The separator sits at offset 1, behind a single OP_NOP, NOT at offset 0.
   // Offset 0 is a booby trap: implementations that store "index of the last

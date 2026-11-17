@@ -2,7 +2,7 @@
  * Bitcoin regtest node helpers — JSON-RPC communication, mining, wallet funding.
  */
 
-import { RPCProvider } from 'runar-sdk';
+import { RPCProvider, RPCNodeError } from 'runar-sdk';
 import type { Transaction } from '@bsv/sdk';
 
 export const RPC_URL = process.env.RPC_URL ?? 'http://localhost:18332';
@@ -10,30 +10,132 @@ export const RPC_USER = process.env.RPC_USER ?? 'bitcoin';
 export const RPC_PASS = process.env.RPC_PASS ?? 'bitcoin';
 
 /**
- * Wrap an RPCProvider's broadcast method to log the raw tx size in bytes
- * before delegating to the SDK implementation. Mutates the provider in
- * place; returns the same instance for chaining.
+ * The reason SV Node gives for a spend whose unlocking script fails (a false
+ * assert, a failed checkSig, a script error such as OP_SPLIT out of range).
+ * The Rust, Java, Zig, Go and Python suites pin the same text.
  */
-function instrumentBroadcast(provider: RPCProvider): RPCProvider {
+export const SCRIPT_VERIFY_FAILED = 'mandatory-script-verify-flag-failed';
+
+export type BroadcastKind = 'accepted' | 'accepted-then-mine-failed' | 'node-rejected' | 'other';
+export interface BroadcastOutcome { kind: BroadcastKind; detail: string }
+
+/** An RPCProvider whose broadcasts are recorded (see instrumentBroadcast). */
+export type InstrumentedProvider = RPCProvider & { broadcastLog: BroadcastOutcome[] };
+
+/**
+ * Wrap an RPCProvider's broadcast method to log the raw tx size in bytes
+ * before delegating to the SDK implementation, and record what each
+ * broadcast came to in `provider.broadcastLog`: accepted /
+ * accepted-then-mine-failed / node-rejected (the node's message) / other
+ * (transport failure, malformed reply). Classified by WHICH RPC failed and by
+ * the SDK's typed RPCNodeError, never by message text. Mutates the provider
+ * in place; returns the same instance for chaining.
+ */
+export function instrumentBroadcast(provider: RPCProvider): InstrumentedProvider {
+  const p = provider as InstrumentedProvider;
+  p.broadcastLog = [];
+  // rpcCall is private in the SDK's types; it is a plain method at runtime.
+  const target = provider as unknown as { rpcCall(method: string, ...params: unknown[]): Promise<unknown> };
+  const originalRpc = target.rpcCall.bind(provider);
+  let sent: BroadcastOutcome | null = null;
+  target.rpcCall = async (method: string, ...params: unknown[]): Promise<unknown> => {
+    if (method !== 'sendrawtransaction') return originalRpc(method, ...params);
+    try {
+      const result = await originalRpc(method, ...params);
+      sent = { kind: 'accepted', detail: String(result) };
+      return result;
+    } catch (e) {
+      sent = e instanceof RPCNodeError
+        ? { kind: 'node-rejected', detail: e.nodeMessage }
+        : { kind: 'other', detail: String(e) };
+      throw e;
+    }
+  };
   const original = provider.broadcast.bind(provider);
   provider.broadcast = async (tx: Transaction): Promise<string> => {
     const hex = tx.toHex();
     const sizeBytes = Math.floor(hex.length / 2);
     process.stderr.write(`[runar-integration] tx broadcast: ${sizeBytes} bytes\n`);
-    return original(tx);
+    sent = null;
+    try {
+      const txid = await original(tx);
+      p.broadcastLog.push({ kind: 'accepted', detail: txid });
+      return txid;
+    } catch (e) {
+      const s = sent as BroadcastOutcome | null;
+      if (s === null) {
+        p.broadcastLog.push({ kind: 'other', detail: String(e) });
+      } else if (s.kind === 'accepted') {
+        // sendrawtransaction accepted it; the confirming mine failed after.
+        p.broadcastLog.push({ kind: 'accepted-then-mine-failed', detail: String(e) });
+      } else {
+        p.broadcastLog.push(s);
+      }
+      throw e;
+    }
   };
-  return provider;
+  return p;
+}
+
+/**
+ * The pure check behind expectNodeRejected. `added` is what the call under
+ * test broadcast. Returns null when, and only when: the call broadcast at
+ * least once (an error with no broadcast is an SDK-side refusal, not
+ * consensus); the node accepted none of those broadcasts -- including an
+ * accepted tx whose confirming mine then failed (GK-BUG-004); and the last
+ * one was refused at sendrawtransaction with a message containing `reason`.
+ */
+export function checkNodeRejected(added: BroadcastOutcome[], reason: string): string | null {
+  if (!reason) return 'no rejection reason given';
+  if (added.length === 0) return 'the call never handed a transaction to the node (SDK-side failure)';
+  for (const o of added) {
+    if (o.kind === 'accepted' || o.kind === 'accepted-then-mine-failed') {
+      return `the node ACCEPTED a transaction from this call (${o.kind}: ${o.detail})`;
+    }
+  }
+  const last = added[added.length - 1]!;
+  if (last.kind !== 'node-rejected') return `the node never ruled on the spend (${last.kind}: ${last.detail})`;
+  if (!last.detail.includes(reason)) {
+    return `the node rejected the spend for the wrong reason: expected '${reason}', got '${last.detail}'`;
+  }
+  return null;
+}
+
+/**
+ * Awaits `call` and asserts the NODE refused it for `reason`. A bare
+ * `.rejects.toThrow()` passed on an SDK-side failure, an unreachable node and
+ * -- since GK-BUG-004 -- an ACCEPTED tx whose confirming mine failed.
+ * Returns the call's error.
+ */
+export async function expectNodeRejected(
+  provider: RPCProvider,
+  call: () => Promise<unknown>,
+  reason: string = SCRIPT_VERIFY_FAILED,
+): Promise<unknown> {
+  const p = provider as InstrumentedProvider;
+  if (!Array.isArray(p.broadcastLog)) throw new Error('expectNodeRejected: provider is not instrumented');
+  const before = p.broadcastLog.length;
+  let error: unknown;
+  try {
+    await call();
+  } catch (e) {
+    error = e;
+  }
+  if (error === undefined) throw new Error('the spend was ACCEPTED (the call did not throw), so nothing was rejected');
+  const why = checkNodeRejected(p.broadcastLog.slice(before), reason);
+  if (why !== null) throw new Error(`not a node rejection: ${why}; call error: ${String(error)}`);
+  return error;
 }
 
 /** Create an RPCProvider using env-configured credentials. */
-export function createProvider(): RPCProvider {
+export function createProvider(): InstrumentedProvider {
   return instrumentBroadcast(
     new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: true, network: 'testnet' }),
   );
 }
 
 /** Create a provider that does NOT mine after each broadcast. Call mine(1) manually. */
-export function createBatchProvider(): RPCProvider {
+export function createBatchProvider(): InstrumentedProvider {
   return instrumentBroadcast(
     new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: false, network: 'testnet' }),
   );

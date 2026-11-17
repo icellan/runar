@@ -2451,7 +2451,11 @@ fn bigint_to_i128(bigint_lit: &swc::BigInt) -> i128 {
 /// - `.runar.rs` -> Rust DSL parser
 /// - `.runar.py` -> Python parser
 /// - `.runar.java` -> Java parser
-/// - anything else (including `.runar.ts`) -> TypeScript parser (default)
+/// - `.runar.go` / `.runar.rb` / `.runar.zig` -> their surface parsers
+/// - `.runar.ts`, or no file name -> TypeScript parser
+/// - anything else -> refused with the shared unsupported-extension diagnostic
+///
+/// Suffixes match ignoring ASCII case (GK-GAP-005).
 pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut result = parse_source_dispatch(source, file_name);
     // N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
@@ -2459,6 +2463,15 @@ pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
         super::loop_condition::normalize_loop_conditions(contract);
     }
     result
+}
+
+/// The diagnostic every tier gives a file name whose suffix is none of the
+/// nine `.runar.*` formats (GK-GAP-005).
+pub fn unsupported_extension_message(file_name: &str) -> String {
+    format!(
+        "unsupported file extension: {} (expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)",
+        file_name
+    )
 }
 
 fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
@@ -2471,14 +2484,19 @@ fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
-    let name = file_name.unwrap_or("contract.ts");
+    // GK-GAP-005: no file name (None or "") means the TypeScript surface.
+    let name = match file_name {
+        Some(n) if !n.is_empty() => n,
+        _ => "contract.runar.ts",
+    };
+    let lower = name.to_ascii_lowercase();
     // Fail-closed directive guard: `@sighash` / `@embedAlways` COMMENTS are
     // read only on the TypeScript (.runar.ts) surface; the eight non-TS surface
     // parsers below ignore comments, so a comment directive there would be
     // silently dropped. Reject rather than miscompile, naming the surface's
     // native spelling (N-093). The default TS branch is exempt.
     for s in NON_TS_SURFACES {
-        if name.ends_with(s.ext) {
+        if lower.ends_with(s.ext) {
             if let Some(msg) = unsupported_directive_error(source, s) {
                 return directive_guard_result(msg);
             }
@@ -2494,7 +2512,10 @@ fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
             return result;
         }
     }
-    // Default: TypeScript parser
+    if !lower.ends_with(".runar.ts") {
+        return directive_guard_result(unsupported_extension_message(name));
+    }
+    // TypeScript parser
     let mut result = parse(source, file_name);
     // N-342: `const` locals cannot be reassigned (`.runar.ts` only).
     if let Some(contract) = result.contract.as_ref() {

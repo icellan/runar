@@ -5,37 +5,47 @@ import (
 	"strings"
 )
 
+// ScriptVerifyFailed is the reason SV Node gives for a spend whose unlocking
+// script fails (a false assert, a failed checkSig, a script error such as
+// OP_SPLIT out of range). The Rust, Java and Zig suites pin the same text.
+const ScriptVerifyFailed = "mandatory-script-verify-flag-failed"
+
+// broadcastStateSource is satisfied by *RPCProvider and, through embedding,
+// by *BatchRPCProvider, so a negative passes whichever provider it used.
+type broadcastStateSource interface {
+	broadcastState() *RPCProvider
+}
+
+func (p *RPCProvider) broadcastState() *RPCProvider { return p }
+
 // CheckNodeRejected reports whether `err`, returned by an SDK call made against
-// `p`, is evidence that the NODE rejected the spend — as opposed to the SDK
-// failing to assemble it, or the node never answering at all.
+// `p`, is evidence that the NODE rejected the spend for `reason` — as opposed
+// to the SDK failing to assemble it, the node never answering, or the node
+// ACCEPTING it and the confirming mine failing afterwards.
 //
 // `before` is p.BroadcastAttempts sampled immediately before the call.
 //
-// Three things have to hold, and none of them is implied by `err != nil`:
+// It reads what each broadcast of the call came to (p.BroadcastLog), not the
+// error's text: since a failed confirming mine is an error (GK-BUG-004 /
+// R3-GO-BROADCAST-MINE), an accepted spend also errors after an attempt, and
+// its error carries the node's own "RPC error ..." reply from the mine RPC.
+// Returns nil when, and only when:
 //
-//  1. There is an error. A spend that was ACCEPTED is not a rejection.
-//  2. The counter moved. RunarContract.FinalizeCall returns "parsing tx: ..."
-//     before it ever reaches provider.Broadcast, so a guard that hand-mutates a
-//     PreparedCall can fail assembly and look identical to a consensus
-//     rejection from the outside. A moved counter proves assembly finished and
-//     a transaction was handed to the node.
-//  3. The node answered with a rejection. RPCCall reports a node-side refusal
-//     as "RPC error <code>: <message>" and a transport failure as "RPC
-//     connection failed: ...". Only the first is consensus speaking.
+//  1. there is an error (a spend that was ACCEPTED is not a rejection);
+//  2. the call broadcast at least once (an error with no broadcast is an
+//     SDK-side refusal, e.g. FinalizeCall's "parsing tx: ...", not consensus);
+//  3. the node accepted NONE of the call's broadcasts — including an accepted
+//     tx whose confirming mine then failed;
+//  4. the last one was refused by the node at sendrawtransaction with a message
+//     containing `reason`.
 //
-// Conditions 2 and 3 are independent, and each catches a case the other misses:
-// a UTXO-fetch failure surfaces the node's own "RPC error ..." text without any
-// transaction ever being broadcast, and an unreachable node moves the counter
-// without consensus ever ruling on the spend.
-//
-// It deliberately does NOT match on a particular rejection message: an
-// assertion that pins the exact consensus reason reddens on a legitimate
-// rejection the day a node changes its wording, which is the failure mode of
-// an over-strict guard rather than of a vacuous one.
-//
-// Returns nil when the rejection is genuine, and an error describing which of
-// the three conditions failed otherwise.
-func CheckNodeRejected(p *RPCProvider, before int, err error) error {
+// The reason is pinned because a refusal for a different reason (a
+// double-spend, a missing input) never ran the script the test is about.
+func CheckNodeRejected(src broadcastStateSource, before int, err error, reason string) error {
+	p := src.broadcastState()
+	if reason == "" {
+		return fmt.Errorf("CheckNodeRejected needs the rejection reason the test is about")
+	}
 	if err == nil {
 		return fmt.Errorf(
 			"the spend was ACCEPTED (no error), so nothing was rejected; broadcasts %d -> %d",
@@ -47,11 +57,23 @@ func CheckNodeRejected(p *RPCProvider, before int, err error) error {
 				"so this error is an assembly/build failure and NOT a consensus rejection: %w",
 			before, p.BroadcastAttempts, err)
 	}
-	if !strings.Contains(err.Error(), "RPC error ") {
-		return fmt.Errorf(
-			"the transaction reached the broadcast path but the node never ruled on it: a "+
-				"consensus rejection arrives as the node's own \"RPC error <code>: <message>\" "+
-				"reply, an unreachable node as \"RPC connection failed\": %w", err)
+	if len(p.BroadcastLog) != p.BroadcastAttempts || before < 0 {
+		return fmt.Errorf("broadcast log out of sync: %d entries for %d attempts (before=%d)",
+			len(p.BroadcastLog), p.BroadcastAttempts, before)
+	}
+	added := p.BroadcastLog[before:]
+	for _, o := range added {
+		if o.Kind == BroadcastAccepted || o.Kind == BroadcastAcceptedMineFailed {
+			return fmt.Errorf("the node ACCEPTED a transaction from this call (%s: %s): %w", o.Kind, o.Detail, err)
+		}
+	}
+	last := added[len(added)-1]
+	if last.Kind != BroadcastNodeRejected {
+		return fmt.Errorf("the node never ruled on the spend (%s: %s): %w", last.Kind, last.Detail, err)
+	}
+	if !strings.Contains(last.Detail, reason) {
+		return fmt.Errorf("the node rejected the spend for the wrong reason: expected %q, got %q",
+			reason, last.Detail)
 	}
 	return nil
 }

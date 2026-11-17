@@ -234,7 +234,7 @@ actually exhaustive on-chain; see `spec/type-system.md` § 2 for why.
 | `Sha256` | 32 | SHA-256 digest |
 | `Ripemd160` | 20 | RIPEMD-160 digest |
 | `Addr` | 20 | Bitcoin address (hash160 of pubkey) |
-| `SigHashPreimage` | variable | Transaction sighash preimage for OP_PUSH_TX |
+| `SigHashPreimage` | variable | Transaction sighash preimage for OP_PUSH_TX. Not allowed as a readonly property (see `checkPreimage`) |
 | `Point` | 64 | secp256k1 elliptic curve point (x[32] \|\| y[32], big-endian) |
 
 All domain types (`PubKey`, `Sig`, `Point`, etc.) are representational subtypes of `ByteString` — they share the same runtime encoding as raw bytes and exist for documentation and readability, not for compile-time size enforcement. The type checker accepts assignment in both directions: a domain type value can be widened to `ByteString`, and a `ByteString` value can be passed where a domain type is expected. Cross-subtype assignment within the `ByteString` family is also accepted (e.g., `Ripemd160` assignable to `Addr`). Developers are responsible for any required length or domain checks at runtime — for example `assert(len(pk) === 33n)` for a `PubKey`, or `assert(len(addr) === 20n)` for an `Addr`. See `spec/type-system.md` §2.2 for the full subtyping rule.
@@ -536,9 +536,9 @@ private helper(x: bigint): bigint {
 | `hash160` | `(data: ByteString) => Ripemd160` | `OP_HASH160` (SHA-256 then RIPEMD-160) |
 | `sha256` | `(data: ByteString) => Sha256` | `OP_SHA256` |
 | `ripemd160` | `(data: ByteString) => Ripemd160` | `OP_RIPEMD160` |
-| `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. |
+| `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. A public method's `SigHashPreimage` parameter must be passed to `checkPreimage` exactly once, on every path, as an asserted condition (`assert(checkPreimage(p))`, or a conjunct of an `&&` chain inside `assert`), or the method does not compile; a discarded, negated or `if`-tested call does not count, and the compile fails with `public method '<m>' must assert checkPreimage(<p>) on every path` (spec/type-system.md 4.2-4.3). A readonly property holding a `SigHashPreimage` (or a `FixedArray` of them) is refused at its declaration with `readonly property '<name>' cannot hold a SigHashPreimage: ...`: a preimage fixed in the locking script can never pass `checkPreimage`, so pass the preimage as a method parameter instead (spec/type-system.md 4.3). |
 | `sha256Compress` | `(state: ByteString, block: ByteString) => ByteString` | One round of SHA-256 compression. Takes a 32-byte intermediate state and a 64-byte message block, returns the updated 32-byte state. Inlines ~3000 opcodes. |
-| `sha256Finalize` | `(state: ByteString, remaining: ByteString, msgBitLen: bigint) => ByteString` | Finalize a partial SHA-256 hash. Applies padding to the remaining bytes (< 64 bytes) and runs 1-2 final compression rounds. Returns the final 32-byte hash. |
+| `sha256Finalize` | `(state: ByteString, remaining: ByteString, msgBitLen: bigint) => ByteString` | Finalize a partial SHA-256 hash. Applies padding to the remaining bytes (< 64 bytes) and runs 1-2 final compression rounds. Returns the final 32-byte hash. Aborts unless `msgBitLen` is in [0, 2^64), the range the 8-byte length field holds; every off-chain implementation refuses the same range. |
 | `blake3Compress` | `(chainingValue: ByteString, block: ByteString) => ByteString` | BLAKE3 single-block compression. Takes a 32-byte chaining value and a 64-byte block, returns the 32-byte hash. Hardcodes blockLen=64, counter=0, flags=11 (CHUNK_START\|CHUNK_END\|ROOT). Inlines ~10,000 opcodes (~11 KB). |
 | `blake3Hash` | `(message: ByteString) => ByteString` | BLAKE3 hash for messages up to 64 bytes. Zero-pads the message to 64 bytes and calls the compression function with the BLAKE3 IV as the chaining value. Returns the 32-byte hash. |
 
@@ -690,10 +690,12 @@ other builtins: `runar.ContinuationAmount()` (Go), `continuation_amount()`
 | `verifyWOTS` | `(msg, sig, pubkey) => boolean` | WOTS+ verification (w=16, SHA-256). One-time use per keypair. Sig: 2,144 B. |
 | `verifySLHDSA_SHA2_128s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-128s (FIPS 205). Stateless, multi-use. Sig: 7,856 B. |
 | `verifySLHDSA_SHA2_128f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-128f. Fast variant. Sig: 17,088 B. |
-| `verifySLHDSA_SHA2_192s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192s. 192-bit security. Sig: 16,224 B. |
-| `verifySLHDSA_SHA2_192f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192f. Fast variant. Sig: 35,664 B. |
-| `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256s. 256-bit security. Sig: 29,792 B. |
-| `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256f. Fast variant. Sig: 49,856 B. |
+| `verifySLHDSA_SHA2_192s` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-192s shapes; not FIPS 205 (see note). Sig: 16,224 B. |
+| `verifySLHDSA_SHA2_192f` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-192f shapes (fast); not FIPS 205 (see note). Sig: 35,664 B. |
+| `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-256s shapes; not FIPS 205 (see note). Sig: 29,792 B. |
+| `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-256f shapes (fast); not FIPS 205 (see note). Sig: 49,856 B. |
+
+> **The 192/256 SLH-DSA functions are SHA-256-only, not FIPS 205.** FIPS 205 hashes these four parameter sets with SHA-512, and SHA-512's 64-bit word arithmetic is not expressible in Bitcoin Script (no `OP_SHA512`, issue #137). These four functions use SHA-256 throughout, at the FIPS 205 parameter shapes, in all seven compilers and SDKs. They verify signatures made by the repo's own SDK signers, but a standard `SLH-DSA-SHA2-192s/192f/256s/256f` signature from a FIPS 205 implementation will not verify. FIPS 205 itself specifies SHA-256 for the 128s/128f sets, so this limit does not apply to them (the 128s set is checked against a NIST ACVP vector; see `docs/test-skips.md`).
 
 ### Elliptic Curve (secp256k1)
 

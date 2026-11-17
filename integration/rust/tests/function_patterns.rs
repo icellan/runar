@@ -248,6 +248,7 @@ fn test_function_patterns_wrong_owner_rejected() {
     let mut new_state = HashMap::new();
     new_state.insert("balance".to_string(), SdkValue::Int(1050));
 
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "deposit",
         &[SdkValue::Auto, SdkValue::Int(50)],
@@ -258,5 +259,5 @@ fn test_function_patterns_wrong_owner_rejected() {
             ..Default::default()
         }),
     );
-    assert!(result.is_err(), "deposit with wrong owner should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { compileSource } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 import { createHash } from 'crypto';
 
 // ---- Merkle tree helpers ----
@@ -189,9 +189,9 @@ describe('Merkle Proof Verification', () => {
     const { signer } = await createFundedWallet(provider);
 
     await contract.deploy(provider, signer, {});
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('verify', [wrongLeaf, proof, 0n], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 
   it('rejects wrong index on-chain', async () => {
@@ -204,9 +204,9 @@ describe('Merkle Proof Verification', () => {
 
     await contract.deploy(provider, signer, {});
     // Proof is for index 0, using it at index 1 should fail
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('verify', [leaf, proof, 1n], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 
   it('rejects tampered proof on-chain', async () => {
@@ -220,8 +220,8 @@ describe('Merkle Proof Verification', () => {
     const { signer } = await createFundedWallet(provider);
 
     await contract.deploy(provider, signer, {});
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('verify', [leaf, tampered, 5n], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 });

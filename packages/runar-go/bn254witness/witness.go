@@ -8,13 +8,15 @@
 // field inversions inside the Miller loop gradients, and the final
 // exponentiation. Neither fits comfortably inside a Bitcoin Script budget.
 // Witness-assisted verification moves both operations off-chain: the
-// prover computes the per-iteration Miller loop gradients and four Fp12
-// witness values (f^-1, f2^x, f2^(x^2), f2^(x^3)) and pushes them onto
-// the stack alongside the proof. The on-chain verifier then only has to
-// check that the supplied witnesses are consistent — multiplications,
-// squarings, and Frobenius maps, all cheap — and that the resulting
-// pairing product equals one. The same strategy is used by the
-// prepared-inputs MSM: the prover folds public inputs into a single G1
+// prover computes the per-iteration Miller loop gradients and a residue
+// witness — c, c^-1 in Fp12 and an index s in {0, 1, 2} with
+// f·ω^s == c^λ, λ = 6x+2+p−p²+p³ (Novakovic & Eagen, eprint 2024/640) —
+// and pushes them onto the stack alongside the proof. Such a c exists iff
+// the pairing product is 1, so the on-chain verifier never computes a
+// final exponentiation: it folds c into the Miller loop's squarings and
+// checks that the product is one (GK-BUG-005 — this replaced a
+// witness-assisted final exponentiation that trusted its witnesses). The
+// same strategy is used by the prepared-inputs MSM: the prover folds public inputs into a single G1
 // accumulator off-chain so the script does not have to run variable-base
 // scalar multiplication.
 //
@@ -123,19 +125,25 @@ type Witness struct {
 	// is len(codegen.Bn254SixXPlus2NAF()) - 1 (msbIdx down to 0).
 	MillerGradients []*big.Int
 
-	// FinalExpFInv is f^-1 in Fp12, the witness for the easy-part inverse
-	// check (12 Fp values in gnark flat order: C0.B0.A0, C0.B0.A1, ...,
-	// C1.B2.A1).
-	FinalExpFInv [12]*big.Int
+	// ResidueC is the residue witness c (12 Fp values in gnark flat order:
+	// C0.B0.A0, C0.B0.A1, ..., C1.B2.A1) with
+	//
+	//	c^λ == f · ω^ResidueScaling,   λ = 6x + 2 + p − p² + p³,
+	//
+	// f the exact product the verifier's Miller loop computes (see
+	// MillerLoopProduct) and ω = codegen.Bn254ResidueOmega27(). Such a c
+	// exists iff the pairing check holds; it replaces the final
+	// exponentiation (GK-BUG-005). It is not unique: c·κ for any κ with
+	// κ^λ = 1 verifies too.
+	ResidueC [12]*big.Int
 
-	// FinalExpA is f2^x where f2 = f^((p^6-1)*(p^2+1)) (the easy part output).
-	FinalExpA [12]*big.Int
+	// ResidueCInv is c^-1. The verifier checks c · c^-1 == 1.
+	ResidueCInv [12]*big.Int
 
-	// FinalExpB is f2^(x^2) = (f2^x)^x.
-	FinalExpB [12]*big.Int
-
-	// FinalExpC is f2^(x^3) = (f2^(x^2))^x.
-	FinalExpC [12]*big.Int
+	// ResidueScaling is s ∈ {0, 1, 2}: the verifier multiplies f by ω^s.
+	// It is the unique s that makes f·ω^s a cube; anything outside
+	// {0, 1, 2} aborts the verifier.
+	ResidueScaling int
 
 	// PreparedInputs is the off-chain-computed G1 point
 	//   IC[0] + sum_{j} (publicInputs[j] * IC[j+1])
@@ -160,9 +168,9 @@ type Witness struct {
 	// PublicInputs is the list of 5 SP1 public-input scalars, populated
 	// when the witness targets the MSM-binding verifier variant
 	// (EmitGroth16VerifierWitnessAssistedWithMSM) instead of the raw one.
-	// When populated, ToStackOps emits these 5 scalars between the final-
-	// exponentiation witnesses and PreparedInputs, matching the MSM
-	// variant's initNames layout.
+	// When populated, ToStackOps emits these 5 scalars between the residue
+	// witness and PreparedInputs, matching the MSM variant's initNames
+	// layout.
 	//
 	// When all five entries are nil, the witness targets the raw variant
 	// and the 5 scalars are omitted from the stack layout.
@@ -281,55 +289,90 @@ func generateWitness(
 	}
 	w.ProofBSubgroupGradients = subgroupGradients
 
-	// 2. Run the triple Miller loop with gradient capture.
-	//    Pair 1: (proof_A, proof_B)         — both positive
-	//    Pair 2: (prepared_inputs, -gamma)  — gamma pre-negated in VK
-	//    Pair 3: (proof_C, -delta)          — delta pre-negated in VK
-	//
-	// Pair order MUST match EmitGroth16VerifierWitnessAssisted's Step 3
-	// so witness gradients land in the right slots.
+	// 2-3. Triple Miller loop with gradient capture, times MillerLoop(α, -β):
+	//      the exact Fp12 value the verifier's residue check is applied to.
+	gradients, f, err := millerLoopProduct(vk, proof, preparedInputs)
+	if err != nil {
+		return nil, err
+	}
+	w.MillerGradients = gradients
+
+	// 4. Residue witness (c, c^-1, s) with f·ω^s == c^λ. For a FALSE
+	//    statement no such c exists; the bundle is still returned (with the
+	//    same formula's c) so callers can show the verifier rejects it.
+	c, cInv, sIdx, _, err := computeResidueWitness(f)
+	if err != nil {
+		return nil, fmt.Errorf("bn254witness: residue witness: %w", err)
+	}
+	w.ResidueC = c
+	w.ResidueCInv = cInv
+	w.ResidueScaling = sIdx
+
+	return w, nil
+}
+
+// millerLoopProduct runs the verifier's triple Miller loop (capturing its
+// gradients) over
+//
+//	Pair 1: (proof_A, proof_B)         — both positive
+//	Pair 2: (prepared_inputs, -gamma)  — gamma pre-negated in VK
+//	Pair 3: (proof_C, -delta)          — delta pre-negated in VK
+//
+// and multiplies the result by the precomputed MillerLoop(α, -β). Pair order
+// MUST match EmitGroth16VerifierWitnessAssisted's Step 3 so the gradients
+// land in the right slots.
+func millerLoopProduct(vk VerifyingKey, proof Proof, preparedInputs [2]*big.Int) ([]*big.Int, [12]*big.Int, error) {
 	gradients, fAfterLoop, err := tripleMillerLoopWithGradients(
 		proof.A, proof.B,
 		preparedInputs, vk.GammaNegG2,
 		proof.C, vk.DeltaNegG2,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("bn254witness: Miller loop: %w", err)
+		return nil, [12]*big.Int{}, fmt.Errorf("bn254witness: Miller loop: %w", err)
 	}
-	w.MillerGradients = gradients
-
-	// 3. Multiply f by precomputed MillerLoop(α, -β) to get the value
-	//    that will feed the final exponentiation in the verifier.
 	alphaNegBetaFp12, err := PrecomputeAlphaNegBeta(vk.AlphaG1, vk.BetaNegG2)
 	if err != nil {
-		return nil, fmt.Errorf("bn254witness: precompute MillerLoop(α,-β): %w", err)
+		return nil, [12]*big.Int{}, fmt.Errorf("bn254witness: precompute MillerLoop(α,-β): %w", err)
 	}
-	fAfterAB, err := fp12Mul12(fAfterLoop, alphaNegBetaFp12)
+	f, err := fp12Mul12(fAfterLoop, alphaNegBetaFp12)
 	if err != nil {
-		return nil, fmt.Errorf("bn254witness: Fp12 mul with alpha-neg-beta: %w", err)
+		return nil, [12]*big.Int{}, fmt.Errorf("bn254witness: Fp12 mul with alpha-neg-beta: %w", err)
 	}
+	return gradients, f, nil
+}
 
-	// 4. Compute final exponentiation witnesses (fInv, a, b, c).
-	fInv, a, b, c, err := computeFinalExpWitnesses(fAfterAB)
+// MillerLoopProduct returns the exact Fp12 value (gnark flat order) the
+// witness-assisted verifier's residue check is applied to for this VK,
+// proof and public-input vector: the triple Miller loop with the script's
+// Py-scaled affine lines, times MillerLoop(α, -β). The Groth16 equation
+// holds iff this value raised to (p¹²−1)/r is 1, and the verifier accepts
+// iff the witness's c satisfies c^λ == product·ω^s.
+//
+// Exposed for adversarial tests that construct residue witnesses directly.
+func MillerLoopProduct(vk VerifyingKey, proof Proof, publicInputs []*big.Int) ([12]*big.Int, error) {
+	if len(vk.IC) != len(publicInputs)+1 {
+		return [12]*big.Int{}, fmt.Errorf(
+			"bn254witness: VK has %d IC points but %d public inputs (expected %d IC)",
+			len(vk.IC), len(publicInputs), len(publicInputs)+1,
+		)
+	}
+	preparedInputs, err := computePreparedInputs(vk.IC, publicInputs)
 	if err != nil {
-		return nil, fmt.Errorf("bn254witness: final exp witnesses: %w", err)
+		return [12]*big.Int{}, fmt.Errorf("bn254witness: prepared_inputs: %w", err)
 	}
-	w.FinalExpFInv = fInv
-	w.FinalExpA = a
-	w.FinalExpB = b
-	w.FinalExpC = c
-
-	return w, nil
+	_, f, err := millerLoopProduct(vk, proof, preparedInputs)
+	return f, err
 }
 
 // ToStackOps emits the push sequence that initializes the verifier's stack,
 // in the exact order EmitGroth16VerifierWitnessAssisted expects.
 //
-// The order is: q, MillerGradients (interleaved per iteration), FinalExpFInv,
-// FinalExpA, FinalExpB, FinalExpC, PreparedInputs (x, y), ProofA (x, y),
-// ProofB (x0, x1, y0, y1), ProofC (x, y).
+// The order is: q, MillerGradients (interleaved per iteration), ResidueC,
+// ResidueCInv, ResidueScaling, [PublicInputs], PreparedInputs (x, y), the
+// proof.B subgroup gradients, ProofA (x, y), ProofB (x0, x1, y0, y1),
+// ProofC (x, y).
 func (w *Witness) ToStackOps() []codegen.StackOp {
-	ops := make([]codegen.StackOp, 0, 1+len(w.MillerGradients)+48+2+8)
+	ops := make([]codegen.StackOp, 0, 1+len(w.MillerGradients)+25+5+2+len(w.ProofBSubgroupGradients)+8)
 
 	// 1. q
 	ops = append(ops, pushBig(w.Q))
@@ -339,12 +382,13 @@ func (w *Witness) ToStackOps() []codegen.StackOp {
 		ops = append(ops, pushBig(g))
 	}
 
-	// 3. Final exp witnesses: fInv, a, b, c — each as 12 Fp values in flat order
-	for _, fp12 := range [4][12]*big.Int{w.FinalExpFInv, w.FinalExpA, w.FinalExpB, w.FinalExpC} {
+	// 3. Residue witness: c, c^-1 (12 Fp values each, flat order), then s.
+	for _, fp12 := range [2][12]*big.Int{w.ResidueC, w.ResidueCInv} {
 		for i := 0; i < 12; i++ {
 			ops = append(ops, pushBig(fp12[i]))
 		}
 	}
+	ops = append(ops, pushBig(big.NewInt(int64(w.ResidueScaling))))
 
 	// 4a. 5 SP1 public-input scalars — only emitted when populated (the
 	// MSM-binding variant). The raw variant leaves these nil and the

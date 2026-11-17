@@ -49,8 +49,8 @@ class TestSigner implements EnvelopeSigner {
 // Does not prove: anything about the six peer tiers (each has its own interop
 // file, listed alongside this one in conformance/wire-primitives.json); the
 // depth / malleability / der-* vectors, which envelope.test.ts still replays
-// via `vi.spyOn(Date, 'now')` rather than `nowMs`; or `pubkey-not-allowed`,
-// which the shared fixture omits by design (note_on_pubkey_not_allowed). The
+// via `vi.spyOn(Date, 'now')` rather than `nowMs`. `pubkey-not-allowed` is
+// covered by `allowlist_vectors` (GK-BUG-008). The
 // signing test uses a deterministic low-S TestSigner, so it pins
 // `signEnvelope`'s clock plumbing and canonicalJson, not a production
 // WalletSigner's output.
@@ -63,7 +63,29 @@ const fixturePath = resolve(
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
   verify_now_ms: number;
   valid_envelope: SignedEnvelope;
-  rejection_vectors: Array<{ reason: VerifyEnvelopeReason; envelope: SignedEnvelope }>;
+  rejection_vectors: Array<{ _vector_id?: string; reason: VerifyEnvelopeReason; envelope: SignedEnvelope }>;
+  duplicate_key_vectors: Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: VerifyEnvelopeReason;
+    envelope: SignedEnvelope;
+  }>;
+  invalid_utf8_vectors: Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: VerifyEnvelopeReason;
+    payload_hex: string;
+    sig: string;
+    pubkey: string;
+    nonce: number;
+    expiresAt: number;
+  }>;
+  allowlist_vectors: Array<{
+    _vector_id: string;
+    expected_keys: string[] | null;
+    expect_ok: boolean;
+    reason?: VerifyEnvelopeReason;
+  }>;
   clock_skew_vectors: Array<{
     _vector_id: string;
     clock_skew_ms: number | null;
@@ -92,8 +114,46 @@ describe('envelope interop fixture replay under the frozen clock (F-359)', () =>
     expect(fixture.rejection_vectors.length).toBeGreaterThan(0);
     for (const v of fixture.rejection_vectors) {
       const r = verifyEnvelope({ envelope: v.envelope, nowMs: fixture.verify_now_ms });
-      expect(r.ok, `expected rejection ${v.reason}`).toBe(false);
-      expect(r.reason, `rejection ${v.reason}`).toBe(v.reason);
+      const id = v._vector_id ?? v.reason;
+      expect(r.ok, `expected rejection ${v.reason} (${id})`).toBe(false);
+      expect(r.reason, `rejection ${v.reason} (${id})`).toBe(v.reason);
+    }
+  });
+
+  // R2-DUPKEY: a payload object with two members of the same key (compared
+  // after unescaping, at any depth) is bad-json, decided in the parse step:
+  // after expired, before envelope-mismatch / bad-sig. JSON.parse keeps the
+  // LAST value, so the dk* vectors verified ok before the fix; the dkc*
+  // controls (same key in DIFFERENT objects) must stay ok.
+  it('gives every duplicate_key_vectors entry its listed verdict (R2-DUPKEY)', () => {
+    expect(fixture.duplicate_key_vectors.length).toBeGreaterThan(0);
+    const failures: string[] = [];
+    for (const v of fixture.duplicate_key_vectors) {
+      const r = verifyEnvelope({ envelope: v.envelope, nowMs: fixture.verify_now_ms });
+      const want = v.expect_ok ? 'ok' : v.reason;
+      const got = r.ok ? 'ok' : r.reason;
+      if (got !== want) failures.push(`${v._vector_id}: got ${got}, want ${want}`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // GK-BUG-008: a supplied allowlist is used as given, so an EMPTY list
+  // allows nobody; null (not supplied) skips the check.
+  it('honors the allowlist_vectors empty-denies / not-supplied semantics (GK-BUG-008)', () => {
+    expect(fixture.allowlist_vectors.length).toBeGreaterThan(0);
+    for (const v of fixture.allowlist_vectors) {
+      const opts: { envelope: SignedEnvelope; nowMs: number; expectedKeys?: string[] } = {
+        envelope: fixture.valid_envelope,
+        nowMs: fixture.verify_now_ms,
+      };
+      if (v.expected_keys !== null) opts.expectedKeys = v.expected_keys;
+      const r = verifyEnvelope(opts);
+      if (v.expect_ok) {
+        expect(r.ok, `${v._vector_id}: reason=${r.reason}`).toBe(true);
+      } else {
+        expect(r.ok, `${v._vector_id}: expected ok=false`).toBe(false);
+        expect(r.reason, v._vector_id).toBe(v.reason);
+      }
     }
   });
 
@@ -141,6 +201,30 @@ describe('envelope interop fixture replay under the frozen clock (F-359)', () =>
       // SAME injectable clock.
       const r = verifyEnvelope({ envelope: env, nowMs: fixture.verify_now_ms });
       expect(r.ok, `${id}: reason=${r.reason}`).toBe(true);
+    }
+  });
+
+  // R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. A JS
+  // string holds UTF-16 code units, so no ju* payload can reach verifyEnvelope
+  // from this tier: the strict decode a caller must make (TextDecoder with
+  // fatal: true) refuses every ju* vector, and juc1 (well-formed multi-byte
+  // UTF-8) decodes and verifies ok. A NON-fatal decode would fold the bytes to
+  // U+FFFD, which no longer matches the signed bytes.
+  it('invalid_utf8_vectors cannot become a payload; the multi-byte control verifies', () => {
+    expect(fixture.invalid_utf8_vectors.length).toBeGreaterThan(0);
+    const strict = new TextDecoder('utf-8', { fatal: true });
+    for (const v of fixture.invalid_utf8_vectors) {
+      const bytes = Uint8Array.from(Utils.toArray(v.payload_hex, 'hex'));
+      if (!v.expect_ok) {
+        expect(() => strict.decode(bytes), v._vector_id).toThrow(TypeError);
+        continue;
+      }
+      const payload = strict.decode(bytes);
+      const r = verifyEnvelope({
+        envelope: { payload, sig: v.sig, pubkey: v.pubkey, nonce: v.nonce, expiresAt: v.expiresAt },
+        nowMs: fixture.verify_now_ms,
+      });
+      expect(r.ok, `${v._vector_id}: reason=${r.reason}`).toBe(true);
     }
   });
 });

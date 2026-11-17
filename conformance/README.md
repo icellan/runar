@@ -48,7 +48,7 @@ exit 0.
 
 ## Purpose
 
-Rúnar defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce byte-identical ANF IR (serialized via RFC 8785). The conformance suite verifies this property.
+Rúnar defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce the same ANF IR, compared after normalisation (sorted keys, `sourceLoc` stripped, one bigint spelling; see "How the Test Runner Works"). The conformance suite verifies this property.
 
 Additionally, the compiled Bitcoin Script output must be identical across compilers. The script is the final artifact deployed on-chain, so even a single-byte difference could mean a different locking script hash and a non-functional contract.
 
@@ -212,15 +212,17 @@ The allowlist is currently **empty** (`"skip": []`): there are no fold-ON exempt
 
 **Vacuous rows (F-049).** A row that ran without error but compared nothing — fewer than two tiers' outputs compared with each other AND no output compared with a golden — is reported `VACUOUS`, not `PASS`, and counted separately: `Summary: N passed, F failed, S skipped, V vacuous (T total)`. Under fold-ON this is every format of a single-tier (`"compilers": ["go"]`) fixture, since its only other check, the golden, is skipped; in either mode it is also a row whose only allowlisted tier was unavailable, and a fold-ON allowlist entry. A vacuous row does not fail the run, but it is never counted in `passed`, so a gate on the pass count (e.g. `scripts/release.sh`) treats it as not passed.
 
-**Single-tier fixtures under fold-ON: `foldOnMatchesGolden` (N-473).** A `"compilers"`-allowlisted fixture whose fold-ON output is byte-identical to its fold-OFF golden declares `"foldOnMatchesGolden": true` in `source.json`. Under fold-ON the runner then compares that fixture's output against the existing `expected-ir.json` / `expected-script.hex` (in both golden and `--multi-format` modes), so the row checks something real and is not vacuous. Because every format is compared with the same golden, the nine surface formats are also held to each other under fold-ON. No new golden file is involved: the reference is the already provenance-gated fold-OFF golden. The vacuity rule itself is unchanged; a flagged row is non-vacuous only because the comparison actually ran. If folding ever moves a flagged fixture's bytes, its fold-ON rows fail. That forces a real decision (fix the compiler, or drop the flag and add a separately gated fold-ON reference); the flag never hides the change. The runner refuses the flag unless it is literally `true`, and refuses it on a fixture without a `compilers` allowlist, because every-tier fixtures are already cross-validated tier against tier under fold-ON. All five Go-only fixtures (`babybear`, `babybear-ext4`, `bn254-pairing`, `merkle-proof`, `state-covenant`) carry the flag. At 2f2b78f5b the Go tier's fold-ON IR and hex were measured equal to the golden in all nine formats. Gated by `runner/__tests__/single-tier-vacuous.test.ts`.
+**Single-tier fixtures under fold-ON: `foldOnMatchesGolden` (N-473).** A `"compilers"`-allowlisted fixture whose fold-ON output is byte-identical to its fold-OFF golden declares `"foldOnMatchesGolden": true` in `source.json`. Under fold-ON the runner then compares that fixture's output against the existing `expected-ir.json` / `expected-script.hex` (in both golden and `--multi-format` modes), so the row checks something real and is not vacuous. Because every format is compared with the same golden, the nine surface formats are also held to each other under fold-ON. No new golden file is involved: the reference is the already provenance-gated fold-OFF golden. The vacuity rule itself is unchanged; a flagged row is non-vacuous only because the comparison actually ran. If folding ever moves a flagged fixture's bytes, its fold-ON rows fail. That forces a real decision (fix the compiler, or drop the flag and add a separately gated fold-ON reference); the flag never hides the change. The runner refuses the flag unless it is literally `true`, and refuses it on a fixture without a `compilers` allowlist, because every-tier fixtures are already cross-validated tier against tier under fold-ON. All five Go-only fixtures (`babybear`, `babybear-ext4`, `bn254-pairing`, `merkle-proof`, `state-covenant`) carry the flag. At 2f2b78f5b the Go tier's fold-ON IR and hex were measured equal to the golden in all nine formats. Gated by `runner/__tests__/single-tier-vacuous.test.ts`. The flag is no longer optional for new single-tier fixtures (GK-GAP-002): `runner/__tests__/allowlist-audit.test.ts` fails when a `compilers`-allowlisted fixture has neither `"foldOnMatchesGolden": true` nor a whole-fixture entry with a non-empty `reason` in `fold-on-allowlist.json`, so a new Go-only fixture cannot land vacuous-but-green under fold-ON. Rows that are vacuous for other reasons are still labelled `VACUOUS`, not failed.
 
 ### File Roles
 
 | File | Purpose |
 |---|---|
-| `*.runar.ts` | The source contract. Input to the compiler. |
-| `expected-ir.json` | The expected ANF IR output. Canonical JSON (RFC 8785, no whitespace, sorted keys). The SHA-256 of this file is the conformance check. |
-| `expected-script.hex` | The expected compiled Bitcoin Script as a hex string. If present, the compiler's script output must match exactly. |
+| `source.json` | Declares the fixture's sources: a `sources` map from each of the nine extensions to a contract under `examples/<lang>/`, plus optional `compilers`, `parserSkip` / `parserSkipReason` and `foldOnMatchesGolden`. A case directory never holds its own `*.runar.*` file. |
+| `expected-ir.json` | The expected ANF IR (fold-OFF). The runner normalises both sides (keys sorted, `sourceLoc` stripped, bigints in one spelling, 2-space JSON) and compares the resulting strings. No hash is taken. |
+| `expected-script.hex` | The expected compiled Bitcoin Script as a hex string (fold-OFF). Both sides are lowercased and whitespace-stripped, then compared exactly. |
+
+A golden's sha256 matters only to the separate provenance gate, `conformance/scripts/check-golden-provenance.mjs`, which refuses a changed golden that carries no independent justification (see "Golden-regeneration integrity gate" below). The runner never hashes anything.
 
 ---
 
@@ -230,14 +232,18 @@ The runner (in `runner/`) performs these steps for each test case:
 
 ```
 For each test directory:
-  1. Read the .runar.ts source file.
-  2. Invoke the compiler under test to produce ANF IR.
-  3. Serialize the compiler's ANF IR using canonical JSON (RFC 8785).
-  4. Compare SHA-256(compiler_output) with SHA-256(expected-ir.json).
-  5. If expected-script.hex exists:
-     a. Invoke the compiler to produce the final script.
-     b. Compare the script hex with expected-script.hex.
-  6. Report pass/fail.
+  1. Resolve the sources declared in source.json (an orphan *.runar.* file in
+     the directory, a missing extension without parserSkip, or parserSkip
+     without parserSkipReason is a hard error).
+  2. Invoke each compiler under test (fold-OFF unless
+     RUNAR_DISABLE_CONSTANT_FOLDING=0) to produce ANF IR and script hex.
+  3. Normalise the ANF IR: parse it, strip sourceLoc, sort keys, normalise
+     bigints, and re-serialise as 2-space JSON. Do the same to expected-ir.json.
+  4. Compare the two normalised strings. Compare the lowercased,
+     whitespace-stripped script hex with expected-script.hex.
+     (Under fold-ON the golden comparison is skipped unless the fixture sets
+     foldOnMatchesGolden; cross-tier parity is still compared.)
+  5. Report pass/fail/skipped/vacuous.
 ```
 
 ### Running the Conformance Suite
@@ -386,37 +392,67 @@ lines for the five fixtures it covers.
 
 ## How to Add New Test Cases
 
-1. Create a new directory under `tests/` with a descriptive name:
+A fixture is a directory under `tests/` holding `source.json` and the goldens. The contracts themselves live under `examples/`, one per format.
 
-```bash
-mkdir conformance/tests/my-new-test
+1. Write the contract in all nine formats, each in its own example directory:
+
+```
+examples/ts/my-new-test/MyNewTest.runar.ts
+examples/sol/my-new-test/MyNewTest.runar.sol
+examples/move/my-new-test/MyNewTest.runar.move
+examples/go/my-new-test/MyNewTest.runar.go
+examples/rust/my-new-test/MyNewTest.runar.rs
+examples/python/my-new-test/MyNewTest.runar.py
+examples/zig/my-new-test/MyNewTest.runar.zig
+examples/ruby/my-new-test/MyNewTest.runar.rb
+examples/java/src/main/java/runar/examples/my-new-test/MyNewTest.runar.java
 ```
 
-2. Write the source contract:
+2. Create `conformance/tests/my-new-test/source.json` with a `sources` map only (never both `path` and `sources`). Paths are relative to the fixture directory:
 
-```bash
-# conformance/tests/my-new-test/my-new-test.runar.ts
+```json
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/my-new-test/MyNewTest.runar.ts",
+    ".runar.sol": "../../../examples/sol/my-new-test/MyNewTest.runar.sol",
+    ".runar.move": "../../../examples/move/my-new-test/MyNewTest.runar.move",
+    ".runar.go": "../../../examples/go/my-new-test/MyNewTest.runar.go",
+    ".runar.rs": "../../../examples/rust/my-new-test/MyNewTest.runar.rs",
+    ".runar.py": "../../../examples/python/my-new-test/MyNewTest.runar.py",
+    ".runar.zig": "../../../examples/zig/my-new-test/MyNewTest.runar.zig",
+    ".runar.rb": "../../../examples/ruby/my-new-test/MyNewTest.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/my-new-test/MyNewTest.runar.java"
+  }
+}
 ```
 
-3. Generate the expected IR using the reference compiler:
+   If a format genuinely cannot express the contract, leave it out of `sources`, list it in `"parserSkip"` and give a non-empty `"parserSkipReason"`. Today that covers `FixedArray` on the Java surface (`"parserSkip": [".runar.java"]`) and, in `ternary-expression`, the conditional expression `c ? a : b` on the four surfaces that have none (`.runar.move`, `.runar.go`, `.runar.rs`, `.runar.zig`). Each skipped format must also be approved in `runner/__tests__/allowlist-audit.test.ts`. Do not put a `*.runar.*` file in the fixture directory; the runner rejects it as an orphan.
+
+3. Generate the goldens fold-OFF from the TypeScript compiler (`--update-golden` runs fold-OFF unless `RUNAR_DISABLE_CONSTANT_FOLDING=0` is set):
 
 ```bash
-runar compile conformance/tests/my-new-test/my-new-test.runar.ts --ir
-# Canonical JSON serialization (RFC 8785) is applied automatically.
-# Copy the ANF IR output to expected-ir.json
+cd conformance && npm run update-golden
 ```
 
-4. Optionally generate the expected script:
+   This writes `expected-ir.json` and `expected-script.hex` for every fixture, so commit only the new fixture's files. A fixture whose `compilers` allowlist excludes `ts` cannot be stamped this way; regenerate it from an allowlisted tier.
+
+4. Admit the new goldens through the provenance gate: add an entry to `conformance/golden-provenance-allowlist.json` (or pin them in a witness), using the hashes printed by
 
 ```bash
-runar compile conformance/tests/my-new-test/my-new-test.runar.ts
-# Copy the script hex to expected-script.hex
+node conformance/scripts/check-golden-provenance.mjs --print-hashes
 ```
 
-5. Run the conformance suite to verify the new test passes:
+5. Register the fixture everywhere the corpus is enumerated (each is checked):
+   - a row in `conformance/script-size-baseline.json`, and the fixture count stated in this README;
+   - a witness (`conformance/witnesses/<name>.json` or `witnesses/real-crypto/<name>.json`) or a `coverage-ledger.json` entry (`witnesses/completeness.test.ts`);
+   - an sdk-output mirror under `conformance/sdk-output/tests/<name>/` or an approved omission in `conformance/sdk-output/coverage-allowlist.json` (`sdk-output/runner/sdk-output-coverage-audit.test.ts`).
+
+6. Run what CI runs, in both fold modes:
 
 ```bash
-pnpm test
+conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+RUNAR_DISABLE_CONSTANT_FOLDING=0 conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --parser-only
 ```
 
 ---
@@ -821,7 +857,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **99 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **100 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|

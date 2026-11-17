@@ -1,0 +1,76 @@
+{
+  "fixture": "ternary-expression",
+  "kind": "stateless-signed",
+  "note": "GK-GAP-003: a well-typed conditional expression in three shapes -- bigint arms (d = |x - threshold|), ByteString arms (t = highTag or lowTag) and a ternary nested in the else arm (b = 2 / 1 / 0 for above / at / below). Every arm of every ternary is taken by at least one accepted spend, and each arm is also given the OTHER arm's value so a swapped or merged branch is refused. The interpreter verdict is asserted equal to the real @bsv/sdk Spend verdict on every row; vmErrorPattern pins which assert refused.",
+  "goldenHashes": {
+    "expected-script.hex": "68e532f340eba2717f38cabd08a01ad25c5376bbd652887ce45f4187f79fe839",
+    "expected-ir.json": "7cdd955e846195c7876f4ea744231f8a0bab784edf7447ef719bf0f4cf10cdbf"
+  },
+  "constructorArgs": {
+    "threshold": "10n",
+    "highTag": "c0ffee",
+    "lowTag": "beef"
+  },
+  "spends": [
+    {
+      "method": "check",
+      "args": ["15n", "5n", "c0ffee", "2n"],
+      "expect": "accept",
+      "note": "x above threshold: every ternary takes its THEN arm (d = x - threshold = 5, t = highTag, b = 2)."
+    },
+    {
+      "method": "check",
+      "args": ["4n", "6n", "beef", "0n"],
+      "expect": "accept",
+      "note": "x below threshold: every ternary takes its ELSE arm, and the nested ternary its inner ELSE arm (d = threshold - x = 6, t = lowTag, b = 0)."
+    },
+    {
+      "method": "check",
+      "args": ["10n", "0n", "beef", "1n"],
+      "expect": "accept",
+      "note": "x at threshold: the nested ternary takes its inner THEN arm (b = 1); d = 0 and t = lowTag via the outer ELSE arms."
+    },
+    {
+      "method": "check",
+      "args": ["15n", "-5n", "c0ffee", "2n"],
+      "expect": "reject",
+      "vmErrorPattern": "OP_NUMEQUALVERIFY requires the top stack item to be truthy",
+      "note": "bigint arms swapped: -5 is the ELSE arm's value (threshold - x) while x is above the threshold."
+    },
+    {
+      "method": "check",
+      "args": ["4n", "-6n", "beef", "0n"],
+      "expect": "reject",
+      "vmErrorPattern": "OP_NUMEQUALVERIFY requires the top stack item to be truthy",
+      "note": "bigint arms swapped the other way: -6 is the THEN arm's value (x - threshold) while x is below."
+    },
+    {
+      "method": "check",
+      "args": ["4n", "6n", "c0ffee", "0n"],
+      "expect": "reject",
+      "vmErrorPattern": "OP_EQUALVERIFY requires the top two stack items to be equal",
+      "note": "ByteString arms swapped: highTag while x is below the threshold."
+    },
+    {
+      "method": "check",
+      "args": ["15n", "5n", "beef", "2n"],
+      "expect": "reject",
+      "vmErrorPattern": "OP_EQUALVERIFY requires the top two stack items to be equal",
+      "note": "ByteString arms swapped: lowTag while x is above the threshold."
+    },
+    {
+      "method": "check",
+      "args": ["10n", "0n", "beef", "0n"],
+      "expect": "reject",
+      "vmErrorPattern": "The top stack element must be truthy after script evaluation",
+      "note": "nested ternary: 0 is the inner ELSE arm's value while x is AT the threshold (wants 1)."
+    },
+    {
+      "method": "check",
+      "args": ["15n", "5n", "c0ffee", "1n"],
+      "expect": "reject",
+      "vmErrorPattern": "The top stack element must be truthy after script evaluation",
+      "note": "nested ternary: 1 is the inner THEN arm's value while x is above (the outer THEN arm wants 2)."
+    }
+  ]
+}

@@ -19,15 +19,30 @@ import java.util.Map;
  * </ul>
  *
  * <p>Deliberately stdlib-only — no Jackson, no Gson. Sufficient for
- * loading {@link RunarArtifact} fixtures. Not RFC 8259 complete
- * (does not support scientific notation or surrogate pairs in
- * escapes), which is all the artifact shape needs.
+ * loading {@link RunarArtifact} fixtures and the signed-envelope payload.
+ * Strings follow the RFC 8259 grammar (raw U+0000..U+001F and malformed
+ * escapes are rejected, R2-JAVA-JSON); a surrogate-pair escape is kept as
+ * its two UTF-16 units, which is the same Java string as the raw code point.
  */
 public final class Json {
     private Json() {}
 
     public static Object parse(String input) {
-        Parser p = new Parser(input);
+        return parse(input, false);
+    }
+
+    /**
+     * {@link #parse}, but an object that carries the same key twice (compared
+     * after unescaping) throws instead of keeping the last value. R2-DUPKEY:
+     * the signed-envelope payload parser. Artifact loading keeps
+     * {@link #parse}'s keep-last behaviour.
+     */
+    static Object parseRejectingDuplicateKeys(String input) {
+        return parse(input, true);
+    }
+
+    private static Object parse(String input, boolean rejectDuplicateKeys) {
+        Parser p = new Parser(input, rejectDuplicateKeys);
         p.skipWs();
         Object result = p.readValue();
         p.skipWs();
@@ -85,9 +100,13 @@ public final class Json {
 
     private static final class Parser {
         private final String s;
+        private final boolean rejectDuplicateKeys;
         int pos = 0;
 
-        Parser(String s) { this.s = s; }
+        Parser(String s, boolean rejectDuplicateKeys) {
+            this.s = s;
+            this.rejectDuplicateKeys = rejectDuplicateKeys;
+        }
 
         void skipWs() {
             while (pos < s.length()) {
@@ -118,7 +137,11 @@ public final class Json {
             if (peek() == '}') { pos++; return out; }
             while (true) {
                 skipWs();
+                int keyAt = pos;
                 String key = readString();
+                if (rejectDuplicateKeys && out.containsKey(key)) {
+                    throw new IllegalArgumentException("Json: duplicate key \"" + key + "\" at " + keyAt);
+                }
                 skipWs();
                 expect(':');
                 Object val = readValue();
@@ -163,15 +186,31 @@ public final class Json {
                         case 'r' -> sb.append('\r');
                         case 't' -> sb.append('\t');
                         case 'u' -> {
+                            // R2-JAVA-JSON: exactly four ASCII hex digits.
+                            // Integer.parseInt(_, 16) also took a sign
+                            // (backslash-u+041 = 'A') and non-ASCII Unicode
+                            // digits; every peer tier rejects both.
                             if (pos + 4 > s.length()) {
-                                throw new IllegalArgumentException("Json: bad \\u escape");
+                                throw new IllegalArgumentException("Json: bad \\u escape at " + (pos - 2));
                             }
-                            int cp = Integer.parseInt(s.substring(pos, pos + 4), 16);
+                            int cp = 0;
+                            for (int k = 0; k < 4; k++) {
+                                int d = hexDigit(s.charAt(pos + k));
+                                if (d < 0) {
+                                    throw new IllegalArgumentException("Json: bad \\u escape at " + (pos - 2));
+                                }
+                                cp = (cp << 4) | d;
+                            }
                             pos += 4;
                             sb.append((char) cp);
                         }
                         default -> throw new IllegalArgumentException("Json: unknown escape \\" + esc);
                     }
+                } else if (c < 0x20) {
+                    // R2-JAVA-JSON: RFC 8259 requires U+0000..U+001F to be
+                    // escaped inside a string; every peer tier rejects them raw.
+                    throw new IllegalArgumentException(String.format(
+                        "Json: unescaped control character U+%04X in string at %d", (int) c, pos - 1));
                 } else {
                     sb.append(c);
                 }
@@ -179,14 +218,35 @@ public final class Json {
             throw new IllegalArgumentException("Json: unterminated string");
         }
 
+        // GK-BUG-009: exactly the RFC 8259 grammar
+        //   -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+        // The old loop took any run of [0-9.eE+-], so 01 became Long 1 and 1.
+        // became 1.0; every peer tier rejects both as bad JSON, so a signed
+        // envelope with "nonce":01 verified ok in this tier alone.
         Object readNumber() {
             int start = pos;
             if (peek() == '-') pos++;
-            while (pos < s.length()) {
-                char c = s.charAt(pos);
-                if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') {
-                    pos++;
-                } else break;
+            if (peek() == '0') {
+                pos++;
+            } else if (peek() >= '1' && peek() <= '9') {
+                skipDigits();
+            } else {
+                throw new IllegalArgumentException("Json: bad number at " + start);
+            }
+            if (peek() == '.') {
+                pos++;
+                if (!(peek() >= '0' && peek() <= '9')) {
+                    throw new IllegalArgumentException("Json: bad number fraction at " + start);
+                }
+                skipDigits();
+            }
+            if (peek() == 'e' || peek() == 'E') {
+                pos++;
+                if (peek() == '+' || peek() == '-') pos++;
+                if (!(peek() >= '0' && peek() <= '9')) {
+                    throw new IllegalArgumentException("Json: bad number exponent at " + start);
+                }
+                skipDigits();
             }
             String tok = s.substring(start, pos);
             if (tok.contains(".") || tok.contains("e") || tok.contains("E")) {
@@ -197,6 +257,17 @@ public final class Json {
             } catch (NumberFormatException nfe) {
                 return new java.math.BigInteger(tok);
             }
+        }
+
+        private static int hexDigit(char c) {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        }
+
+        void skipDigits() {
+            while (pos < s.length() && s.charAt(pos) >= '0' && s.charAt(pos) <= '9') pos++;
         }
 
         char peek() {

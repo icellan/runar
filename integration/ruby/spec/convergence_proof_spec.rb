@@ -77,12 +77,12 @@ RSpec.describe 'ConvergenceProof' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'proveConvergence',
         [test_data[:wrong_delta]],
         provider, wallet[:signer]
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

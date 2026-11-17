@@ -48,6 +48,7 @@ export function validate(contract: ContractNode): ValidationResult {
   const callDepthExceeded = checkNoRecursion(ctx);
   checkReservedNames(ctx);
   checkRedeclarations(ctx);
+  checkDuplicateMethods(ctx);
   // N-180: the Rabin-provenance and sighash passes walk the private-method
   // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
   // refuses, so stop here.
@@ -143,6 +144,27 @@ function checkRedeclarations(ctx: ValidationContext): void {
   }
 }
 
+/**
+ * GK-BUG-015: a contract cannot declare two methods with the same name. Every
+ * name-keyed later pass (side-effect summary, `getPrivateMethod`, the affine
+ * `consumedParamSummary` fixpoint, stack lowering's private map) assumes one
+ * body per name; with two they disagree, and in several tiers the consumption
+ * fixpoint oscillates forever. Anchored on each repeat.
+ */
+function checkDuplicateMethods(ctx: ValidationContext): void {
+  const seen = new Set<string>();
+  for (const method of ctx.contract.methods) {
+    if (seen.has(method.name)) {
+      ctx.errors.push(makeDiagnostic(
+        `method '${method.name}' is already declared in this contract and cannot be re-declared`,
+        'error',
+        method.sourceLocation,
+      ));
+    }
+    seen.add(method.name);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -163,9 +185,32 @@ const VALID_PRIMITIVE_TYPES = new Set<string>([
   'P256Point', 'P384Point',
 ]);
 
+/** The diagnostic every tier shares (R3-GK010-GAPS). */
+export function readonlyPreimagePropertyMessage(name: string): string {
+  return (
+    `readonly property '${name}' cannot hold a SigHashPreimage: a preimage fixed in the locking script ` +
+    'can never pass checkPreimage(), so every field an extractor reads from it is unverified'
+  );
+}
+
+/** `SigHashPreimage`, or a (nested) FixedArray of it. */
+function holdsSigHashPreimage(t: TypeNode): boolean {
+  if (t.kind === 'fixed_array_type') return holdsSigHashPreimage(t.element);
+  return t.kind === 'primitive_type' && t.name === 'SigHashPreimage';
+}
+
 function validateProperties(ctx: ValidationContext): void {
   for (const prop of ctx.contract.properties) {
     validatePropertyType(prop.type, prop.sourceLocation, ctx);
+
+    // R3-GK010-GAPS: a readonly property is a constant in the locking script,
+    // and a sighash preimage commits to the outpoint of the transaction that
+    // carries that script, so checkPreimage() on it can never pass and every
+    // field an extractor reads from it is unverified. Refused at the
+    // declaration (before FixedArray expansion, so the name is the user's).
+    if (prop.readonly && holdsSigHashPreimage(prop.type)) {
+      ctx.errors.push(makeDiagnostic(readonlyPreimagePropertyMessage(prop.name), 'error', prop.sourceLocation));
+    }
 
     // txPreimage is an implicit property of StatefulSmartContract
     if (ctx.contract.parentClass === 'StatefulSmartContract' && prop.name === 'txPreimage') {

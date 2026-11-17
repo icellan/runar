@@ -481,32 +481,48 @@ export function verifySLHDSA_SHA2_128f(_msg: ByteString, _sig: ByteString, _pubk
 }
 
 /**
- * Verify an SLH-DSA-SHA2-192s (SPHINCS+) signature.
- * NIST FIPS 205, 192-bit security, small signatures (16,224 bytes).
+ * Verify a signature in the repo's SHA-256-only SLH-DSA variant with the
+ * FIPS 205 SLH-DSA-SHA2-192s parameter shapes (small signatures, 16,224 bytes).
+ *
+ * NOT FIPS 205 conformant: FIPS 205 hashes this parameter set with SHA-512,
+ * which Bitcoin Script cannot express (no OP_SHA512, #137). A standard
+ * SLH-DSA-SHA2-192s signature will not verify here.
  */
 export function verifySLHDSA_SHA2_192s(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
   return compilerStub('verifySLHDSA_SHA2_192s');
 }
 
 /**
- * Verify an SLH-DSA-SHA2-192f (SPHINCS+) signature.
- * NIST FIPS 205, 192-bit security, fast signatures (35,664 bytes).
+ * Verify a signature in the repo's SHA-256-only SLH-DSA variant with the
+ * FIPS 205 SLH-DSA-SHA2-192f parameter shapes (fast signatures, 35,664 bytes).
+ *
+ * NOT FIPS 205 conformant: FIPS 205 hashes this parameter set with SHA-512,
+ * which Bitcoin Script cannot express (no OP_SHA512, #137). A standard
+ * SLH-DSA-SHA2-192f signature will not verify here.
  */
 export function verifySLHDSA_SHA2_192f(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
   return compilerStub('verifySLHDSA_SHA2_192f');
 }
 
 /**
- * Verify an SLH-DSA-SHA2-256s (SPHINCS+) signature.
- * NIST FIPS 205, 256-bit security, small signatures (29,792 bytes).
+ * Verify a signature in the repo's SHA-256-only SLH-DSA variant with the
+ * FIPS 205 SLH-DSA-SHA2-256s parameter shapes (small signatures, 29,792 bytes).
+ *
+ * NOT FIPS 205 conformant: FIPS 205 hashes this parameter set with SHA-512,
+ * which Bitcoin Script cannot express (no OP_SHA512, #137). A standard
+ * SLH-DSA-SHA2-256s signature will not verify here.
  */
 export function verifySLHDSA_SHA2_256s(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
   return compilerStub('verifySLHDSA_SHA2_256s');
 }
 
 /**
- * Verify an SLH-DSA-SHA2-256f (SPHINCS+) signature.
- * NIST FIPS 205, 256-bit security, fast signatures (49,856 bytes).
+ * Verify a signature in the repo's SHA-256-only SLH-DSA variant with the
+ * FIPS 205 SLH-DSA-SHA2-256f parameter shapes (fast signatures, 49,856 bytes).
+ *
+ * NOT FIPS 205 conformant: FIPS 205 hashes this parameter set with SHA-512,
+ * which Bitcoin Script cannot express (no OP_SHA512, #137). A standard
+ * SLH-DSA-SHA2-256f signature will not verify here.
  */
 export function verifySLHDSA_SHA2_256f(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
   return compilerStub('verifySLHDSA_SHA2_256f');
@@ -1081,12 +1097,20 @@ export function merkleRootPoseidon2KB(..._args: bigint[]): bigint {
   return compilerStub('merkleRootPoseidon2KB');
 }
 
-/** Mode-3 witness-assisted Groth16 verification entry; takes no arguments. */
+/**
+ * Raw witness-assisted Groth16 entry. Refused by the (Go-only) compiler —
+ * it never sees the public inputs, so it accepts a proof of any statement
+ * (GK-BUG-006). Use assertGroth16WitnessAssistedWithMSM.
+ */
 export function assertGroth16WitnessAssisted(): void {
   compilerStub('assertGroth16WitnessAssisted');
 }
 
-/** Soundness-strict sibling of assertGroth16WitnessAssisted (with MSM). */
+/**
+ * Mode-3 witness-assisted Groth16 verification entry (MSM-binding); takes
+ * no arguments. Bind the statement with vk.json pinnedPublicInputs or
+ * groth16PublicInput(i) assertions.
+ */
 export function assertGroth16WitnessAssistedWithMSM(): void {
   compilerStub('assertGroth16WitnessAssistedWithMSM');
 }

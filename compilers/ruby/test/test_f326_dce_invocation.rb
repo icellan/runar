@@ -66,6 +66,20 @@ class TestF326DceInvocation < Minitest::Test
                  "runs behind optimize_ec's any_changed gate: #{offenders.inspect}"
   end
 
+  # GK-DOC-007: fold_constants_and_prune (N-138) is the second production
+  # caller of the candidate-restricted sweep, so the header must name it.
+  def test_gk_doc_007_dce_header_names_the_fold_prune_caller
+    fold_src = File.read(File.join(LIB_DIR, "frontend", "constant_fold.rb"))
+    refute_nil fold_src[/DCE\.eliminate_dead_bindings\(after, candidates\)/],
+               "fold_constants_and_prune no longer prunes through DCE; update dce.rb's header"
+
+    dce_src = File.read(File.join(LIB_DIR, "frontend", "dce.rb"))
+    header = dce_src[0...dce_src.index('require "set"')]
+    assert_includes header, "fold_constants_and_prune",
+                    "dce.rb's header names only optimize_ec; fold_constants_and_prune " \
+                    "also calls eliminate_dead_bindings with a candidate set"
+  end
+
   def test_the_unreachable_pass_475_wrapper_is_gone
     compiler_src = File.read(File.join(LIB_DIR, "compiler.rb"))
 

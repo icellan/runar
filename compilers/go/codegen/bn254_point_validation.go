@@ -54,28 +54,56 @@ import "math/big"
 // On-curve assertions
 // ---------------------------------------------------------------------------
 
+// bn254AssertFieldCanonical aborts the script unless 0 <= name < p, reading
+// the value WITHOUT consuming it. OP_WITHIN is min-inclusive, max-exclusive.
+//
+// GK-GAP-009: every later use of a coordinate is arithmetic mod p, so a
+// value outside [0, p) is an alternate encoding of the same field element —
+// the same proof under different unlocking-script bytes (and txid).
+func bn254AssertFieldCanonical(t *BN254Tracker, name, tmp string) {
+	t.copyToTop(name, tmp)
+	t.pushInt(tmp+"_lo", 0)
+	bn254PushFieldP(t, tmp+"_hi")
+	t.rawBlock([]string{tmp, tmp + "_lo", tmp + "_hi"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+}
+
 // bn254AssertG1OnCurve verifies y² == x³ + 3 mod p for a caller-supplied G1
 // point and aborts the script via OP_EQUALVERIFY if it does not hold. The
 // point is NOT consumed. `sfx` disambiguates the helper's temporary tracker
 // slots when several points are validated in one script.
-func bn254AssertG1OnCurve(t *BN254Tracker, xName, yName, sfx string) {
+//
+// signedInputs selects the range check applied to x and y first. The
+// pairing builtins decompose their G1 points from fixed-width bytes, so the
+// coordinates are non-negative by construction and only the upper bound is
+// emitted. The witness-assisted Groth16 preamble reads them as raw script
+// numbers, which can be negative, so it needs the full [0, p) check
+// (GK-GAP-009): y - p passes y < p and y² mod p is unchanged.
+func bn254AssertG1OnCurve(t *BN254Tracker, xName, yName, sfx string, signedInputs bool) {
 	pfx := "_occhk_" + sfx + "_"
 
 	// GAP-301 / R-141 class: reject (x+k·p, y) before the curve equation.
 	// Byte-level OP_EQUALVERIFY on unreduced coordinates would accept an
-	// alias of a valid point. Require 0 ≤ x,y < p (unsigned by construction).
-	t.copyToTop(xName, pfx+"cx")
-	bn254PushFieldP(t, pfx+"cpx")
-	t.rawBlock([]string{pfx + "cx", pfx + "cpx"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	})
-	t.copyToTop(yName, pfx+"cy")
-	bn254PushFieldP(t, pfx+"cpy")
-	t.rawBlock([]string{pfx + "cy", pfx + "cpy"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	})
+	// alias of a valid point. Require 0 ≤ x,y < p.
+	if signedInputs {
+		bn254AssertFieldCanonical(t, xName, pfx+"cx")
+		bn254AssertFieldCanonical(t, yName, pfx+"cy")
+	} else {
+		t.copyToTop(xName, pfx+"cx")
+		bn254PushFieldP(t, pfx+"cpx")
+		t.rawBlock([]string{pfx + "cx", pfx + "cpx"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+		t.copyToTop(yName, pfx+"cy")
+		bn254PushFieldP(t, pfx+"cpy")
+		t.rawBlock([]string{pfx + "cy", pfx + "cpy"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
 
 	// lhs = y^2 mod p
 	t.copyToTop(yName, pfx+"y")
@@ -100,8 +128,17 @@ func bn254AssertG1OnCurve(t *BN254Tracker, xName, yName, sfx string) {
 // bn254AssertG2OnCurve verifies y² == x³ + b' in Fp2 (b' = 3/(9+u)) for a
 // caller-supplied G2 point and aborts via OP_EQUALVERIFY if it does not
 // hold. The four coordinates are NOT consumed.
+//
+// GK-GAP-009: each limb is first required to be canonical, 0 <= limb < p.
+// G2 limbs are bigint stack values in every caller (never decomposed from
+// fixed-width bytes) and the equation below is checked mod p, so without
+// this x0 + p, or the negative x0 - p, passed as the same point.
 func bn254AssertG2OnCurve(t *BN254Tracker, x0, x1, y0, y1, sfx string) {
 	pfx := "_g2occ_" + sfx + "_"
+
+	for i, limb := range []string{x0, x1, y0, y1} {
+		bn254AssertFieldCanonical(t, limb, pfx+"rc"+itoa(i))
+	}
 
 	// lhs = y^2  in Fp2 (preserve y0, y1: copy inputs first)
 	t.copyToTop(y0, pfx+"y0")
@@ -306,7 +343,7 @@ func bn254AssertG2InSubgroup(t *BN254Tracker, x0, x1, y0, y1, sfx string) {
 // BN254 curve. G1's cofactor is 1, so on-curve membership already implies
 // prime-order membership — no subgroup check is needed or emitted.
 func bn254ValidateG1Input(t *BN254Tracker, xName, yName, sfx string) {
-	bn254AssertG1OnCurve(t, xName, yName, sfx)
+	bn254AssertG1OnCurve(t, xName, yName, sfx, false)
 }
 
 // bn254ValidateG2Input asserts that a G2 input point is on the twist AND in

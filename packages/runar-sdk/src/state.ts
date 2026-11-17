@@ -407,6 +407,18 @@ function encodeStateValue(value: unknown, type: string, label = '?'): string {
       // a real boolean state field fell through to the push-data `default`,
       // silently disagreeing with all three (the descriptor drift #115's
       // review flagged).
+      //
+      // GK-BUG-010: only a real boolean. JS truthiness wrote 01 for 1, 'false'
+      // and '00', and each peer tier had its own coercion rule, so the same
+      // non-boolean input gave different on-chain bytes per tier. Refused in
+      // all seven, like the num2bin arm above refuses a non-integer.
+      if (typeof value !== 'boolean') {
+        const got = value === null ? 'null' : typeof value;
+        throw new Error(
+          `serializeState: state field "${label}" (${type}) must be a boolean, got ${got}. ` +
+            `Coercing anything else would write a flag the caller never supplied into the state section.`,
+        );
+      }
       return value ? '01' : '00';
     }
     default: {

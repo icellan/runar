@@ -145,11 +145,14 @@ describe('Multi-format: parse() dispatch', () => {
     expect(result.contract!.name).toBe('Arithmetic');
   });
 
-  it('defaults to TypeScript parser for unrecognized extensions', () => {
+  it('refuses an unrecognized extension even for valid TypeScript (GK-GAP-005)', () => {
     const { content } = readRequiredSource('arithmetic', '.runar.ts');
     const result = parse(content, 'arithmetic.unknown');
-    expect(result.contract).not.toBeNull();
-    expect(result.contract!.name).toBe('Arithmetic');
+    expect(result.contract).toBeNull();
+    expect(result.errors.map(e => e.message)).toEqual([
+      'unsupported file extension: arithmetic.unknown (expected .runar.ts, .runar.sol, .runar.move, ' +
+        '.runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)',
+    ]);
   });
 
   it('dispatches .runar.py to Python parser (row 64)', () => {

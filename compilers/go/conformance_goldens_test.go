@@ -154,6 +154,28 @@ func fixtureAllowlistedForGo(testDir string) bool {
 	return false
 }
 
+// fixtureParserSkips reports whether the fixture's source.json lists `ext` in
+// its `parserSkip` array. An unreadable or malformed source.json reports false,
+// so the fixture falls through to source resolution and fails there loudly.
+func fixtureParserSkips(testDir, ext string) bool {
+	raw, err := os.ReadFile(filepath.Join(testDir, "source.json"))
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		ParserSkip []string `json:"parserSkip"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil {
+		return false
+	}
+	for _, s := range cfg.ParserSkip {
+		if s == ext {
+			return true
+		}
+	}
+	return false
+}
+
 // scanFixtures walks `dirs` (conformance fixture directories) and classifies
 // each one, compiling via the native Go compiler API. Extracted from
 // TestConformanceGoldens so the classification logic is directly
@@ -178,6 +200,18 @@ func scanFixtures(dirs []string, opts compiler.CompileOptions) (passed, skipped 
 		name := filepath.Base(testDir)
 
 		if !fixtureAllowlistedForGo(testDir) {
+			skipped = append(skipped, name)
+			continue
+		}
+
+		// GK-GAP-003: a fixture whose source.json parserSkips the Go surface
+		// ships no .runar.go source by design (the runner requires a non-empty
+		// parserSkipReason and allowlist-audit.test.ts pins every such skip).
+		// This harness compiles the Go SURFACE, so there is nothing for it to
+		// compile; the Go compiler is still held to the fixture's golden by the
+		// multi-format runner. Mirrors ConformanceGoldensTest.java's
+		// isJavaParserSkipped.
+		if fixtureParserSkips(testDir, ".runar.go") {
 			skipped = append(skipped, name)
 			continue
 		}
@@ -375,7 +409,7 @@ func TestConformanceGoldens(t *testing.T) {
 
 	total := len(dirs)
 	t.Logf(
-		"\n=== Go conformance-goldens summary: %d pass / %d fail / %d skipped (compilers allowlist excludes go) (of %d fixtures) ===",
+		"\n=== Go conformance-goldens summary: %d pass / %d fail / %d skipped (compilers allowlist excludes go, or parserSkip excludes .runar.go) (of %d fixtures) ===",
 		len(passed), len(failures), len(skipped), total,
 	)
 	if len(skipped) > 0 {
@@ -519,5 +553,51 @@ func TestScanFixtures_SkipsAllowlistExcludedFixtureWithNoSource(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected %q in skipped, got skipped=%v", name, skipped)
+	}
+}
+
+// GK-GAP-003: `ternary-expression` is the first fixture whose source.json
+// lists `.runar.go` in `parserSkip` (the Go surface has no conditional
+// expression). It ships no .runar.go source, so this harness -- which compiles
+// the Go SURFACE only -- must skip it, exactly as the Java harness skips a
+// fixture that parserSkips `.runar.java`. The Go COMPILER is still held to
+// that fixture's golden by the multi-format runner, which compiles every
+// declared surface with every tier.
+//
+// What this proves: scanFixtures skips (does not fail) a fixture that
+// parserSkips `.runar.go`, and still fails one that parserSkips a different
+// surface while missing its .runar.go source.
+// What this does not prove: anything about the real corpus beyond what
+// TestConformanceGoldens checks.
+func TestScanFixtures_SkipsFixtureThatParserSkipsGoSurface(t *testing.T) {
+	skipsGo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(skipsGo, "source.json"),
+		[]byte(`{"sources":{".runar.ts":"./X.runar.ts"},"parserSkip":[".runar.go",".runar.rs"],"parserSkipReason":"no conditional expression"}`), 0o644); err != nil {
+		t.Fatalf("write source.json: %v", err)
+	}
+	skipsOther := t.TempDir()
+	if err := os.WriteFile(filepath.Join(skipsOther, "source.json"),
+		[]byte(`{"sources":{".runar.ts":"./X.runar.ts"},"parserSkip":[".runar.java"],"parserSkipReason":"FixedArray"}`), 0o644); err != nil {
+		t.Fatalf("write source.json: %v", err)
+	}
+
+	_, skipped, failures := scanFixtures([]string{skipsGo, skipsOther}, compiler.CompileOptions{DisableConstantFolding: true})
+
+	for _, f := range failures {
+		if f.name == filepath.Base(skipsGo) {
+			t.Fatalf("a fixture that parserSkips .runar.go must be skipped, not failed (got: %v)", f)
+		}
+	}
+	if len(skipped) != 1 || skipped[0] != filepath.Base(skipsGo) {
+		t.Errorf("skipped=%v, want exactly [%s]", skipped, filepath.Base(skipsGo))
+	}
+	var other *fixtureFailure
+	for i := range failures {
+		if failures[i].name == filepath.Base(skipsOther) {
+			other = &failures[i]
+		}
+	}
+	if other == nil || other.kind != "missing-source" {
+		t.Errorf("a fixture that parserSkips only .runar.java but has no .runar.go must still fail missing-source (got %v)", other)
 	}
 }

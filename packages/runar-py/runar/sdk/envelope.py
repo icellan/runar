@@ -339,7 +339,7 @@ MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024     # 4 MiB — matches MAX_STRING_BY
 #:
 #: 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
 #: so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-#: also far above what the wire needs: the deepest of the 199 checked-in
+#: also far above what the wire needs: the deepest of the 201 checked-in
 #: conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
 #: tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
 #: bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -452,6 +452,44 @@ def _payload_has_lone_surrogate(text: str) -> bool:
     return False
 
 
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
+
+
+class _RejectedJsonError(ValueError):
+    """Payload text json.loads would accept but the wire protocol does not:
+    a duplicate key (R2-DUPKEY) or a NaN / Infinity literal."""
+
+
+def _object_without_duplicate_keys(pairs: list) -> dict:
+    """``json.loads`` object hook: refuse a repeated key in ONE object.
+
+    R2-DUPKEY. json.loads keeps the LAST of two equal keys, so a payload
+    ``{"nonce":1,"nonce":<outer>}`` verified ok here while a keep-first tier
+    said envelope-mismatch. Keys arrive already unescaped, so ``"a"`` and
+    ``"\\u0061"`` collide as they must. The hook runs once per object, so the
+    key set is per object: the same key in sibling or nested objects is fine.
+    """
+    out: dict = {}
+    for k, v in pairs:
+        if k in out:
+            raise _RejectedJsonError(f"duplicate key {k!r}")
+        out[k] = v
+    return out
+
+
+def _reject_non_json_constant(name: str) -> Any:
+    """``json.loads`` parse_constant hook. NaN / Infinity / -Infinity are not
+    JSON tokens, but json.loads accepts them by default, so a payload carrying
+    one verified ok in this tier alone (fixture vectors pj1..pj3)."""
+    raise _RejectedJsonError(f"non-JSON constant {name}")
+
+
+def _is_i64_int(v: object) -> bool:
+    """GK-BUG-009: a parsed JSON integer token inside the signed 64-bit range."""
+    return type(v) is int and _I64_MIN <= v <= _I64_MAX
+
+
 def verify_envelope(
     envelope: SignedEnvelope,
     expected_keys: Optional[List[str]] = None,
@@ -465,10 +503,14 @@ def verify_envelope(
     #    ECDSA verify -- those operations are linear in input size and a
     #    pathological 100 MB payload would otherwise pin the worker.
     #    Mirrors the TS 'too-large' rejection at sdk/envelope.ts:104.
+    #    R3-GO-UTF8: measured with 'surrogatepass' so a payload holding a
+    #    surrogate (a lone one, or the surrogate escape of a byte that is not
+    #    UTF-8) is sized instead of raising UnicodeEncodeError out of verify;
+    #    step 3 then answers bad-json for it.
     if isinstance(envelope, SignedEnvelope):
         if (
             isinstance(envelope.payload, str)
-            and len(envelope.payload.encode("utf-8")) > MAX_ENVELOPE_PAYLOAD_BYTES
+            and len(envelope.payload.encode("utf-8", "surrogatepass")) > MAX_ENVELOPE_PAYLOAD_BYTES
         ):
             return VerifyEnvelopeResult(False, VerifyEnvelopeReason.TOO_LARGE, None)
         if isinstance(envelope.sig, str) and len(envelope.sig) > MAX_ENVELOPE_FIELD_BYTES:
@@ -506,16 +548,30 @@ def verify_envelope(
     if _payload_exceeds_max_depth(envelope.payload):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
     try:
-        parsed = json.loads(envelope.payload)
-    except json.JSONDecodeError:
+        # R2-DUPKEY: a duplicate key is bad-json, decided here with every
+        # other parse failure (after expired, before envelope-mismatch).
+        parsed = json.loads(
+            envelope.payload,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_non_json_constant,
+        )
+    except (json.JSONDecodeError, _RejectedJsonError):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
     if not isinstance(parsed, dict):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
 
-    # 4. Inner nonce / expiresAt must match outer fields.
+    # 4. Inner nonce / expiresAt must match outer fields. GK-BUG-009: and
+    # each must be a JSON integer token in i64 range. json.loads gives an
+    # exact int only for an integer token, so `type(v) is int` excludes
+    # 1.0 / 1e3 (float) and True (bool, an int subclass that == 1); Python
+    # ints are unbounded, so the i64 range is checked explicitly.
+    inner_nonce = parsed.get("nonce")
+    inner_expires = parsed.get("expiresAt")
     if (
-        parsed.get("nonce") != envelope.nonce
-        or parsed.get("expiresAt") != envelope.expiresAt
+        not _is_i64_int(inner_nonce)
+        or not _is_i64_int(inner_expires)
+        or inner_nonce != envelope.nonce
+        or inner_expires != envelope.expiresAt
     ):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.ENVELOPE_MISMATCH, parsed)
 

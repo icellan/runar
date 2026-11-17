@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 )
@@ -377,7 +378,7 @@ func appendJSONString(out []byte, s string) ([]byte, error) {
 }
 
 // decodeRune is a minimal UTF-8 decoder that preserves illegal-sequence
-// signalling — we deliberately do not import "unicode/utf8" so that the
+// signalling — deliberately not utf8.DecodeRuneInString, so that the
 // CESU-8 / WTF-8 surrogate range above can be caught before falling back
 // here. Returns (rune, byteSize). For invalid sequences returns
 // (0xFFFD, 1) so the caller can advance and report.
@@ -452,6 +453,43 @@ type SignedEnvelope struct {
 	Nonce int64 `json:"nonce"`
 	// ExpiresAt is Nonce + TtlMs.
 	ExpiresAt int64 `json:"expiresAt"`
+}
+
+// UnmarshalJSON decodes an envelope from wire text. R3-OUTER-DUPKEY: the
+// default struct decode kept the LAST of two equal members and matched member
+// names case-insensitively, so {"sig":<bogus>,...,"sig":<valid>} or a trailing
+// "Payload" member decided which bytes were verified, in this tier alone. A
+// duplicate member (compared after unescaping, as in the payload) is refused
+// as bad-json, and only the exact lower-camel member names are fields; any
+// other member is ignored, as Rust's serde decode does.
+func (e *SignedEnvelope) UnmarshalJSON(data []byte) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return err
+	}
+	// The text is well-formed JSON here, so the token walk can only report a
+	// genuine duplicate.
+	if payloadHasDuplicateKey(string(data)) {
+		return fmt.Errorf("SignedEnvelope: duplicate key in envelope object (%s)", ReasonBadJSON)
+	}
+	var out SignedEnvelope
+	for name, dst := range map[string]any{
+		"payload":   &out.Payload,
+		"sig":       &out.Sig,
+		"pubkey":    &out.Pubkey,
+		"nonce":     &out.Nonce,
+		"expiresAt": &out.ExpiresAt,
+	} {
+		raw, ok := members[name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, dst); err != nil {
+			return fmt.Errorf("SignedEnvelope: %s: %w", name, err)
+		}
+	}
+	*e = out
+	return nil
 }
 
 // EnvelopeSigner is the minimal surface needed by SignEnvelope. Implementers
@@ -559,7 +597,7 @@ const (
 //
 // 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
 // so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-// also far above what the wire needs: the deepest of the 199 checked-in
+// also far above what the wire needs: the deepest of the 201 checked-in
 // conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
 // tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
 // bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -616,8 +654,16 @@ func payloadExceedsMaxDepth(payload string) bool {
 
 // VerifyEnvelopeOpts captures the input to VerifyEnvelope.
 type VerifyEnvelopeOpts struct {
-	Envelope     SignedEnvelope
-	ExpectedKeys []string // optional pubkey allowlist (66-char hex)
+	Envelope SignedEnvelope
+	// ExpectedKeys is the optional pubkey allowlist (66-char hex). NIL means
+	// the caller supplied no allowlist and the check is skipped; a non-nil
+	// slice is used AS GIVEN, so an EMPTY slice allows nobody and every
+	// envelope is rejected with ReasonPubkeyNotAllowed.
+	//
+	// GK-BUG-008: this used to read `len(ExpectedKeys) > 0`, so an empty
+	// slice silently meant "allow everyone" — the six other tiers treat a
+	// present-but-empty allowlist as deny-all.
+	ExpectedKeys []string
 	// ClockSkewMs is the allowed wall-clock skew in ms when checking
 	// expiresAt. NIL means the caller supplied nothing and the 5_000 ms
 	// default applies; a non-nil pointer is used AS GIVEN, so an explicit
@@ -697,6 +743,14 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	if payloadHasLoneSurrogate(env.Payload) {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
 	}
+	// R3-GO-UTF8: the payload must be well-formed UTF-8. encoding/json folds
+	// every invalid sequence to U+FFFD, so a signed payload carrying 0xFF, an
+	// overlong or a truncated sequence verified ok here while Zig's std.json
+	// refuses it, and two keys differing only in invalid bytes collided in the
+	// duplicate-key walk below. Fixture invalid_utf8_vectors.
+	if !utf8.ValidString(env.Payload) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
 	// R-260: bound nesting on the TEXT, before the stock parser, so the answer
 	// does not depend on encoding/json's recursion behaviour. Same bound and
 	// same reason in all seven tiers.
@@ -707,6 +761,18 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	dec := json.NewDecoder(stringReader(env.Payload))
 	dec.UseNumber()
 	if err := dec.Decode(&parsed); err != nil || parsed == nil {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
+	// The payload must be exactly ONE JSON value. Decode reads the first and
+	// leaves the rest unread, so "{...}{}" or "{...} 1" verified ok in this
+	// tier alone (fixture vectors tj1..tj3); every other tier's parser
+	// refuses text after the value.
+	if _, err := dec.Token(); err != io.EOF {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
+	// R2-DUPKEY: a duplicate key is bad-json, decided here with every other
+	// parse failure (after expired, before envelope-mismatch).
+	if payloadHasDuplicateKey(env.Payload) {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
 	}
 
@@ -743,7 +809,7 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	}
 
 	// 6. Allowlist.
-	if len(opts.ExpectedKeys) > 0 {
+	if opts.ExpectedKeys != nil {
 		found := false
 		for _, k := range opts.ExpectedKeys {
 			if k == env.Pubkey {
@@ -757,6 +823,64 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	}
 
 	return VerifyEnvelopeResult{OK: true, Data: parsed}
+}
+
+// payloadHasDuplicateKey reports whether any object in payload carries the
+// same key twice. R2-DUPKEY: encoding/json keeps the LAST of two equal keys,
+// so a payload {"nonce":1,"nonce":<outer>} verified ok here while a
+// keep-first tier said envelope-mismatch. It walks the decoder's token
+// stream, which hands object keys over already unescaped ("a" and "\u0061"
+// are one key, as is a surrogate-pair escape and the raw code point). One key
+// set per open object: the same key in sibling or nested objects is fine.
+// Runs only on a payload Decode has already accepted, under the depth guard,
+// so any token error here is unreachable and is treated as malformed.
+func payloadHasDuplicateKey(payload string) bool {
+	type frame struct {
+		keys      map[string]struct{} // nil for an array
+		expectKey bool
+	}
+	dec := json.NewDecoder(stringReader(payload))
+	dec.UseNumber()
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return false
+		}
+		if err != nil {
+			return true
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		switch v := tok.(type) {
+		case json.Delim:
+			switch v {
+			case '{':
+				stack = append(stack, &frame{keys: map[string]struct{}{}, expectKey: true})
+				continue
+			case '[':
+				stack = append(stack, &frame{})
+				continue
+			default: // '}' or ']' closes a value of the parent
+				stack = stack[:len(stack)-1]
+			}
+		case string:
+			if top != nil && top.keys != nil && top.expectKey {
+				if _, dup := top.keys[v]; dup {
+					return true
+				}
+				top.keys[v] = struct{}{}
+				top.expectKey = false
+				continue
+			}
+		}
+		// A complete value ended: the enclosing object now wants a key.
+		if len(stack) > 0 && stack[len(stack)-1].keys != nil {
+			stack[len(stack)-1].expectKey = true
+		}
+	}
 }
 
 // readNonceExpiresAt extracts nonce + expiresAt from a parsed payload that

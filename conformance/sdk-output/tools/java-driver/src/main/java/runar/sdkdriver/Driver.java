@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import runar.lang.sdk.DeployOptions;
+import runar.lang.sdk.DeployWithWalletOptions;
 import runar.lang.sdk.DriverReadbackAccess;
 import runar.lang.sdk.Inscription;
 import runar.lang.sdk.LocalSigner;
@@ -109,11 +109,11 @@ public final class Driver {
      * R-062 — drive the tier's WALLET funding path so all seven tiers can be
      * asked to agree on accept-vs-refuse for one artifact.
      *
-     * <p>Java has no {@code deployWithWallet} / {@code createAction} second
-     * funding path: {@link WalletProvider} is a Provider+Signer adapter over a
-     * BRC-100 wallet, so a wallet-backed deploy goes through the ONE
-     * {@link RunarContract#deploy} that already carries the script-size bound
-     * and the unsound-primitive gate. That is the path exercised here.
+     * <p>The path exercised is {@link RunarContract#deployWithWallet} (BRC-100
+     * {@code createAction} through a {@link MockBRC100Wallet}), the same second
+     * funding path the Go tool drives ({@code DeployWithWallet}). Java gained
+     * it under GK-GAP-014; before that this driver had to use the plain
+     * {@code deploy} through a wallet-backed {@link WalletProvider}.
      *
      * <p>A refusal is a RESULT, not a crash — exit non-zero with the reason on
      * stderr so the runner can compare the verdict across all seven tiers.
@@ -139,9 +139,8 @@ public final class Driver {
         WalletProvider wp = new WalletProvider(wallet, delegate, WALLET_PATH);
 
         try {
-            contract.deploy(wp, wp, new DeployOptions()
-                .withSatoshis(satoshis)
-                .withAcknowledgeUnsound(acknowledge));
+            contract.deployWithWallet(wp,
+                new DeployWithWalletOptions(satoshis, null, null, null, acknowledge));
         } catch (UnsoundPrimitives.UnsoundPrimitiveError e) {
             System.err.println(e.getMessage());
             System.exit(1);

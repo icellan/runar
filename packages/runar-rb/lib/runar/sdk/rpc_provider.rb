@@ -23,6 +23,21 @@ require_relative 'errors'
 
 module Runar
   module SDK
+    # The node's own JSON-RPC error reply, as opposed to a transport failure.
+    # Carries the RPC method, the node's error code and its message; the
+    # exception message keeps the historical "RPC error <code>: <message>"
+    # text, and it is still a RuntimeError.
+    class RPCNodeError < RuntimeError
+      attr_reader :rpc_method, :code, :node_message
+
+      def initialize(rpc_method, code, node_message)
+        @rpc_method = rpc_method
+        @code = code
+        @node_message = node_message
+        super("RPC error #{code}: #{node_message}")
+      end
+    end
+
     class RPCProvider < Provider
       # @param host     [String]  Bitcoin node hostname (default: 'localhost')
       # @param port     [Integer] RPC port (default: 18332 for regtest)
@@ -207,7 +222,7 @@ module Runar
           err = data['error']
           msg = err.is_a?(Hash) ? err.fetch('message', err.to_s) : err.to_s
           code = err.is_a?(Hash) ? err['code'] : nil
-          raise "RPC error #{code}: #{msg}"
+          raise RPCNodeError.new(method, code, msg)
         end
 
         data['result']

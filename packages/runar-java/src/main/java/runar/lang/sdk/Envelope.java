@@ -397,7 +397,7 @@ public final class Envelope {
      *
      * 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
      * so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-     * also far above what the wire needs: the deepest of the 199 checked-in
+     * also far above what the wire needs: the deepest of the 201 checked-in
      * conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
      * tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
      * bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -624,7 +624,9 @@ public final class Envelope {
         }
         Map<String, Object> parsed;
         try {
-            Object raw = Json.parse(env.payload);
+            // R2-DUPKEY: a duplicate key is bad-json, decided here with every
+            // other parse failure (after expired, before envelope-mismatch).
+            Object raw = Json.parseRejectingDuplicateKeys(env.payload);
             if (!(raw instanceof Map)) {
                 return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.BAD_JSON, null);
             }
@@ -703,10 +705,16 @@ public final class Envelope {
         return n;
     }
 
+    /**
+     * GK-BUG-009: the inner nonce / expiresAt must be a JSON INTEGER TOKEN in
+     * i64 range. {@link Json#parse} returns a Long for exactly that, a Double
+     * for any '.' / exponent token and a BigInteger past i64 — so only Long
+     * (and Integer) qualify. The old {@code ((Number) o).longValue()} fallback
+     * truncated 1.5 to 1 and wrapped 2^64+1 to 1, and accepted both.
+     */
     private static Long readLong(Object o) {
         if (o instanceof Long) return (Long) o;
         if (o instanceof Integer) return ((Integer) o).longValue();
-        if (o instanceof Number) return ((Number) o).longValue();
         return null;
     }
 

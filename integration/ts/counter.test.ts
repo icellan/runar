@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 import { readOnChainState } from './helpers/on-chain-state.js';
 
 describe('Counter', () => {
@@ -77,11 +77,11 @@ describe('Counter', () => {
     await contract.deploy(provider, signer, {});
 
     // Claim count=99 instead of 1 — hashOutputs mismatch
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('increment', [], provider, signer, {
         newState: { count: 99n },
       }),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject decrement from zero (auto-computed state)', async () => {
@@ -95,8 +95,8 @@ describe('Counter', () => {
 
     // count=0, decrement → assert(count > 0) fails on-chain
     // Auto-computed state will be -1n, but the on-chain assert rejects
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('decrement', [], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 });

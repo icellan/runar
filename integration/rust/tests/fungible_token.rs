@@ -200,6 +200,7 @@ fn test_fungible_token_wrong_owner_rejected() {
         new_state: Some(new_state),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "send",
         &[SdkValue::Auto, SdkValue::Bytes(recipient.pub_key_hex), SdkValue::Int(5000)],
@@ -207,7 +208,7 @@ fn test_fungible_token_wrong_owner_rejected() {
         &*signer_b,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "send with wrong owner should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +412,7 @@ fn test_fungible_token_merge_inflated_other_balance() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract1.call(
         "merge",
         &[SdkValue::Auto, SdkValue::Int(1600), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
@@ -418,7 +420,7 @@ fn test_fungible_token_merge_inflated_other_balance() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "merge with inflated otherBalance should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +483,7 @@ fn test_fungible_token_merge_negative_other_balance() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract1.call(
         "merge",
         &[SdkValue::Auto, SdkValue::Int(100), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
@@ -488,7 +491,7 @@ fn test_fungible_token_merge_negative_other_balance() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "merge with negative otherBalance should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -625,14 +628,15 @@ fn test_fungible_token_merge_wrong_signer() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract1.call(
         "merge",
-        &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Int(4000)],
+        &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
         &mut provider,
         &*signer_b,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "merge with wrong signer should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -678,6 +682,7 @@ fn test_fungible_token_transfer_wrong_signer() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "transfer",
         &[
@@ -690,7 +695,7 @@ fn test_fungible_token_transfer_wrong_signer() {
         &*signer_b,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "transfer with wrong signer should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +793,7 @@ fn test_fungible_token_transfer_zero_amount_rejected() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "transfer",
         &[
@@ -800,7 +806,7 @@ fn test_fungible_token_transfer_zero_amount_rejected() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "transfer of zero amount should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -841,6 +847,7 @@ fn test_fungible_token_transfer_exceeds_balance_rejected() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "transfer",
         &[
@@ -853,7 +860,7 @@ fn test_fungible_token_transfer_exceeds_balance_rejected() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "transfer exceeding balance should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +908,7 @@ fn test_fungible_token_transfer_inflated_balance() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "transfer",
         &[
@@ -913,7 +921,7 @@ fn test_fungible_token_transfer_inflated_balance() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "transfer with inflated output totals should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +969,7 @@ fn test_fungible_token_transfer_deflated_balance() {
         ]),
         ..Default::default()
     };
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "transfer",
         &[
@@ -973,5 +982,5 @@ fn test_fungible_token_transfer_deflated_balance() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(result.is_err(), "transfer with deflated output totals should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

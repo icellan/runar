@@ -90,8 +90,38 @@ class EnvelopeInteropTest {
             vo.envelope = env;
             vo.nowMs = verifyNowMs;
             Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
-            assertFalse(r.ok, "rejection " + reasonWire + " should be ok=false");
-            assertEquals(reasonWire, r.reason.wire, "rejection " + reasonWire);
+            Object vid = rv.getOrDefault("_vector_id", reasonWire);
+            assertFalse(r.ok, "rejection " + reasonWire + " (" + vid + ") should be ok=false");
+            assertEquals(reasonWire, r.reason.wire, "rejection " + reasonWire + " (" + vid + ")");
+        }
+    }
+
+    /**
+     * GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list
+     * allows nobody; null (not supplied) skips the check. al2 is the control
+     * that reddens if a fix treats an absent allowlist like an empty one.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void allowlistVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        Envelope.SignedEnvelope env = envelopeFromMap((Map<String, Object>) fixture.get("valid_envelope"));
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("allowlist_vectors");
+        assertFalse(vectors == null || vectors.isEmpty(), "allowlist_vectors missing or empty");
+        for (Map<String, Object> av : vectors) {
+            String vid = (String) av.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = env;
+            vo.nowMs = verifyNowMs;
+            vo.expectedKeys = (List<String>) av.get("expected_keys");
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(av.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(av.get("reason"), r.reason.wire, vid);
+            }
         }
     }
 
@@ -255,6 +285,34 @@ class EnvelopeInteropTest {
     }
 
     /**
+     * R2-DUPKEY. A payload object with two members of the same key (compared
+     * after unescaping, at any depth) is bad-json, decided in the parse step:
+     * after expired, before envelope-mismatch / bad-sig. {@link Json}'s
+     * readObject put() kept the LAST value, so the dk* vectors verified ok
+     * here before the fix; the dkc* controls (same key in DIFFERENT objects)
+     * must stay ok.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void duplicateKeyVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("duplicate_key_vectors");
+        assertFalse(vectors.isEmpty(), "duplicate_key_vectors missing or empty");
+        List<String> failures = new java.util.ArrayList<>();
+        for (Map<String, Object> v : vectors) {
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap((Map<String, Object>) v.get("envelope"));
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            String want = Boolean.TRUE.equals(v.get("expect_ok")) ? "ok" : (String) v.get("reason");
+            String got = r.ok ? "ok" : r.reason.wire;
+            if (!want.equals(got)) failures.add(v.get("_vector_id") + ": got " + got + ", want " + want);
+        }
+        assertEquals(List.of(), failures);
+    }
+
+    /**
      * F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
      * signature, and the TS reference accepts it: BIP-62's low-S rule is
      * transaction-script policy, not part of the envelope protocol. Ruby used
@@ -379,6 +437,43 @@ class EnvelopeInteropTest {
                 assertFalse(r.ok, vid + ": expected ok=false");
                 assertEquals(cv.get("reason"), r.reason.wire, vid);
             }
+        }
+    }
+
+    /**
+     * R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. A Java
+     * String holds UTF-16 code units, so no ju* payload can reach
+     * {@link Envelope#verify} from this tier: the strict decode a caller must
+     * make (a UTF-8 CharsetDecoder that REPORTs malformed input) refuses every
+     * ju* vector, and juc1 (well-formed multi-byte UTF-8) decodes and verifies
+     * ok. {@code new String(bytes, UTF_8)} would instead fold the bytes to
+     * U+FFFD, which no longer matches the signed bytes.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void invalidUtf8VectorsCannotBecomeAPayload() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("invalid_utf8_vectors");
+        assertFalse(vectors.isEmpty(), "invalid_utf8_vectors missing or empty");
+        for (Map<String, Object> v : vectors) {
+            String vid = (String) v.get("_vector_id");
+            byte[] raw = java.util.HexFormat.of().parseHex((String) v.get("payload_hex"));
+            java.nio.charset.CharsetDecoder strict = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+            if (!Boolean.TRUE.equals(v.get("expect_ok"))) {
+                assertThrows(java.nio.charset.CharacterCodingException.class,
+                    () -> strict.decode(java.nio.ByteBuffer.wrap(raw)), vid);
+                continue;
+            }
+            String payload = strict.decode(java.nio.ByteBuffer.wrap(raw)).toString();
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = new Envelope.SignedEnvelope(payload, (String) v.get("sig"), (String) v.get("pubkey"),
+                ((Number) v.get("nonce")).longValue(), ((Number) v.get("expiresAt")).longValue());
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            assertTrue(r.ok, vid + ": control should verify ok, got " + (r.reason == null ? null : r.reason.wire));
         }
     }
 

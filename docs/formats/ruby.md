@@ -310,9 +310,15 @@ class SchnorrZKP < Runar::SmartContract
     @pub_key = pub_key
   end
 
-  runar_public r_point: Point, s: Bigint, e: Bigint
-  def verify(r_point, s, e)
+  runar_public r_point: Point, s: Bigint
+  def verify(r_point, s)
+    # s in [1, n), n = the secp256k1 group order (malleability gate)
+    assert within(s, 1, 115792089237316195423570985008687907852837564279074904382605163141518161494337)
+    # both points on the curve (rejects the all-zero identity as pub_key)
     assert ec_on_curve(r_point)
+    assert ec_on_curve(@pub_key)
+    # Fiat-Shamir: the challenge is derived on-chain, never chosen by the spender
+    e = bin2num(hash256(cat(r_point, @pub_key)))
     s_g = ec_mul_gen(s)
     e_p = ec_mul(@pub_key, e)
     rhs = ec_add(r_point, e_p)

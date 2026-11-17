@@ -143,7 +143,7 @@ function classify(pred: string): GateClass | null {
   if (/\bnodeUp\b/.test(pred)) return 'regtest';
   if (/\bENDPOINT\b/.test(pred)) return 'wallet';
   if (
-    /\bisDriverAvailable\(|\bhas(Go|Rust|Python)\b|\w+(BinaryPath|ScriptPath|JarPath)\b|\b\w*[bB]inary\s*===\s*null\b/.test(
+    /\bisDriverAvailable\(|\bhas(Go|Rust|Python)\b|\btier\.skip\b|\w+(BinaryPath|ScriptPath|JarPath)\b|\b\w*[bB]inary\s*===\s*null\b/.test(
       pred,
     )
   ) {

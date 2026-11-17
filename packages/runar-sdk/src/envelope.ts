@@ -95,7 +95,7 @@ export async function signEnvelope(opts: SignEnvelopeOpts): Promise<SignedEnvelo
  *
  * 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
  * so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
- * also far above what the wire needs: the deepest of the 199 checked-in
+ * also far above what the wire needs: the deepest of the 201 checked-in
  * conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
  * tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
  * bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -138,6 +138,134 @@ function payloadExceedsMaxDepth(payload: string): boolean {
     } else if ((c === '}' || c === ']') && depth > 0) depth--;
   }
   return false;
+}
+
+/**
+ * R2-DUPKEY: does any object in the payload carry the same key twice?
+ *
+ * JSON.parse keeps the LAST of two equal keys, so a payload
+ * `{"nonce":1,"nonce":<outer>}` verified ok here while a keep-first tier said
+ * envelope-mismatch -- and the signer and the verifier can disagree about what
+ * a signed field says. Decided on the TEXT because the parsed object no longer
+ * shows the duplicate. Runs only on text JSON.parse has already ACCEPTED, under
+ * the depth guard, so it can read the grammar directly. Keys are compared after
+ * unescaping (each key's quoted text goes back through JSON.parse), so "a",
+ * "a" and a surrogate-pair spelling of one code point all collide. One key
+ * set per open object: the same key in sibling or nested objects is fine.
+ * Flat scan, no recursion.
+ */
+function payloadHasDuplicateKey(payload: string): boolean {
+  // null = array frame; otherwise the open object's keys and whether the next
+  // string token is a key.
+  const frames: Array<{ keys: Set<string>; expectKey: boolean } | null> = [];
+  const n = payload.length;
+  for (let i = 0; i < n; i++) {
+    const c = payload[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n && payload[j] !== '"') j += payload[j] === '\\' ? 2 : 1;
+      const top = frames[frames.length - 1];
+      if (top && top.expectKey) {
+        const key = JSON.parse(payload.slice(i, j + 1)) as string;
+        if (top.keys.has(key)) return true;
+        top.keys.add(key);
+        top.expectKey = false;
+      }
+      i = j;
+    } else if (c === '{') {
+      frames.push({ keys: new Set(), expectKey: true });
+    } else if (c === '[') {
+      frames.push(null);
+    } else if (c === '}' || c === ']') {
+      frames.pop();
+    } else if (c === ',') {
+      const top = frames[frames.length - 1];
+      if (top) top.expectKey = true;
+    }
+  }
+  return false;
+}
+
+/**
+ * GK-BUG-009: the payload's own `nonce` / `expiresAt` must be a JSON INTEGER
+ * TOKEN -- optional '-', then 0 or a non-zero digit followed by digits; no
+ * '.', no exponent, inside the signed 64-bit range -- or the envelope is
+ * `envelope-mismatch`. JSON.parse erases the spelling (1.0, 1e0 and 1 are all
+ * the number 1), so, like R-115 / R-260, this is decided on the payload TEXT.
+ * Every tier applies the same rule: Go/Rust/Java/Zig by the type their parser
+ * gives an integer token, Python/Ruby by type plus an explicit i64 bound.
+ */
+const JSON_INTEGER_TOKEN = /^-?(?:0|[1-9][0-9]*)$/;
+const I64_MIN = -(2n ** 63n);
+const I64_MAX = 2n ** 63n - 1n;
+
+function isI64IntegerToken(tok: string | undefined): boolean {
+  if (tok === undefined || !JSON_INTEGER_TOKEN.test(tok)) return false;
+  const v = BigInt(tok);
+  return v >= I64_MIN && v <= I64_MAX;
+}
+
+/**
+ * Raw value text of each TOP-LEVEL member of a payload that JSON.parse has
+ * already accepted as an object. Keys are decoded with JSON.parse, so an
+ * escaped spelling (`"n\u006fnce"`) is the same key. A payload with a
+ * duplicate key never gets here (R2-DUPKEY: bad-json). Flat scan, no recursion.
+ */
+function topLevelMemberTokens(payload: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const n = payload.length;
+  let i = 0;
+  const skipWs = (): void => {
+    while (i < n && (payload[i] === ' ' || payload[i] === '\t' || payload[i] === '\n' || payload[i] === '\r')) i++;
+  };
+  const skipString = (): void => {
+    i++; // opening quote
+    while (i < n) {
+      const c = payload[i];
+      if (c === '\\') i += 2;
+      else if (c === '"') {
+        i++;
+        return;
+      } else i++;
+    }
+  };
+  skipWs();
+  if (payload[i] !== '{') return out;
+  i++;
+  for (;;) {
+    skipWs();
+    if (i >= n || payload[i] !== '"') break;
+    const keyStart = i;
+    skipString();
+    const key = JSON.parse(payload.slice(keyStart, i)) as string;
+    skipWs();
+    i++; // ':'
+    skipWs();
+    const valueStart = i;
+    let depth = 0;
+    while (i < n) {
+      const c = payload[i];
+      if (c === '"') {
+        skipString();
+        continue;
+      }
+      if (c === '{' || c === '[') depth++;
+      else if (c === '}' || c === ']') {
+        if (depth === 0) break;
+        depth--;
+      } else if (c === ',' && depth === 0) break;
+      i++;
+    }
+    let valueEnd = i;
+    while (valueEnd > valueStart && ' \t\n\r'.includes(payload[valueEnd - 1]!)) valueEnd--;
+    out.set(key, payload.slice(valueStart, valueEnd));
+    if (payload[i] === ',') {
+      i++;
+      continue;
+    }
+    break;
+  }
+  return out;
 }
 
 export type VerifyEnvelopeReason =
@@ -263,11 +391,23 @@ export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
   } catch {
     return { ok: false, reason: 'bad-json' };
   }
+  // R2-DUPKEY: a duplicate key is bad-json, decided here with every other
+  // parse failure (after expired, before envelope-mismatch).
+  if (payloadHasDuplicateKey(env.payload)) {
+    return { ok: false, reason: 'bad-json' };
+  }
 
   // 4. Payload's own nonce/expiresAt must match the envelope's outer
   //    fields, so a forwarder can't strip the lifetime guarantee by
-  //    rewriting outer fields while keeping the inner sig.
-  if (parsed.nonce !== env.nonce || parsed.expiresAt !== env.expiresAt) {
+  //    rewriting outer fields while keeping the inner sig. GK-BUG-009: and
+  //    each must be a JSON integer token in i64 range, decided on the text.
+  const tokens = topLevelMemberTokens(env.payload);
+  if (
+    !isI64IntegerToken(tokens.get('nonce')) ||
+    !isI64IntegerToken(tokens.get('expiresAt')) ||
+    parsed.nonce !== env.nonce ||
+    parsed.expiresAt !== env.expiresAt
+  ) {
     return { ok: false, reason: 'envelope-mismatch', data: parsed };
   }
 

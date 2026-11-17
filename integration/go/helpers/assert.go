@@ -1,6 +1,11 @@
 package helpers
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+)
 
 // AssertTxAccepted broadcasts a transaction and expects it to be accepted.
 // Returns the txid.
@@ -14,14 +19,41 @@ func AssertTxAccepted(t *testing.T, txHex string) string {
 	return txid
 }
 
-// AssertTxRejected broadcasts a transaction and expects it to be rejected.
+// AssertTxRejected broadcasts a transaction and expects the NODE to refuse it
+// because its script fails (ScriptVerifyFailed).
 func AssertTxRejected(t *testing.T, txHex string) {
 	t.Helper()
+	AssertTxRejectedWith(t, txHex, ScriptVerifyFailed)
+}
+
+// AssertTxRejectedWith broadcasts a transaction and expects the node to refuse
+// it at sendrawtransaction with a message containing reason. Any error used
+// to pass, so an unreachable node or a refusal for an unrelated reason (a
+// double-spend never runs the script) read as the rejection under test.
+func AssertTxRejectedWith(t *testing.T, txHex string, reason string) {
+	t.Helper()
+	if why := checkTxRejected(txHex, reason); why != nil {
+		t.Fatal(why)
+	}
+}
+
+// checkTxRejected is the pure check behind AssertTxRejectedWith.
+func checkTxRejected(txHex string, reason string) error {
+	if reason == "" {
+		return fmt.Errorf("AssertTxRejectedWith needs the rejection reason the test is about")
+	}
 	txid, err := SendRawTransaction(txHex)
 	if err == nil {
-		t.Fatalf("expected TX to be rejected but it was accepted: %s", txid)
+		return fmt.Errorf("expected TX to be rejected but it was accepted: %s", txid)
 	}
-	t.Logf("TX correctly rejected: %v", err)
+	var nodeErr *RPCNodeError
+	if txid != "" || !errors.As(err, &nodeErr) || nodeErr.Method != "sendrawtransaction" {
+		return fmt.Errorf("the node never refused the TX (it was accepted, or never ruled on): %v", err)
+	}
+	if !strings.Contains(nodeErr.Message, reason) {
+		return fmt.Errorf("the node refused the TX for the wrong reason: expected %q, got %q", reason, nodeErr.Message)
+	}
+	return nil
 }
 
 // AssertTxInBlock mines a block and verifies the transaction has confirmations.

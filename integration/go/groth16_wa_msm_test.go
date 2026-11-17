@@ -107,21 +107,36 @@ func TestRollupGroth16WAMSM_AdvanceState_NegativeTamper(t *testing.T) {
 				hexStateRoot(1),
 				int64(1),
 			}
+			before := provider.BroadcastAttempts
 			_, _, err = contract.Call("advanceState", args, provider, signer, &runar.CallOptions{
 				Groth16WAWitness: witness,
 			})
 			if err == nil {
 				t.Fatalf("tampering PublicInputs[%d] should fail the MSM check, got nil error", i)
 			}
+			if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+				t.Fatalf("not a node rejection: %v", bad)
+			}
 			t.Logf("tamper PublicInputs[%d] rejected as expected: %v", i, err)
 		})
 	}
 }
 
+// sp1V6ProgramVKeyHash returns public input 0 of the SP1 v6.0.0 fixture, the
+// program verifying-key hash RollupGroth16WAMSM pins in its body.
+func sp1V6ProgramVKeyHash(t *testing.T) *big.Int {
+	t.Helper()
+	pubs, err := bn254witness.LoadSP1PublicInputs(sp1V6FixturePath(t, "groth16_public_inputs.txt"))
+	if err != nil {
+		t.Fatalf("LoadSP1PublicInputs: %v", err)
+	}
+	return new(big.Int).Set(pubs[0])
+}
+
 // deployRollupGroth16WAMSM compiles the RollupGroth16WAMSM stateful
 // contract with the SP1 vkey baked into the MSM-binding preamble,
-// deploys it to regtest, and returns the contract handle and funding
-// wallet.
+// deploys it to regtest bound to the fixture's program verifying-key hash,
+// and returns the contract handle and funding wallet.
 func deployRollupGroth16WAMSM(t *testing.T, vkPath string) (*runar.RunarContract, *helpers.Wallet) {
 	t.Helper()
 
@@ -135,8 +150,9 @@ func deployRollupGroth16WAMSM(t *testing.T, vkPath string) (*runar.RunarContract
 	t.Logf("RollupGroth16WAMSM script: %d bytes (%d KB)", len(artifact.Script)/2, len(artifact.Script)/2/1024)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
-		hexZeros32(), // initial StateRoot
-		int64(0),     // initial BlockNumber
+		sp1V6ProgramVKeyHash(t), // ProgramVKeyHash: public input 0 every proof must carry
+		hexZeros32(),            // initial StateRoot
+		int64(0),                // initial BlockNumber
 	})
 
 	wallet := helpers.NewWallet()
@@ -162,7 +178,7 @@ func deployRollupGroth16WAMSM(t *testing.T, vkPath string) (*runar.RunarContract
 
 // loadSP1V6MSMWitness is the MSM-variant counterpart of loadSP1V6Witness.
 // It populates Witness.PublicInputs with the 5 SP1 public-input scalars
-// so ToStackOps emits them between the final-exp witnesses and
+// so ToStackOps emits them between the residue witness and
 // prepared_inputs — matching the MSM preamble's initNames layout.
 func loadSP1V6MSMWitness(t *testing.T) *bn254witness.Witness {
 	t.Helper()

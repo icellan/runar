@@ -153,7 +153,7 @@ func CompileToSDKArtifactAbs(absPath string) (*runar.RunarArtifact, error) {
 }
 
 // CompileToSDKArtifactWithGroth16WAVKey compiles a Mode 3 stateful contract
-// (one whose method body calls runar.AssertGroth16WitnessAssisted) by
+// (one whose method body calls runar.AssertGroth16WitnessAssistedWithMSM) by
 // supplying the SP1-format Groth16 verifying key path that the codegen will
 // load and bake into the witness-assisted verifier preamble. The resulting
 // artifact is otherwise a standard SDK artifact and can be deployed and
@@ -208,7 +208,25 @@ func compileToSDKArtifactWithOptions(absPath, groth16WAVKey string) (*runar.Runa
 		return nil, fmt.Errorf("validation errors: %v", validResult.Errors)
 	}
 
-	tcResult := frontend.TypeCheck(parseResult.Contract)
+	var lowerOpts codegen.LowerToStackOptions
+	var tcOpts frontend.TypeCheckOptions
+	if groth16WAVKey != "" {
+		// Mode 3 path: load the SP1 vk.json into a Groth16Config so the
+		// codegen preamble emitter can bake the verifying key into the
+		// inlined witness-assisted verifier ops. The compiler package
+		// owns this loader (it can import bn254witness; the codegen
+		// package cannot, due to an import cycle). It is loaded before the
+		// typecheck because a slot pinned in it binds the proved statement
+		// (R2-MSM-UNBOUND), which the typecheck needs to know.
+		cfg, cfgErr := compiler.LoadGroth16WAConfigForTests(groth16WAVKey)
+		if cfgErr != nil {
+			return nil, fmt.Errorf("loading groth16 vk %q: %w", groth16WAVKey, cfgErr)
+		}
+		lowerOpts.Groth16WAConfig = &cfg
+		tcOpts.Groth16WAStatementPinned = cfg.HasPinnedPublicInputs()
+	}
+
+	tcResult := frontend.TypeCheckWithOptions(parseResult.Contract, tcOpts)
 	if len(tcResult.Errors) > 0 {
 		return nil, fmt.Errorf("type check errors: %v", tcResult.Errors)
 	}
@@ -220,20 +238,6 @@ func compileToSDKArtifactWithOptions(absPath, groth16WAVKey string) (*runar.Runa
 	// generated. The SDK's RunarContract.buildCodeScript then splices the
 	// actual values at deployment time. Setting InitialValue would bake values
 	// into the script AND the SDK would append them again (CLEANSTACK bug).
-
-	var lowerOpts codegen.LowerToStackOptions
-	if groth16WAVKey != "" {
-		// Mode 3 path: load the SP1 vk.json into a Groth16Config so the
-		// codegen preamble emitter can bake the verifying key into the
-		// inlined witness-assisted verifier ops. The compiler package
-		// owns this loader (it can import bn254witness; the codegen
-		// package cannot, due to an import cycle).
-		cfg, cfgErr := compiler.LoadGroth16WAConfigForTests(groth16WAVKey)
-		if cfgErr != nil {
-			return nil, fmt.Errorf("loading groth16 vk %q: %w", groth16WAVKey, cfgErr)
-		}
-		lowerOpts.Groth16WAConfig = &cfg
-	}
 
 	// Match the shipped compiler pipeline: fold + EC on ANF before stack
 	// lowering (TS-BUG-001). Constant folding leaves load_prop unchanged, so

@@ -74,8 +74,220 @@ def type_check(contract: ContractNode) -> TypeCheckResult:
     checker.check_constructor()
     for method in contract.methods:
         checker.check_method(method)
+    checker.errors.extend(check_preimage_checked_on_every_path(contract))
 
     return TypeCheckResult(contract=contract, errors=checker.errors)
+
+
+# ---------------------------------------------------------------------------
+# GK-GAP-010: a public method's SigHashPreimage parameter must reach
+# checkPreimage on every path
+# ---------------------------------------------------------------------------
+
+def _is_preimage_type(t: TypeNode | None) -> bool:
+    return isinstance(t, PrimitiveType) and t.name == "SigHashPreimage"
+
+
+def preimage_not_checked_message(method: str, param: str) -> str:
+    return (
+        f"public method '{method}' must assert checkPreimage({param}) on every path"
+    )
+
+
+def _conjuncts(e: Expression) -> list[Expression]:
+    """The operands of a top-level ``&&`` chain (``e`` itself if it is not one)."""
+    if isinstance(e, BinaryExpr) and e.op == "&&":
+        return _conjuncts(e.left) + _conjuncts(e.right)
+    return [e]
+
+
+def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnostic]:
+    """spec/type-system.md section 4.2: a SigHashPreimage parameter of a public
+    method is checked exactly once. The affine checker refuses a second
+    consumption; this refuses none. Every field an extractor reads from an
+    unchecked preimage is chosen by the spender.
+
+    A must-analysis over the AST. A parameter counts as checked by a statement
+    list when ``checkPreimage(p)`` is the asserted condition of ``assert(...)``
+    -- the whole condition or any conjunct of its top-level ``&&`` chain -- with
+    ``p`` the parameter or a local alias of it, or when it is passed to a
+    private method that itself checks that parameter on every path, at a point
+    every execution of the list reaches (R2-GK010-ASSERT: a discarded, bound,
+    negated, ``||``-ed, compared or ternary-wrapped call, or one used as an
+    ``if`` / ternary condition or returned from a helper, checks nothing):
+      - an ``if`` checks it only if both arms do (a missing else checks nothing);
+      - a ternary checks it only if both arms do;
+      - the right operand of ``&&`` / ``||`` checks nothing (short-circuit);
+      - a ``for`` loop body checks nothing (the bound may be zero);
+      - a ``return`` ends its path: a private method checks a parameter only
+        if every ``return`` (and the fall-through end) is reached after the
+        check, and an arm that returns drops out of the join after its ``if``.
+    A name that is assigned anywhere in the method body (the parameter
+    itself or a local) never stands for a parameter: after ``a = other`` the
+    name no longer holds the parameter's value on every path.
+    """
+    privates = {m.name: m for m in contract.methods if m.visibility != "public"}
+    memo: dict[str, set[int]] = {}
+
+    reassigned: set[str] = set()
+
+    def collect_reassigned(stmts: list[Statement]) -> set[str]:
+        out: set[str] = set()
+        for st in stmts or []:
+            if isinstance(st, AssignmentStmt) and isinstance(st.target, Identifier):
+                out.add(st.target.name)
+            elif isinstance(st, IfStmt):
+                out |= collect_reassigned(st.then) | collect_reassigned(st.else_ or [])
+            elif isinstance(st, ForStmt):
+                out |= collect_reassigned(st.body)
+        return out
+
+    def resolve(expr: Expression, aliases: dict[str, str]) -> str | None:
+        if isinstance(expr, Identifier) and expr.name not in reassigned:
+            return aliases.get(expr.name)
+        return None
+
+    def private_target(callee: Expression) -> MethodNode | None:
+        if isinstance(callee, (PropertyAccessExpr, MemberExpr)):
+            return privates.get(callee.property)
+        if isinstance(callee, Identifier):
+            return privates.get(callee.name)
+        return None
+
+    def must_params(m: MethodNode, stack: frozenset[str]) -> set[int]:
+        if m.name in memo:
+            return memo[m.name]
+        if m.name in stack:
+            return set()
+        nonlocal reassigned
+        aliases = {p.name: p.name for p in m.params if _is_preimage_type(p.type)}
+        outer, reassigned = reassigned, collect_reassigned(m.body)
+        done = walk_method(m.body, dict(aliases), stack | {m.name})
+        reassigned = outer
+        result = {i for i, p in enumerate(m.params) if p.name in aliases and p.name in done}
+        memo[m.name] = result
+        return result
+
+    def expr_must(e: Expression | None, aliases: dict[str, str], stack: frozenset[str]) -> set[str]:
+        if e is None:
+            return set()
+        if isinstance(e, CallExpr):
+            out: set[str] = set()
+            for a in e.args:
+                out |= expr_must(a, aliases, stack)
+            if isinstance(e.callee, MemberExpr):
+                out |= expr_must(e.callee.object, aliases, stack)
+            if isinstance(e.callee, Identifier) and e.callee.name == "checkPreimage":
+                # R2-GK010-ASSERT: the call alone checks nothing; only an
+                # asserted conjunct does (the ``assert`` branch below).
+                return out
+            if isinstance(e.callee, Identifier) and e.callee.name == "assert":
+                for c in (_conjuncts(e.args[0]) if e.args else []):
+                    if (isinstance(c, CallExpr) and isinstance(c.callee, Identifier)
+                            and c.callee.name == "checkPreimage" and c.args):
+                        origin = resolve(c.args[0], aliases)
+                        if origin is not None:
+                            out.add(origin)
+                return out
+            target = private_target(e.callee)
+            if target is not None:
+                for i in must_params(target, stack):
+                    if i < len(e.args):
+                        origin = resolve(e.args[i], aliases)
+                        if origin is not None:
+                            out.add(origin)
+            return out
+        if isinstance(e, BinaryExpr):
+            if e.op in ("&&", "||"):
+                return expr_must(e.left, aliases, stack)
+            return expr_must(e.left, aliases, stack) | expr_must(e.right, aliases, stack)
+        if isinstance(e, TernaryExpr):
+            return expr_must(e.condition, aliases, stack) | (
+                expr_must(e.consequent, aliases, stack) & expr_must(e.alternate, aliases, stack)
+            )
+        if isinstance(e, UnaryExpr):
+            return expr_must(e.operand, aliases, stack)
+        if isinstance(e, IndexAccessExpr):
+            return expr_must(e.object, aliases, stack) | expr_must(e.index, aliases, stack)
+        if isinstance(e, MemberExpr):
+            return expr_must(e.object, aliases, stack)
+        if isinstance(e, ArrayLiteralExpr):
+            out = set()
+            for el in e.elements:
+                out |= expr_must(el, aliases, stack)
+            return out
+        return set()
+
+    def walk_method(body: list[Statement], aliases: dict[str, str], stack: frozenset[str]) -> set[str]:
+        """Intersect the checked sets of every ``return`` and of the
+        fall-through end of a method body."""
+        exits: list[set[str]] = []
+        fall = walk(body, set(), aliases, stack, exits)
+        if fall is not None:
+            exits.append(fall)
+        return set.intersection(*exits) if exits else set()
+
+    def walk(
+        stmts: list[Statement],
+        done: set[str],
+        aliases: dict[str, str],
+        stack: frozenset[str],
+        exits: list[set[str]],
+    ) -> set[str] | None:
+        """The parameters checked at the end of ``stmts``, or ``None`` when
+        every path through ``stmts`` returns first. Each ``return`` records its
+        own checked set in ``exits``."""
+        done = set(done)
+        for st in stmts or []:
+            if isinstance(st, VariableDeclStmt):
+                done |= expr_must(st.init, aliases, stack)
+                origin = resolve(st.init, aliases) if st.init is not None else None
+                if origin is not None:
+                    aliases[st.name] = origin
+                else:
+                    aliases.pop(st.name, None)
+            elif isinstance(st, AssignmentStmt):
+                done |= expr_must(st.value, aliases, stack)
+            elif isinstance(st, (ExpressionStmt,)):
+                done |= expr_must(st.expr, aliases, stack)
+            elif isinstance(st, ReturnStmt):
+                exits.append(done | expr_must(st.value, aliases, stack))
+                return None
+            elif isinstance(st, IfStmt):
+                done |= expr_must(st.condition, aliases, stack)
+                then_done = walk(st.then, done, dict(aliases), stack, exits)
+                else_done = walk(st.else_ or [], done, dict(aliases), stack, exits)
+                if then_done is None and else_done is None:
+                    return None
+                if then_done is None:
+                    done = else_done
+                elif else_done is None:
+                    done = then_done
+                else:
+                    done = then_done & else_done
+            elif isinstance(st, ForStmt):
+                # The body checks nothing for the code after the loop, but a
+                # ``return`` inside it still ends a path.
+                walk(st.body, done, dict(aliases), stack, exits)
+        return done
+
+    errors: list[Diagnostic] = []
+    for m in contract.methods:
+        if m.visibility != "public":
+            continue
+        tracked = [p.name for p in m.params if _is_preimage_type(p.type)]
+        if not tracked:
+            continue
+        reassigned = collect_reassigned(m.body)
+        done = walk_method(m.body, {n: n for n in tracked}, frozenset({m.name}))
+        for name in tracked:
+            if name not in done:
+                errors.append(Diagnostic(
+                    message=preimage_not_checked_message(m.name, name),
+                    severity=Severity.ERROR,
+                    loc=m.source_location,
+                ))
+    return errors
 
 
 # ---------------------------------------------------------------------------

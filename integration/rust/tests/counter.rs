@@ -180,6 +180,7 @@ fn test_counter_wrong_state() {
     let mut wrong_state = HashMap::new();
     wrong_state.insert("count".to_string(), SdkValue::Int(99));
 
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "increment",
         &[],
@@ -190,7 +191,7 @@ fn test_counter_wrong_state() {
             ..Default::default()
         }),
     );
-    assert!(result.is_err(), "expected wrong state to fail");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
 
 #[test]
@@ -215,6 +216,7 @@ fn test_counter_underflow() {
     let mut bad_state = HashMap::new();
     bad_state.insert("count".to_string(), SdkValue::Int(-1));
 
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "decrement",
         &[],
@@ -225,5 +227,5 @@ fn test_counter_underflow() {
             ..Default::default()
         }),
     );
-    assert!(result.is_err(), "expected underflow to fail");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

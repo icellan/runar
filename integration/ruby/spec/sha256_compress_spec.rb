@@ -153,8 +153,8 @@ RSpec.describe 'sha256Compress' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 500_000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call('verify', [SHA256_IV_HEX, '00' * 64], provider, wallet[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 end

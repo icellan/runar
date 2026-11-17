@@ -66,8 +66,8 @@ test "bindingVariant: all emits the compact blob" {
 test "bindingVariant: a nested if arm inherits the method variant" {
     const a = std.testing.allocator;
     const src = "class G extends SmartContract {\n  constructor() { super(); }\n  /** @bindingVariant all */\n" ++
-        "  public unlock(a: SigHashPreimage, b: SigHashPreimage, c: boolean) {\n" ++
-        "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(b)); }\n  }\n}\n";
+        "  public unlock(a: SigHashPreimage, c: boolean) {\n" ++
+        "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(a)); }\n  }\n}\n";
     const s = try scriptOf(a, src, "G.runar.ts");
     defer a.free(s);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, s, ALL_HEX));

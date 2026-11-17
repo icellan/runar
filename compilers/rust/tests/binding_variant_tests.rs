@@ -62,7 +62,7 @@ fn all_emits_the_compact_blob() {
 
 #[test]
 fn nested_arm_inherits_the_variant() {
-    let src = "class G extends SmartContract {\n  constructor() { super(); }\n  /** @bindingVariant all */\n  public unlock(a: SigHashPreimage, b: SigHashPreimage, c: boolean) {\n    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(b)); }\n  }\n}\n";
+    let src = "class G extends SmartContract {\n  constructor() { super(); }\n  /** @bindingVariant all */\n  public unlock(a: SigHashPreimage, c: boolean) {\n    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(a)); }\n  }\n}\n";
     let s = script(src, "G.runar.ts");
     assert_eq!(s.matches(ALL_HEX).count(), 2);
     assert!(!s.contains(LOWS_HEX));

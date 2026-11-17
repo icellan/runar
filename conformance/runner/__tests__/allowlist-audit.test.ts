@@ -1,7 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { describe, it, expect, afterAll } from 'vitest';
+import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { readFixtureCompilerAllowlist, readFixtureFoldOnMatchesGolden } from '../runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFORMANCE_TESTS_DIR = join(__dirname, '../../tests');
@@ -187,11 +189,20 @@ describe('conformance allowlist audit', () => {
   // F-352 added the fourth, `state-array-set`, for the same reason: it is the
   // second witness for the mutable-state shape FixedArray<bigint, 4>, and no
   // Java spelling of a FixedArray property exists.
+  //
+  // GK-GAP-003 added `ternary-expression`, which pins the conditional
+  // EXPRESSION `c ? a : b`. User decision: only the surfaces that have ternary
+  // syntax carry it (.ts/.sol/.rb/.java `c ? a : b`, .py `a if c else b`; the
+  // N491 paren-ternary negatives confirm all five parse it on every tier). The
+  // Move, Go, Rust-DSL and Zig surfaces have no conditional expression -- `if`
+  // is a statement there -- so there is nothing for them to spell. All seven
+  // compilers stay full hex/ANF parity targets for the five surfaces.
   const APPROVED_PARSER_SKIPS: Record<string, string[]> = {
     'embed-always-fixed-array': ['.runar.java'],
     'fixed-array-index': ['.runar.java'],
     'fixed-array-write': ['.runar.java'],
     'state-array-set': ['.runar.java'],
+    'ternary-expression': ['.runar.go', '.runar.move', '.runar.rs', '.runar.zig'],
   };
   it('no fixture opts a format out of parser coverage unless approved (parserSkip stays governed)', () => {
     const offenders: string[] = [];
@@ -252,5 +263,128 @@ describe('conformance allowlist audit', () => {
       `"path" and "sources", so different harnesses could compile different ` +
       `files for the same fixture: ${both.join(', ')}`,
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GK-GAP-002 (user decision: option (a)). A `"compilers"`-allowlisted fixture
+// has only one tier, so under fold-ON its rows compare nothing unless the
+// fixture opts into `foldOnMatchesGolden` (N-473) — R132 keeps such rows
+// labelled VACUOUS rather than failed, and R190 made the flag opt-in. That
+// let a NEW Go-only fixture land vacuous-but-green under fold-ON. This rule
+// closes it statically: every allowlisted fixture must set
+// `"foldOnMatchesGolden": true`, or carry a whole-fixture entry with a
+// non-empty `reason` in conformance/fold-on-allowlist.json (which states why
+// it cannot be compared). R132's label semantics are unchanged.
+// ---------------------------------------------------------------------------
+
+const FOLD_ON_ALLOWLIST = join(__dirname, '../../fold-on-allowlist.json');
+
+/**
+ * Allowlisted fixtures under `testsDir` that would run vacuous under fold-ON.
+ * Reads source.json through the runner's own loaders, so a malformed
+ * `compilers` list or a non-`true` `foldOnMatchesGolden` throws here exactly
+ * as it does in the runner; a fold-on-allowlist entry without a non-empty
+ * `reason` is refused the same way `loadFoldOnAllowlist` refuses it.
+ */
+function foldOnCoverageGaps(testsDir: string, foldOnAllowlistPath: string): string[] {
+  const raw = JSON.parse(readFileSync(foldOnAllowlistPath, 'utf-8')) as { skip?: unknown };
+  const wholeFixture = new Set<string>();
+  for (const ent of Array.isArray(raw.skip) ? raw.skip : []) {
+    const e = ent as Record<string, unknown>;
+    if (typeof e?.fixture !== 'string' || typeof e.reason !== 'string' || e.reason.trim() === '') {
+      throw new Error(
+        `fold-on-allowlist.json entry rejected: every entry needs a fixture and a non-empty reason (${JSON.stringify(ent)})`,
+      );
+    }
+    if (e.formats === undefined) wholeFixture.add(e.fixture);
+  }
+  const gaps: string[] = [];
+  for (const fixture of readdirSync(testsDir).sort()) {
+    const dir = join(testsDir, fixture);
+    if (!statSync(dir).isDirectory()) continue;
+    if (readFixtureCompilerAllowlist(dir) === null) continue;
+    if (readFixtureFoldOnMatchesGolden(dir)) continue;
+    if (wholeFixture.has(fixture)) continue;
+    gaps.push(
+      `${fixture}: "compilers" allowlist without "foldOnMatchesGolden": true or a ` +
+        'whole-fixture fold-on-allowlist.json entry with a reason',
+    );
+  }
+  return gaps;
+}
+
+describe('GK-GAP-002: compilers-allowlisted fixtures are not vacuous under fold-ON', () => {
+  const tmp: string[] = [];
+  afterAll(() => {
+    for (const d of tmp) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** A temp tests dir holding one copy of merkle-proof/source.json, edited by `edit`. */
+  function tempCorpus(edit: (sj: Record<string, unknown>) => void, skip: unknown[] = []): {
+    testsDir: string;
+    allowlist: string;
+  } {
+    const root = mkdtempSync(join(tmpdir(), 'gk-gap-002-'));
+    tmp.push(root);
+    const testsDir = join(root, 'tests');
+    mkdirSync(join(testsDir, 'merkle-proof'), { recursive: true });
+    const sj = readSourceJson('merkle-proof')!;
+    edit(sj);
+    writeFileSync(join(testsDir, 'merkle-proof', 'source.json'), JSON.stringify(sj, null, 2));
+    const allowlist = join(root, 'fold-on-allowlist.json');
+    writeFileSync(allowlist, JSON.stringify({ skip }));
+    return { testsDir, allowlist };
+  }
+
+  it('the real corpus has no gap', () => {
+    expect(foldOnCoverageGaps(CONFORMANCE_TESTS_DIR, FOLD_ON_ALLOWLIST)).toEqual([]);
+  });
+
+  it('an allowlisted fixture without foldOnMatchesGolden or a fold-on entry is a gap', () => {
+    const { testsDir, allowlist } = tempCorpus((sj) => {
+      delete sj.foldOnMatchesGolden;
+    });
+    expect(foldOnCoverageGaps(testsDir, allowlist)).toEqual([
+      'merkle-proof: "compilers" allowlist without "foldOnMatchesGolden": true or a ' +
+        'whole-fixture fold-on-allowlist.json entry with a reason',
+    ]);
+  });
+
+  it('a whole-fixture fold-on-allowlist entry with a reason closes the gap', () => {
+    const { testsDir, allowlist } = tempCorpus(
+      (sj) => {
+        delete sj.foldOnMatchesGolden;
+      },
+      [{ fixture: 'merkle-proof', reason: 'folding moves the bytes; see tracking' }],
+    );
+    expect(foldOnCoverageGaps(testsDir, allowlist)).toEqual([]);
+  });
+
+  it('a format-scoped entry does not close the gap (the other formats stay vacuous)', () => {
+    const { testsDir, allowlist } = tempCorpus(
+      (sj) => {
+        delete sj.foldOnMatchesGolden;
+      },
+      [{ fixture: 'merkle-proof', formats: ['.runar.ts'], reason: 'one format only' }],
+    );
+    expect(foldOnCoverageGaps(testsDir, allowlist)).toHaveLength(1);
+  });
+
+  it('an entry with an empty reason is refused, as the runner refuses it', () => {
+    const { testsDir, allowlist } = tempCorpus(
+      (sj) => {
+        delete sj.foldOnMatchesGolden;
+      },
+      [{ fixture: 'merkle-proof', reason: '  ' }],
+    );
+    expect(() => foldOnCoverageGaps(testsDir, allowlist)).toThrow(/reason/);
+  });
+
+  it('foldOnMatchesGolden other than true is refused, as the runner refuses it', () => {
+    const { testsDir, allowlist } = tempCorpus((sj) => {
+      sj.foldOnMatchesGolden = 'yes';
+    });
+    expect(() => foldOnCoverageGaps(testsDir, allowlist)).toThrow(/foldOnMatchesGolden/);
   });
 });

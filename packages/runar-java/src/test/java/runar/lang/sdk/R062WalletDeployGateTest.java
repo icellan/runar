@@ -10,15 +10,12 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * R-062 — the unsound-primitive gate on the WALLET funding path (Java).
  *
- * <p>Java is the second tier that was already correct, for a structural reason:
- * there is no {@code deployWithWallet} / {@code createAction} second funding
- * path at all. {@link WalletProvider} is a Provider+Signer adapter over a
- * {@link BRC100Wallet}, so a wallet-backed deploy goes through the ONE
- * {@link RunarContract#deploy} that already runs both the DoS script-size bound
- * and {@link UnsoundPrimitives#assertAcknowledged}.
- *
- * <p>These tests pin that, so a future {@code createAction} path cannot be
- * added without noticing what it has to carry. Three cases, because
+ * <p>These tests cover the {@link WalletProvider}-as-Provider path: a
+ * wallet-backed deploy through {@link RunarContract#deploy}, which runs both the
+ * DoS script-size bound and {@link UnsoundPrimitives#assertAcknowledged}. The
+ * second funding path, {@link RunarContract#deployWithWallet} (BRC-100
+ * {@code createAction}, GK-GAP-014), carries the same two guards and is pinned
+ * in {@code WalletBrc100ActionsTest}. Three cases, because
  * over-rejection here would break every legitimate wallet deploy: the refusal,
  * an ordinary artifact, and an acknowledged unsound one.
  */
@@ -108,21 +105,26 @@ class R062WalletDeployGateTest {
     }
 
     /**
-     * Structural assertion: the Java SDK exposes no second, wallet-owned
-     * funding entry point. If one is ever added, this fails and whoever adds it
-     * has to give it the same guards {@code deploy} carries.
+     * Structural assertion: the only wallet-owned funding entry point on
+     * {@link RunarContract} is {@code deployWithWallet} (GK-GAP-014), whose
+     * script-size and R-062 guards are pinned in
+     * {@code WalletBrc100ActionsTest.deployWithWalletRefuses*}. If another one
+     * is ever added, this fails and whoever adds it has to give it the same
+     * guards {@code deploy} carries.
      */
     @Test
-    void thereIsNoSecondWalletFundingPath() {
+    void theOnlyWalletFundingPathIsTheGuardedDeployWithWallet() {
+        java.util.Set<String> found = new java.util.TreeSet<>();
         for (var m : RunarContract.class.getMethods()) {
             String n = m.getName().toLowerCase(java.util.Locale.ROOT);
-            assertFalse(
-                n.contains("deploywithwallet") || n.contains("createaction"),
-                "a second wallet funding path appeared (" + m.getName()
-                    + ") — it must run ScriptSizeExceededError.assertScriptHexUnderLimit "
-                    + "and UnsoundPrimitives.assertAcknowledged, and needs its own R-062 tests"
-            );
+            if (n.contains("withwallet") || n.contains("createaction")) {
+                found.add(m.getName());
+            }
         }
+        assertEquals(java.util.Set.of("deployWithWallet"), found,
+            "a new wallet funding path appeared — it must run "
+                + "ScriptSizeExceededError.assertScriptHexUnderLimit and "
+                + "UnsoundPrimitives.assertAcknowledged, and needs its own R-062 tests");
         assertNotNull(HexFormat.of());
     }
 }

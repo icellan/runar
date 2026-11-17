@@ -251,6 +251,29 @@ func buildLowerOptions(o CompileOptions) (codegen.LowerToStackOptions, error) {
 	return lowerOpts, nil
 }
 
+// typeCheckOptions builds the frontend TypeCheckOptions for o. R2-MSM-UNBOUND:
+// the typecheck refuses a method calling assertGroth16WitnessAssistedWithMSM()
+// whose statement nothing binds, and a slot pinned in the vk.json binds it, so
+// the vk.json is read here (and again by buildLowerOptions for codegen).
+func typeCheckOptions(o CompileOptions) (frontend.TypeCheckOptions, error) {
+	var tco frontend.TypeCheckOptions
+	if o.Groth16WAVKey != "" {
+		cfg, err := loadGroth16WAConfig(o.Groth16WAVKey)
+		if err != nil {
+			return tco, fmt.Errorf("loading Groth16WAVKey %q: %w", o.Groth16WAVKey, err)
+		}
+		tco.Groth16WAStatementPinned = cfg.HasPinnedPublicInputs()
+	}
+	return tco, nil
+}
+
+// TypeCheckOptionsFor returns the frontend TypeCheckOptions a compile with o
+// type-checks under. runar.CompileCheckWithGroth16VK uses it so its frontend
+// check reads the vk.json the same way --groth16-wa-vk does.
+func TypeCheckOptionsFor(o CompileOptions) (frontend.TypeCheckOptions, error) {
+	return typeCheckOptions(o)
+}
+
 // CompileFromProgram compiles a parsed ANF program to a Rúnar artifact.
 func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifact, error) {
 	o := mergeOptions(opts)
@@ -572,7 +595,11 @@ func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptio
 	warnings := validResult.Warnings
 
 	// Pass 3: Type check
-	tcResult := frontend.TypeCheck(parseResult.Contract)
+	tcOpts, err := typeCheckOptions(o)
+	if err != nil {
+		return nil, nil, err
+	}
+	tcResult := frontend.TypeCheckWithOptions(parseResult.Contract, tcOpts)
 	if len(tcResult.Errors) > 0 {
 		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
@@ -734,7 +761,11 @@ func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptio
 	}
 	warnings := validResult.Warnings
 
-	tcResult := frontend.TypeCheck(parseResult.Contract)
+	tcOpts, err := typeCheckOptions(o)
+	if err != nil {
+		return nil, nil, err
+	}
+	tcResult := frontend.TypeCheckWithOptions(parseResult.Contract, tcOpts)
 	if len(tcResult.Errors) > 0 {
 		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
@@ -886,7 +917,13 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 	}
 
 	// Pass 3: Type check
-	tcResult := frontend.TypeCheck(result.Contract)
+	tcOpts, tcOptErr := typeCheckOptions(o)
+	if tcOptErr != nil {
+		result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
+			tcOptErr.Error(), frontend.SeverityError, nil))
+		return result
+	}
+	tcResult := frontend.TypeCheckWithOptions(result.Contract, tcOpts)
 	result.Diagnostics = append(result.Diagnostics, tcResult.Errors...)
 
 	if hasErrors(result.Diagnostics) {

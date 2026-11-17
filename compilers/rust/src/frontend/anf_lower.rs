@@ -2884,25 +2884,18 @@ fn lower_call_expr(
     //   (BSVM Mode 3 permissionless step-in).
     if let Expression::Identifier { name, .. } = callee {
         if name == "extractPrevOutputScript" {
+            // GK-GAP-013: typecheck refuses these shapes first; lower_to_anf is
+            // a public entry point, so refuse here too rather than emit an
+            // empty constant in place of the hash assertion.
             if args.len() != 2 && args.len() != 3 {
-                return ctx.emit(ANFValue::LoadConst {
-                    value: serde_json::Value::String(String::new()),
-                });
+                panic!("extractPrevOutputScript: expected 2 or 3 arguments, got {}", args.len());
             }
             let idx = match &args[0] {
                 Expression::BigIntLiteral { value } => match value.to_i128() {
                     Some(v) => v,
-                    None => {
-                        return ctx.emit(ANFValue::LoadConst {
-                            value: serde_json::Value::String(String::new()),
-                        });
-                    }
+                    None => panic!("extractPrevOutputScript: inputIndex out of range"),
                 },
-                _ => {
-                    return ctx.emit(ANFValue::LoadConst {
-                        value: serde_json::Value::String(String::new()),
-                    });
-                }
+                _ => panic!("extractPrevOutputScript: inputIndex must be a bigint literal"),
             };
             let param_name = format!("_prevOutScript_{}", idx);
             ctx.method_scope
@@ -2921,17 +2914,9 @@ fn lower_call_expr(
                 let prefix_len = match &args[2] {
                     Expression::BigIntLiteral { value } => match value.to_i128() {
                         Some(v) => v,
-                        None => {
-                            return ctx.emit(ANFValue::LoadConst {
-                                value: serde_json::Value::String(String::new()),
-                            });
-                        }
+                        None => panic!("extractPrevOutputScript: prefixLen out of range"),
                     },
-                    _ => {
-                        return ctx.emit(ANFValue::LoadConst {
-                            value: serde_json::Value::String(String::new()),
-                        });
-                    }
+                    _ => panic!("extractPrevOutputScript: prefixLen must be a bigint literal"),
                 };
                 let zero_ref = ctx.emit(ANFValue::LoadConst {
                     value: serde_json::Value::Number(serde_json::Number::from(0i64)),
@@ -2980,25 +2965,16 @@ fn lower_call_expr(
     // of output i is i*34.
     if let Expression::Identifier { name, .. } = callee {
         if name == "requireOutputP2PKH" {
+            // GK-GAP-013: refuse, never emit an empty constant in place of the pin.
             if args.len() != 3 {
-                return ctx.emit(ANFValue::LoadConst {
-                    value: serde_json::Value::String(String::new()),
-                });
+                panic!("requireOutputP2PKH: expected 3 arguments, got {}", args.len());
             }
             let idx = match &args[0] {
                 Expression::BigIntLiteral { value } => match value.to_i128() {
                     Some(v) => v,
-                    None => {
-                        return ctx.emit(ANFValue::LoadConst {
-                            value: serde_json::Value::String(String::new()),
-                        });
-                    }
+                    None => panic!("requireOutputP2PKH: outputIndex out of range"),
                 },
-                _ => {
-                    return ctx.emit(ANFValue::LoadConst {
-                        value: serde_json::Value::String(String::new()),
-                    });
-                }
+                _ => panic!("requireOutputP2PKH: outputIndex must be a bigint literal"),
             };
 
             // W2 backstop. The user-facing refusal lives in the typechecker, where a

@@ -76,6 +76,7 @@ fn validateWithMode(
     const call_depth_exceeded = try checkNoRecursion(allocator, contract, &errors);
     try checkReservedNames(allocator, contract, &errors);
     try checkRedeclarations(allocator, contract, &errors);
+    try checkDuplicateMethods(allocator, contract, &errors);
     // N-180: the Rabin-provenance and sighash passes walk the private-method
     // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
     // refuses, so stop here.
@@ -162,6 +163,26 @@ fn checkReservedNames(
     }
 }
 
+/// GK-BUG-015: a contract cannot declare two methods with the same name. Every
+/// name-keyed later pass (side-effect summary, private-method lookup, the
+/// affine consumption fixpoint, stack lowering) assumes one body per name; with
+/// two they disagree, and the consumption fixpoint can oscillate. Anchored on
+/// each repeat.
+fn checkDuplicateMethods(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    for (contract.methods) |m| {
+        const gop = try seen.getOrPut(allocator, m.name);
+        if (!gop.found_existing) continue;
+        const msg = try std.fmt.allocPrint(allocator, "method '{s}' is already declared in this contract and cannot be re-declared", .{m.name});
+        try errors.append(allocator, .{ .message = msg, .location = m.source_loc, .severity = .@"error", .owned_message = true });
+    }
+}
+
 /// N-509: a local cannot be re-declared in the same scope (spec/grammar.md,
 /// Statement Restrictions). A scope is one statement list -- a method or
 /// constructor body, an if branch, an else branch, a loop body -- and a
@@ -243,6 +264,17 @@ fn isValidPropertyType(t: RunarType) bool {
     };
 }
 
+/// The diagnostic every tier shares (R3-GK010-GAPS).
+pub const READONLY_PREIMAGE_PROPERTY_FMT = "readonly property '{s}' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified";
+
+/// `SigHashPreimage`, or a (nested) FixedArray of it. A nested FixedArray
+/// property records its leaf type in `fixed_array_element` (the inner length
+/// lives in `fixed_array_nested_length`).
+fn holdsSigHashPreimage(prop: PropertyNode) bool {
+    return prop.type_info == .sig_hash_preimage or
+        (prop.type_info == .fixed_array and prop.fixed_array_element == .sig_hash_preimage);
+}
+
 // ============================================================================
 // Property validation
 // ============================================================================
@@ -300,6 +332,21 @@ fn validateProperties(
             try errors.append(allocator, .{
                 .message = "unsupported type in property declaration",
                 .severity = .@"error",
+            });
+        }
+
+        // R3-GK010-GAPS: a readonly property is a constant in the locking
+        // script, and a sighash preimage commits to the outpoint of the
+        // transaction that carries that script, so checkPreimage() on it can
+        // never pass and every field an extractor reads from it is
+        // unverified. Refused at the declaration (before FixedArray
+        // expansion, so the name is the user's).
+        if (prop.readonly and holdsSigHashPreimage(prop)) {
+            try errors.append(allocator, .{
+                .message = try std.fmt.allocPrint(allocator, READONLY_PREIMAGE_PROPERTY_FMT, .{prop.name}),
+                .location = prop.source_loc,
+                .severity = .@"error",
+                .owned_message = true,
             });
         }
 

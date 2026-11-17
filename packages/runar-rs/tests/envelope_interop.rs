@@ -81,7 +81,8 @@ fn rejection_vectors() {
             clock_skew_ms: None,
             now_ms: Some(now_ms),
         });
-        assert!(!r.ok, "rejection {} should be ok=false", rv["reason"]);
+        let id = rv["_vector_id"].as_str().unwrap_or("-");
+        assert!(!r.ok, "rejection {} ({id}) should be ok=false", rv["reason"]);
         let expected = match rv["reason"].as_str().unwrap() {
             "missing-fields" => VerifyEnvelopeReason::MissingFields,
             "expired" => VerifyEnvelopeReason::Expired,
@@ -91,7 +92,43 @@ fn rejection_vectors() {
             "pubkey-not-allowed" => VerifyEnvelopeReason::PubkeyNotAllowed,
             other => panic!("unknown reason {other}"),
         };
-        assert_eq!(r.reason, Some(expected), "rejection {}", rv["reason"]);
+        assert_eq!(r.reason, Some(expected), "rejection {} ({id})", rv["reason"]);
+    }
+}
+
+/// GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list allows
+/// nobody; `null` (not supplied) skips the check. al2 is the control that
+/// reddens if a fix treats an absent allowlist like an empty one.
+#[test]
+fn allowlist_vectors() {
+    let fixture = load_fixture();
+    let env = envelope_from_value(&fixture["valid_envelope"]);
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["allowlist_vectors"]
+        .as_array()
+        .expect("allowlist_vectors missing");
+    assert!(!vectors.is_empty(), "allowlist_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let keys: Option<Vec<String>> = v["expected_keys"].as_array().map(|a| {
+            a.iter().map(|k| k.as_str().unwrap().to_string()).collect()
+        });
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: keys.as_deref(),
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "pubkey-not-allowed" => VerifyEnvelopeReason::PubkeyNotAllowed,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
     }
 }
 
@@ -241,6 +278,42 @@ fn payload_depth_vectors() {
     }
 }
 
+/// R2-DUPKEY. A payload object with two members of the same key (compared
+/// after unescaping, at any depth) is bad-json, decided in the parse step:
+/// after expired, before envelope-mismatch / bad-sig. serde_json's `Value`
+/// keeps the LAST value, so the dk* vectors verified ok here before the fix;
+/// the dkc* controls (same key in DIFFERENT objects) must stay ok.
+#[test]
+fn duplicate_key_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["duplicate_key_vectors"]
+        .as_array()
+        .expect("duplicate_key_vectors missing");
+    assert!(!vectors.is_empty(), "duplicate_key_vectors empty");
+    let mut failures = Vec::new();
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap();
+        let env = envelope_from_value(&v["envelope"]);
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        let want = if v["expect_ok"].as_bool().unwrap() {
+            "ok"
+        } else {
+            v["reason"].as_str().unwrap()
+        };
+        let got = if r.ok { "ok" } else { r.reason.as_ref().unwrap().as_str() };
+        if got != want {
+            failures.push(format!("{id}: got {got}, want {want}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
 /// signature, and the TS reference accepts it: BIP-62's low-S rule is
 /// transaction-script policy, not part of the envelope protocol. Ruby used to
@@ -372,5 +445,87 @@ fn clock_skew_vectors() {
             other => panic!("unknown reason {other}"),
         };
         assert_eq!(r.reason, Some(want), "{id}");
+    }
+}
+
+fn hex_to_bytes(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. This
+/// tier's payload is a `String`, which cannot hold such bytes, so no ju*
+/// vector can reach `verify_envelope`: the replay asserts that the strict
+/// decode a caller must make (`String::from_utf8`) refuses every ju* payload,
+/// and that juc1 (well-formed multi-byte UTF-8) decodes and verifies ok.
+#[test]
+fn invalid_utf8_vectors_cannot_become_a_payload() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["invalid_utf8_vectors"].as_array().unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let vid = v["_vector_id"].as_str().unwrap();
+        let raw = hex_to_bytes(v["payload_hex"].as_str().unwrap());
+        match String::from_utf8(raw) {
+            Err(_) => assert!(
+                !v["expect_ok"].as_bool().unwrap(),
+                "{vid}: the control's payload is not UTF-8"
+            ),
+            Ok(payload) => {
+                assert!(v["expect_ok"].as_bool().unwrap(), "{vid}: invalid UTF-8 decoded to a String");
+                let env = SignedEnvelope {
+                    payload,
+                    sig: v["sig"].as_str().unwrap().to_string(),
+                    pubkey: v["pubkey"].as_str().unwrap().to_string(),
+                    nonce: v["nonce"].as_i64().unwrap(),
+                    expires_at: v["expiresAt"].as_i64().unwrap(),
+                };
+                let r = verify_envelope(VerifyEnvelopeOpts {
+                    envelope: &env,
+                    expected_keys: None,
+                    clock_skew_ms: None,
+                    now_ms: Some(now_ms),
+                });
+                assert!(r.ok, "{vid}: control should verify ok, got {:?}", r.reason);
+            }
+        }
+    }
+}
+
+/// R3-OUTER-DUPKEY. `SignedEnvelope` derives `Deserialize`, so
+/// `serde_json::from_str` is this tier's wire-text decode. serde's derived
+/// visitor refuses a repeated field (including an escaped spelling of the
+/// same key); a case-variant member ("Payload") is an unknown field and is
+/// ignored, so odc1 decodes to valid_envelope and verifies ok.
+#[test]
+fn outer_duplicate_key_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["outer_duplicate_key_vectors"].as_array().unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let vid = v["_vector_id"].as_str().unwrap();
+        let decoded = serde_json::from_str::<SignedEnvelope>(v["wire_text"].as_str().unwrap());
+        if v["expect_decode_ok"].as_bool().unwrap() {
+            let env = decoded.unwrap_or_else(|e| panic!("{vid}: control failed to decode: {e}"));
+            let r = verify_envelope(VerifyEnvelopeOpts {
+                envelope: &env,
+                expected_keys: None,
+                clock_skew_ms: None,
+                now_ms: Some(now_ms),
+            });
+            assert!(r.ok, "{vid}: control should verify ok, got {:?}", r.reason);
+        } else {
+            match decoded {
+                Ok(env) => panic!("{vid}: duplicate member decoded to {env:?}"),
+                Err(e) => assert!(
+                    e.to_string().contains("duplicate field"),
+                    "{vid}: refused, but not as a duplicate field: {e}"
+                ),
+            }
+        }
     }
 }

@@ -28,6 +28,7 @@ type fixtureCanonicalVector struct {
 }
 
 type fixtureRejection struct {
+	VectorID string         `json:"_vector_id"`
 	Reason   string         `json:"reason"`
 	Envelope SignedEnvelope `json:"envelope"`
 }
@@ -45,6 +46,15 @@ type fixtureMalleability struct {
 	ExpectOK bool           `json:"expect_ok"`
 	Reason   string         `json:"reason"`
 	Envelope SignedEnvelope `json:"envelope"`
+}
+
+type fixtureAllowlistVector struct {
+	VectorID string `json:"_vector_id"`
+	// JSON null decodes to a nil slice ("the caller supplies no allowlist"),
+	// and [] to an empty non-nil slice — GK-BUG-008 is the difference.
+	ExpectedKeys []string `json:"expected_keys"`
+	ExpectOK     bool     `json:"expect_ok"`
+	Reason       string   `json:"reason"`
 }
 
 type fixtureClockVector struct {
@@ -67,15 +77,39 @@ type fixture struct {
 	CanonicalJSONVectors []fixtureCanonicalVector `json:"canonical_json_vectors"`
 	ValidEnvelope        SignedEnvelope           `json:"valid_envelope"`
 	RejectionVectors     []fixtureRejection       `json:"rejection_vectors"`
+	AllowlistVectors     []fixtureAllowlistVector `json:"allowlist_vectors"`
 	PayloadDepthLimit    int                      `json:"payload_depth_limit"`
 	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
 	MalleabilityVectors  []fixtureMalleability    `json:"malleability_vectors"`
+	DuplicateKeyVectors  []fixtureMalleability    `json:"duplicate_key_vectors"`
+	InvalidUTF8Vectors   []fixtureUTF8Vector      `json:"invalid_utf8_vectors"`
+	OuterDupKeyVectors   []fixtureOuterVector     `json:"outer_duplicate_key_vectors"`
 	SizeLimits           struct {
 		MaxPayloadBytes int `json:"max_payload_bytes"`
 		MaxFieldBytes   int `json:"max_field_bytes"`
 	} `json:"size_limits"`
 	SizeVectors []fixtureSizeVector `json:"size_vectors"`
+}
+
+// fixtureUTF8Vector carries its payload as hex: the bytes are not UTF-8, so
+// they cannot ride in a JSON string (R3-GO-UTF8).
+type fixtureUTF8Vector struct {
+	VectorID   string `json:"_vector_id"`
+	ExpectOK   bool   `json:"expect_ok"`
+	Reason     string `json:"reason"`
+	PayloadHex string `json:"payload_hex"`
+	Sig        string `json:"sig"`
+	Pubkey     string `json:"pubkey"`
+	Nonce      int64  `json:"nonce"`
+	ExpiresAt  int64  `json:"expiresAt"`
+}
+
+// fixtureOuterVector is a whole envelope as wire text (R3-OUTER-DUPKEY).
+type fixtureOuterVector struct {
+	VectorID       string `json:"_vector_id"`
+	ExpectDecodeOK bool   `json:"expect_decode_ok"`
+	WireText       string `json:"wire_text"`
 }
 
 type fixtureSizeVector struct {
@@ -182,11 +216,43 @@ func TestEnvelopeInterop_RejectionVectors(t *testing.T) {
 			NowMs:    Int64Ptr(f.VerifyNowMs),
 		})
 		if r.OK {
-			t.Errorf("rejection %q: expected ok=false", rv.Reason)
+			t.Errorf("rejection %q %s: expected ok=false", rv.Reason, rv.VectorID)
 			continue
 		}
 		if string(r.Reason) != rv.Reason {
-			t.Errorf("rejection %q: got reason=%s want=%s", rv.Reason, r.Reason, rv.Reason)
+			t.Errorf("rejection %q %s: got reason=%s want=%s", rv.Reason, rv.VectorID, r.Reason, rv.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_AllowlistVectors — GK-BUG-008. A caller that supplies
+// an allowlist gets exactly that list, so an EMPTY list allows nobody. This
+// tier read `len(ExpectedKeys) > 0`, so an empty non-nil slice skipped the
+// check and returned OK where the six other tiers said pubkey-not-allowed.
+// al2 (nil) is the control that reddens if a fix treats nil like empty.
+func TestEnvelopeInterop_AllowlistVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.AllowlistVectors) == 0 {
+		t.Fatal("allowlist_vectors missing or empty")
+	}
+	for _, av := range f.AllowlistVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{
+			Envelope:     f.ValidEnvelope,
+			ExpectedKeys: av.ExpectedKeys,
+			NowMs:        Int64Ptr(f.VerifyNowMs),
+		})
+		if av.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", av.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", av.VectorID)
+			continue
+		}
+		if string(r.Reason) != av.Reason {
+			t.Errorf("%s: got reason=%s want=%s", av.VectorID, r.Reason, av.Reason)
 		}
 	}
 }
@@ -358,6 +424,32 @@ func TestEnvelopeInterop_DepthVectors(t *testing.T) {
 	}
 }
 
+// TestEnvelopeInterop_DuplicateKeyVectors — R2-DUPKEY. A payload object with
+// two members of the same key (compared after unescaping, at any depth) is
+// bad-json, decided in the parse step: after expired, before
+// envelope-mismatch / bad-sig. encoding/json keeps the LAST value, so the dk*
+// vectors verified ok here before the fix; the dkc* controls (same key in
+// DIFFERENT objects) must stay ok.
+func TestEnvelopeInterop_DuplicateKeyVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.DuplicateKeyVectors) == 0 {
+		t.Fatal("duplicate_key_vectors missing or empty")
+	}
+	for _, v := range f.DuplicateKeyVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: v.Envelope, NowMs: Int64Ptr(f.VerifyNowMs)})
+		want, got := v.Reason, string(r.Reason)
+		if v.ExpectOK {
+			want = "ok"
+		}
+		if r.OK {
+			got = "ok"
+		}
+		if got != want {
+			t.Errorf("%s: got %s, want %s", v.VectorID, got, want)
+		}
+	}
+}
+
 // TestEnvelopeInterop_MalleabilityVectors — F-138. A high-S signature (s
 // replaced by N - s) is still a valid ECDSA signature, and the TS reference
 // accepts it: BIP-62's low-S rule is transaction-script policy, not part of
@@ -473,6 +565,76 @@ func TestEnvelopeInterop_ClockSkewVectors(t *testing.T) {
 		}
 		if string(r.Reason) != cv.Reason {
 			t.Errorf("%s: got reason=%s want=%s", cv.VectorID, r.Reason, cv.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_InvalidUTF8Vectors — R3-GO-UTF8. A payload that is not
+// well-formed UTF-8 is bad-json. encoding/json folds every invalid sequence to
+// U+FFFD, so this tier verified ok a payload Zig's std.json refuses (and its
+// duplicate-key walk called two keys differing only in invalid bytes equal).
+// juc1 is the control: well-formed multi-byte UTF-8 must still verify.
+func TestEnvelopeInterop_InvalidUTF8Vectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.InvalidUTF8Vectors) == 0 {
+		t.Fatal("fixture carries no invalid_utf8_vectors")
+	}
+	for _, v := range f.InvalidUTF8Vectors {
+		payload, err := hex.DecodeString(v.PayloadHex)
+		if err != nil {
+			t.Fatalf("%s: payload_hex: %v", v.VectorID, err)
+		}
+		r := VerifyEnvelope(VerifyEnvelopeOpts{
+			Envelope: SignedEnvelope{
+				Payload:   string(payload),
+				Sig:       v.Sig,
+				Pubkey:    v.Pubkey,
+				Nonce:     v.Nonce,
+				ExpiresAt: v.ExpiresAt,
+			},
+			NowMs: Int64Ptr(f.VerifyNowMs),
+		})
+		if r.OK != v.ExpectOK {
+			t.Errorf("%s: ok=%v want %v (reason=%s)", v.VectorID, r.OK, v.ExpectOK, r.Reason)
+			continue
+		}
+		if !v.ExpectOK && string(r.Reason) != v.Reason {
+			t.Errorf("%s: reason=%s want %s", v.VectorID, r.Reason, v.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_OuterDuplicateKeyVectors — R3-OUTER-DUPKEY. SignedEnvelope
+// carries json tags, so json.Unmarshal is this tier's wire-text decode path.
+// encoding/json keeps the LAST of two equal keys and matches field names
+// case-insensitively; a duplicate member must be refused, and a case-variant
+// member ("Payload") must not overwrite payload.
+func TestEnvelopeInterop_OuterDuplicateKeyVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.OuterDupKeyVectors) == 0 {
+		t.Fatal("fixture carries no outer_duplicate_key_vectors")
+	}
+	for _, v := range f.OuterDupKeyVectors {
+		var env SignedEnvelope
+		err := json.Unmarshal([]byte(v.WireText), &env)
+		if !v.ExpectDecodeOK {
+			if err == nil {
+				r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(f.VerifyNowMs)})
+				t.Errorf("%s: duplicate member decoded (verify ok=%v reason=%s)", v.VectorID, r.OK, r.Reason)
+				continue
+			}
+			if !strings.Contains(err.Error(), "duplicate key") || !strings.Contains(err.Error(), string(ReasonBadJSON)) {
+				t.Errorf("%s: refused, but not as a duplicate key (bad-json): %v", v.VectorID, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: control failed to decode: %v", v.VectorID, err)
+			continue
+		}
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(f.VerifyNowMs)})
+		if !r.OK {
+			t.Errorf("%s: control decoded but does not verify: reason=%s payload=%q", v.VectorID, r.Reason, env.Payload)
 		}
 	}
 }

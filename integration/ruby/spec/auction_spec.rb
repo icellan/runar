@@ -132,11 +132,11 @@ RSpec.describe 'Auction' do # rubocop:disable RSpec/DescribeClass
 
     # locktime is set so the ONLY reason for rejection is the wrong signer, not
     # an unsatisfied deadline.
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'close', [nil], provider, wrong_wallet[:signer],
         Runar::SDK::CallOptions.new(locktime: 1)
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

@@ -1,6 +1,12 @@
 const std = @import("std");
 const helpers = @import("helpers.zig");
 
+// The node-free helper guards (GK-BUG-001 chain check, GK-BUG-004 mine
+// propagation) ride the same `zig build test-guard` step.
+comptime {
+    _ = @import("node_safety_guard_test.zig");
+}
+
 // ---------------------------------------------------------------------------
 // Guard: the negative tests must MEASURE the broadcast, not merely find the
 // counter non-zero.
@@ -18,12 +24,58 @@ const helpers = @import("helpers.zig");
 // the real provider, the third is a source-level ratchet.
 // ---------------------------------------------------------------------------
 
+// R3-ZIG-TEST-GUARD: these two tests used the provider's default `real_node`,
+// so each "broadcast" shelled out to curl against RPC_URL (localhost:18332)
+// and printed the "[runar-integration] tx broadcast" line to stderr. Under
+// `zig build test-guard` the test binary runs as `--listen=-`, and Zig 0.16's
+// build runner reports a test step that wrote to stderr as a failing step
+// ("failed command: .../test --listen=-") while the same binary run directly
+// passed 17/17. They also were not node-free: with a regtest node up on
+// 18332 they talked to it. They now go through a stub node, like
+// node_safety_guard_test.zig, and `NegativeAssertion_GuardTestsNeverReachTheNode`
+// keeps it that way.
+const StubNode = struct {
+    /// What sendrawtransaction does: no node at all, or the node's refusal.
+    refuse: bool,
+
+    fn sendRawTransaction(ctx: ?*anyopaque, _: std.mem.Allocator, _: []const u8) anyerror![]u8 {
+        const s: *StubNode = @ptrCast(@alignCast(ctx.?));
+        if (!s.refuse) return error.ConnectionFailed;
+        helpers.setLastRpcError("mandatory-script-verify-flag-failed (Script failed an OP_VERIFY operation)");
+        return error.RpcFailed;
+    }
+    fn unused(_: ?*anyopaque, _: std.mem.Allocator) anyerror![]u8 {
+        return error.Unexpected;
+    }
+    fn unusedImport(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!void {
+        return error.Unexpected;
+    }
+    fn unusedSend(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8, _: f64) anyerror![]u8 {
+        return error.Unexpected;
+    }
+    fn unusedMine(_: ?*anyopaque, _: std.mem.Allocator, _: i64) anyerror!void {
+        return error.Unexpected;
+    }
+    fn ops(s: *StubNode) helpers.NodeOps {
+        return .{
+            .ctx = @ptrCast(s),
+            .getBlockchainInfo = unused,
+            .importAddress = unusedImport,
+            .sendToAddress = unusedSend,
+            .sendRawTransaction = sendRawTransaction,
+            .mine = unusedMine,
+        };
+    }
+};
+
 // Vacuity proof: with the fixture deployed and the attack failing INSIDE the
 // SDK (no transaction ever handed to the node), the absolute assertion passes
 // and the delta assertion does not.
 test "NegativeAssertion_AbsoluteCounterIsVacuous" {
     const allocator = std.testing.allocator;
+    var stub: StubNode = .{ .refuse = false };
     var rpc_provider = helpers.RPCProvider.init(allocator);
+    rpc_provider.ops = stub.ops();
 
     // Fixture setup: the deploy reached the node. (No node here, so the
     // broadcast errors — but the ATTEMPT is what the counter records, which is
@@ -49,7 +101,9 @@ test "NegativeAssertion_AbsoluteCounterIsVacuous" {
 // there must still satisfy the delta assertion.
 test "NegativeAssertion_DeltaAcceptsAGenuineNodeRejection" {
     const allocator = std.testing.allocator;
+    var stub: StubNode = .{ .refuse = true };
     var rpc_provider = helpers.RPCProvider.init(allocator);
+    rpc_provider.ops = stub.ops();
 
     if (rpc_provider.provider().broadcast(allocator, "00")) |txid| {
         allocator.free(txid);
@@ -58,14 +112,39 @@ test "NegativeAssertion_DeltaAcceptsAGenuineNodeRejection" {
     const broadcasts_before = rpc_provider.broadcast_attempts;
 
     // The attack tx IS handed to the node, which rejects it.
-    const result = rpc_provider.provider().broadcast(allocator, "00");
-    if (result) |txid| {
-        allocator.free(txid);
-    } else |err| {
-        try std.testing.expectEqual(error.BroadcastFailed, err);
-    }
+    try std.testing.expectError(error.BroadcastFailed, rpc_provider.provider().broadcast(allocator, "00"));
 
     try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+}
+
+// The guard suite must never reach a real node: every provider it builds gets
+// a stub `ops` on the next line. (A guard that silently talked to whatever
+// listens on RPC_URL was neither node-free nor quiet -- see StubNode.)
+test "NegativeAssertion_GuardTestsNeverReachTheNode" {
+    const guard_sources = [_]struct { name: []const u8, src: []const u8 }{
+        .{ .name = "negative_assertion_guard_test.zig", .src = @embedFile("negative_assertion_guard_test.zig") },
+        .{ .name = "node_safety_guard_test.zig", .src = @embedFile("node_safety_guard_test.zig") },
+    };
+    var inits: usize = 0;
+    var unstubbed: usize = 0;
+    for (guard_sources) |f| {
+        var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer lines.deinit(std.testing.allocator);
+        var it = std.mem.splitScalar(u8, f.src, '\n');
+        while (it.next()) |line| try lines.append(std.testing.allocator, line);
+        for (lines.items, 0..) |line, i| {
+            const trimmed = std.mem.trim(u8, line, " ");
+            if (!std.mem.startsWith(u8, trimmed, "var ") or std.mem.indexOf(u8, trimmed, "= helpers.RPCProvider.init(") == null) continue;
+            inits += 1;
+            const next = if (i + 1 < lines.items.len) lines.items[i + 1] else "";
+            if (std.mem.indexOf(u8, next, ".ops = ") == null) {
+                unstubbed += 1;
+                std.log.err("{s}:{d}: RPCProvider built without a stub `ops` on the next line -- it would talk to RPC_URL", .{ f.name, i + 1 });
+            }
+        }
+    }
+    try std.testing.expect(inits >= 2);
+    try std.testing.expectEqual(@as(usize, 0), unstubbed);
 }
 
 /// Every test source that asserts on `broadcast_attempts` must do so as a
@@ -88,6 +167,7 @@ const negative_test_sources = [_]struct { name: []const u8, src: []const u8 }{
 test "NegativeAssertion_NoAbsoluteBroadcastAssertionsRemain" {
     var absolute_sites: usize = 0;
     var delta_sites: usize = 0;
+    var verdict_sites: usize = 0;
 
     for (negative_test_sources) |f| {
         var it = std.mem.splitScalar(u8, f.src, '\n');
@@ -103,17 +183,28 @@ test "NegativeAssertion_NoAbsoluteBroadcastAssertionsRemain" {
                     .{ f.name, line_no },
                 );
             }
+            // R2-NEGATIVES: a bare delta is vacuous since GK-BUG-004 (an
+            // accepted tx whose confirming mine fails also moves the counter
+            // and errors), so it counts as a defect now.
             if (std.mem.indexOf(u8, line, "broadcast_attempts > broadcasts_before") != null) {
                 delta_sites += 1;
+                std.log.err(
+                    "{s}:{d}: bare broadcast delta — it also holds for an ACCEPTED tx whose mine failed. Use expectNodeRejected.",
+                    .{ f.name, line_no },
+                );
+            }
+            if (std.mem.indexOf(u8, line, ".expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED)") != null) {
+                verdict_sites += 1;
             }
         }
     }
 
     try std.testing.expectEqual(@as(usize, 0), absolute_sites);
+    try std.testing.expectEqual(@as(usize, 0), delta_sites);
     // Falsification anchor: if the assertions are simply deleted rather than
-    // converted, this reddens too. 23: MathDemo_RejectDivideByZero now asserts
-    // the SDK's fail-closed refusal (no SDK path builds that spend).
-    try std.testing.expectEqual(@as(usize, 23), delta_sites);
+    // converted, this reddens too. 23: MathDemo_RejectDivideByZero asserts the
+    // SDK's fail-closed refusal (no SDK path builds that spend).
+    try std.testing.expectEqual(@as(usize, 23), verdict_sites);
 }
 
 // ---------------------------------------------------------------------------

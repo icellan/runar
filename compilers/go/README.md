@@ -139,7 +139,7 @@ runar-compiler-go --source MyContract.runar.ts --disable-constant-folding
 # Write artifact.sourceMap JSON after a successful compile
 runar-compiler-go --source MyContract.runar.ts --emit-source-map MyContract.sourcemap.json
 
-# Supply a Groth16 verifying key, required when the contract calls assertGroth16WitnessAssisted
+# Supply a Groth16 verifying key, required when the contract calls assertGroth16WitnessAssistedWithMSM
 runar-compiler-go --source MyContract.runar.ts --groth16-wa-vk MyContract.groth16.vk.json
 ```
 
@@ -158,7 +158,7 @@ runar-compiler-go --source MyContract.runar.ts --groth16-wa-vk MyContract.groth1
 | `--disable-constant-folding` | both | Disable the ANF constant folding pass |
 | `--emit-source-map <path>` | both | After a successful compile, write `artifact.sourceMap` JSON to this path |
 | `--no-source-map` | both | Omit the `sourceMap` key from the artifact (it is present by default and can dominate the size of a large artifact). Mutually exclusive with `--emit-source-map` |
-| `--groth16-wa-vk <path>` | both | Path to a SP1-format Groth16 `vk.json` file; required to compile a `--source`/`--ir` contract whose method body calls `assertGroth16WitnessAssisted` (F-305). Distinct from the `groth16-wa` subcommand below, which synthesizes a bare fixed-VK verifier and takes no `--source`/`--ir` file at all. |
+| `--groth16-wa-vk <path>` | both | Path to a SP1-format Groth16 `vk.json` file; required to compile a `--source`/`--ir` contract whose method body calls `assertGroth16WitnessAssistedWithMSM` (F-305). The method must still bind the proved statement — with `pinnedPublicInputs` in the `vk.json` or `groth16PublicInput(i)` assertions in its body. The raw `assertGroth16WitnessAssisted()` is a compile error (GK-BUG-006): it never sees the public inputs, so it accepts a proof of any statement. Distinct from the `groth16-wa` subcommand below, which synthesizes a bare fixed-VK verifier and takes no `--source`/`--ir` file at all. |
 
 ### `debug` subcommand: step-through Bitcoin Script execution
 
@@ -251,11 +251,22 @@ every spend of the contract.
 Two consistency rules: in the `groth16-wa` subcommand a slot pinned in the
 vk.json and its `--pub` value must agree (the compile fails otherwise), and
 the subcommand then checks that slot once, inside the MSM binding, rather
-than a second time afterwards. A vk.json with `pinnedPublicInputs` is
-refused for a method that calls the plain `AssertGroth16WitnessAssisted`
-(no MSM binding): that variant never sees the public-input scalars, so it
-could not enforce the pin, and silently ignoring it would be worse than an
-error.
+than a second time afterwards. The plain `AssertGroth16WitnessAssisted`
+(no MSM binding) is refused outright, pinned vk.json or not (GK-BUG-006):
+that variant never sees the public-input scalars, so it can neither enforce
+a pin nor tie the proof to any statement.
+
+A method that calls `AssertGroth16WitnessAssistedWithMSM` must bind the
+statement (R2-MSM-UNBOUND), or the compile fails: either the vk.json pins at
+least one slot, or the method has a top-level
+`assert(groth16PublicInput(i) == <value>)` whose `<value>` is built from
+literals and readonly contract properties only (no method parameter, local,
+mutable property or other `groth16PublicInput`). `!=`, `<`, a conjunct of `&&`, a check inside an `if`
+or loop and a check in a private helper do not count. The typecheck enforces
+this for `--source` (and `runar.CompileCheck`, which has no vk.json, so a
+method bound only by pins fails there; `runar.CompileCheckWithGroth16VK(path,
+vkPath)` runs the same frontend check with the vk.json and accepts it, as
+`--groth16-wa-vk` does), and stack lowering enforces it again for `--ir`.
 
 The emitted artifact has `groth16WA.numPubInputs`, `groth16WA.vkDigest` and
 `groth16WA.publicInputs` fields so downstream consumers can sanity-check
@@ -265,6 +276,22 @@ from the script bytes.
 Spenders must build the unlocking witness with
 `bn254witness.BuildFromProofWithInputs` (not `GenerateWitness`) — the
 verifier reads the five public-input scalars off the witness stack.
+
+#### Witness malleability
+
+The unlocking witness is not unique. The residue witness `c` can be replaced
+by any `c·κ` with `κ^λ = 1` (`κ` in the order-3r subgroup of Fp12*), and the
+Miller-loop gradients and other prover-supplied Fp limbs are only checked
+through arithmetic reduced mod p, so a different encoding of the same residue
+passes as well. Anyone who sees an unconfirmed spend can therefore rewrite its
+unlocking script and rebroadcast it under a different txid. Soundness is not
+affected: every accepted witness proves the same proof against the same
+public inputs, and the MSM binding plus any pins or `Groth16PublicInput`
+assertions fix the statement. Do not rely on the txid of an unconfirmed
+`groth16-wa` / `AssertGroth16WitnessAssistedWithMSM` spend (for example, to
+chain further unconfirmed transactions off it). Details are in the
+`EmitGroth16VerifierWitnessAssistedWithMSM` doc comment in
+`codegen/bn254_groth16.go`.
 
 ---
 

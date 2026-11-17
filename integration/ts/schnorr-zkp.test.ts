@@ -36,7 +36,7 @@ import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
 import { ecMulGen, encodePoint, EC_N } from './helpers/crypto.js';
 import { createHash } from 'crypto';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 /**
  * Derive the Fiat-Shamir challenge e = bin2num(hash256(R || P)).
@@ -177,8 +177,8 @@ describe('SchnorrZKP', () => {
     // Tamper s by adding 1 mod n
     const tamperedS = (s + 1n) % EC_N;
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('verify', [rPointHex, tamperedS], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 });

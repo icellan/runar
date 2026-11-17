@@ -2402,8 +2402,11 @@ class ExplicitPreimage extends SmartContract {
         "property named 'txPreimage' should produce a validation error"
     );
     let err = result.unwrap_err().to_lowercase();
+    // R3-GK010-GAPS: this readonly SigHashPreimage property now ALSO draws the
+    // "cannot hold a SigHashPreimage" diagnostic, which names 'txPreimage' too,
+    // so pin the V27 reserved-name diagnostic itself.
     assert!(
-        err.contains("txpreimage") || err.contains("reserved") || err.contains("implicit"),
+        err.contains("reserved implicit parameter name"),
         "error should mention txPreimage being reserved; got: {}",
         err
     );

@@ -156,23 +156,37 @@ describe('@bindingVariant through ANF and codegen', () => {
     expect(r.artifact!.script).toContain(CHECK_PREIMAGE_BINDING_ALL_HEX.replace(/0141(7e21[0-9a-f]{66}ad)$/, '01c1$1'));
   });
 
+  // The preimages are MUTABLE state fields of a stateful contract: a public
+  // SigHashPreimage PARAMETER must be asserted via checkPreimage on every path
+  // (GK-GAP-010), which a loop body or one ternary arm is not, and a readonly
+  // SigHashPreimage property is refused at its declaration (R3-GK010-GAPS).
+  // The auto-injected txPreimage check is a fourth check_preimage node; it
+  // must carry the method variant too.
   it('nested loop and ternary arms inherit the method variant', () => {
     const src = `
-      class G extends SmartContract {
-        constructor() { super(); }
+      class G extends StatefulSmartContract {
+        a: SigHashPreimage;
+        b: SigHashPreimage;
+        c: SigHashPreimage;
+        constructor(a: SigHashPreimage, b: SigHashPreimage, c: SigHashPreimage) {
+          super(a, b, c);
+          this.a = a;
+          this.b = b;
+          this.c = c;
+        }
         /** @bindingVariant all */
-        public unlock(a: SigHashPreimage, b: SigHashPreimage, c: SigHashPreimage, d: boolean) {
+        public unlock(d: boolean) {
           for (let i = 0n; i < 1n; i++) {
-            assert(checkPreimage(a));
+            assert(checkPreimage(this.a));
           }
-          const ok = d ? checkPreimage(b) : checkPreimage(c);
+          const ok = d ? checkPreimage(this.b) : checkPreimage(this.c);
           assert(ok);
         }
       }`;
     const r = compile(src, { fileName: 'G.runar.ts' });
     expect(r.success, (r.diagnostics ?? []).map((d) => d.message).join('\n')).toBe(true);
     const nodes = checkPreimages(r.anf);
-    expect(nodes.length).toBeGreaterThanOrEqual(3);
+    expect(nodes.length).toBeGreaterThanOrEqual(4);
     expect(nodes.every((c) => c.bindingVariant === 'all')).toBe(true);
     expect(r.artifact!.script).not.toContain(CHECK_PREIMAGE_BINDING_HEX);
   });

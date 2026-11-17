@@ -101,11 +101,11 @@ RSpec.describe 'DataOutputs (addDataOutput)' do # rubocop:disable RSpec/Describe
 
     # Claim counter=99 instead of 1; the OP_HASH256 continuation check
     # rejects the spending tx.
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'emit', [payload], provider, wallet[:signer],
         Runar::SDK::CallOptions.new(new_state: { 'counter' => 99 })
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

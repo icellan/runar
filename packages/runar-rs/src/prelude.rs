@@ -150,7 +150,8 @@ pub fn verify_wots(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
     crate::wots::wots_verify_impl(msg, sig, pk)
 }
 
-// SLH-DSA (SPHINCS+) SHA-256 variants — real FIPS 205 verification.
+// SLH-DSA (SPHINCS+) verification. 128s/128f are FIPS 205; the 192/256 sets
+// below are a SHA-256-only variant, not FIPS 205 (SHA-512 needed, #137).
 
 /// Real SLH-DSA-SHA2-128s verification (FIPS 205).
 pub fn verify_slh_dsa_sha2_128s(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
@@ -162,22 +163,26 @@ pub fn verify_slh_dsa_sha2_128f(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
     crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_128F, msg, sig, pk)
 }
 
-/// Real SLH-DSA-SHA2-192s verification (FIPS 205).
+/// SLH-DSA verification at the SLH-DSA-SHA2-192s parameter shapes, SHA-256 only:
+/// not FIPS 205 (which needs SHA-512 here, #137); matches the on-chain verifier.
 pub fn verify_slh_dsa_sha2_192s(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
     crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_192S, msg, sig, pk)
 }
 
-/// Real SLH-DSA-SHA2-192f verification (FIPS 205).
+/// SLH-DSA verification at the SLH-DSA-SHA2-192f parameter shapes, SHA-256 only:
+/// not FIPS 205 (which needs SHA-512 here, #137); matches the on-chain verifier.
 pub fn verify_slh_dsa_sha2_192f(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
     crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_192F, msg, sig, pk)
 }
 
-/// Real SLH-DSA-SHA2-256s verification (FIPS 205).
+/// SLH-DSA verification at the SLH-DSA-SHA2-256s parameter shapes, SHA-256 only:
+/// not FIPS 205 (which needs SHA-512 here, #137); matches the on-chain verifier.
 pub fn verify_slh_dsa_sha2_256s(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
     crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_256S, msg, sig, pk)
 }
 
-/// Real SLH-DSA-SHA2-256f verification (FIPS 205).
+/// SLH-DSA verification at the SLH-DSA-SHA2-256f parameter shapes, SHA-256 only:
+/// not FIPS 205 (which needs SHA-512 here, #137); matches the on-chain verifier.
 pub fn verify_slh_dsa_sha2_256f(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
     crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_256F, msg, sig, pk)
 }
@@ -519,6 +524,14 @@ pub fn sha256_finalize(state: &[u8], remaining: &[u8], msg_bit_len: i64) -> Byte
     // The compiled script's two-block path pads to 120 bytes, so it accepts
     // 0..=119 bytes of `remaining` and aborts on more (F-142).
     assert!(remaining.len() <= 119, "sha256_finalize: remaining must be 0-119 bytes");
+    // GK-BUG-013: the compiled script refuses a msgBitLen outside [0, 2^64)
+    // (the 9th byte of its 9-byte OP_NUM2BIN form must be 0x00). An i64 cannot
+    // reach 2^64, so only a negative needs refusing; `as u64` below would wrap it.
+    assert!(
+        msg_bit_len >= 0,
+        "sha256_finalize: msgBitLen must be in [0, 2^64), got {}",
+        msg_bit_len
+    );
 
     let rem_len = remaining.len();
 

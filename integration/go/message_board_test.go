@@ -195,8 +195,13 @@ func TestMessageBoard_BurnByWrongSigner_Rejected(t *testing.T) {
 		t.Fatalf("wrong signer: %v", err)
 	}
 
-	if _, _, err := contract.Call("burn", []interface{}{nil}, provider, wrongSigner, nil); err == nil {
+	before := provider.BroadcastAttempts
+	_, _, callErr := contract.Call("burn", []interface{}{nil}, provider, wrongSigner, nil)
+	if callErr == nil {
 		t.Fatalf("expected burn by wrong signer to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, callErr, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 }
 

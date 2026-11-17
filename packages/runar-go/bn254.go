@@ -316,45 +316,42 @@ func Bn254MultiPairing4(
 	)
 }
 
-// AssertGroth16WitnessAssisted is a DSL marker that requests the
+// AssertGroth16WitnessAssisted is the raw witness-assisted Groth16 marker.
+// The compiler REFUSES it (GK-BUG-006): the raw verifier never sees the
+// public inputs — its only check on the prover-supplied prepared_inputs is
+// an on-curve test — so it accepts an honest proof of any statement the
+// spender chooses. Use AssertGroth16WitnessAssistedWithMSM and bind the
+// statement with vk.json pinnedPublicInputs or Groth16PublicInput(i)
+// assertions. The declaration stays so existing sources fail with that
+// diagnostic rather than an unresolved identifier.
+//
+// Mock: no-op.
+func AssertGroth16WitnessAssisted() {}
+
+// AssertGroth16WitnessAssistedWithMSM is a DSL marker that requests the
 // witness-assisted BN254 Groth16 verifier be inlined as a method-entry
-// preamble in the compiled Bitcoin Script. The verifying key is supplied
+// preamble in the compiled Bitcoin Script
+// (EmitGroth16VerifierWitnessAssistedWithMSM). The verifying key is supplied
 // at compile time via CompileOptions.Groth16WAVKey, and the prover-supplied
-// witness bundle (Miller-loop gradients, final-exponentiation witnesses,
-// MSM points, proof points) is pushed onto the stack at spend time by the
-// SDK helper before the regular ABI argument pushes — so the verifier
-// preamble consumes them before the method body sees its arguments.
+// witness bundle (Miller-loop gradients, residue witness, public-input
+// scalars, prepared inputs, proof points) is pushed onto the stack at spend
+// time by the SDK helper before the regular ABI argument pushes — so the
+// verifier preamble consumes them before the method body sees its
+// arguments. The preamble recomputes the prepared-inputs multi-scalar
+// multiplication on-chain from config.IC (baked at compile time) and the 5
+// witness-pushed scalars, so the proof is bound to those scalars.
+//
+// The scalars themselves are still the prover's choice unless the contract
+// fixes them: pin them with pinnedPublicInputs in the vk.json, or assert on
+// them in the method body via Groth16PublicInput(i) — after the preamble
+// runs they remain on the stack under the tracker names _pub_0 .. _pub_4.
 //
 // Constraints (enforced by the codegen):
 //
 //   - The call must appear as the first statement of a method body.
 //   - The compile must specify CompileOptions.Groth16WAVKey, otherwise
-//     the call is rejected with an "unknown function" error.
-//   - At most one method per contract may use the preamble (the verifier
-//     ops are large; multi-method use is unsupported in the initial
-//     implementation).
-//
-// Mock: no-op (no Go-side verification — same strategy as CheckSig and
-// the rest of the BN254 builtins). The compiled Bitcoin Script does the
-// real verification.
-func AssertGroth16WitnessAssisted() {}
-
-// AssertGroth16WitnessAssistedWithMSM is the MSM-binding counterpart to
-// AssertGroth16WitnessAssisted. It triggers the stronger codegen path
-// (EmitGroth16VerifierWitnessAssistedWithMSM) that recomputes the
-// prepared-inputs multi-scalar multiplication on-chain and binds the
-// result against 5 SP1 public-input scalars pushed in the witness
-// bundle.
-//
-// Use this variant when the contract must be sound against a hostile
-// prover that bypasses the Rúnar SDK. The raw AssertGroth16WitnessAssisted
-// trusts the prover to supply a consistent prepared_inputs point; the
-// MSM variant derives the expected point from config.IC (baked at compile
-// time) and the 5 witness-pushed scalars (verified at spend time).
-//
-// After the preamble runs the 5 public-input scalars remain on the stack
-// under the tracker names _pub_0 .. _pub_4 and can be consumed via the
-// Groth16PublicInput(i) DSL intrinsic.
+//     the call is rejected ("no Groth16WAConfig was supplied").
+//   - A method may not also call AssertGroth16WitnessAssisted.
 //
 // Mock: no-op. The compiled Bitcoin Script does the real verification.
 func AssertGroth16WitnessAssistedWithMSM() {}

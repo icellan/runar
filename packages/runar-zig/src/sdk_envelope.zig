@@ -489,7 +489,7 @@ pub const MAX_ENVELOPE_FIELD_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
 /// so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-/// also far above what the wire needs: the deepest of the 199 checked-in
+/// also far above what the wire needs: the deepest of the 201 checked-in
 /// conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
 /// tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
 /// bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -600,7 +600,12 @@ pub fn verifyEnvelope(allocator: std.mem.Allocator, opts: VerifyEnvelopeOpts) !V
     if (payloadExceedsMaxDepth(env.payload)) {
         return .{ .ok = false, .reason = .bad_json };
     }
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, env.payload, .{}) catch {
+    // R2-DUPKEY: a duplicate key in any payload object (compared after
+    // unescaping) is bad-json. std.json's default already refuses it with
+    // error.DuplicateField; spelled out so a future default cannot move it.
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, env.payload, .{
+        .duplicate_field_behavior = .@"error",
+    }) catch {
         return .{ .ok = false, .reason = .bad_json };
     };
     errdefer parsed.deinit();
@@ -657,10 +662,15 @@ pub fn verifyEnvelope(allocator: std.mem.Allocator, opts: VerifyEnvelopeOpts) !V
     return .{ .ok = true, .parsed = parsed };
 }
 
+/// GK-BUG-009: the inner nonce / expiresAt must be a JSON INTEGER TOKEN in
+/// i64 range. std.json gives `.integer` for exactly that, `.float` for any
+/// '.' / exponent token and `.number_string` past i64 — so only `.integer`
+/// qualifies. The old `.float => @intFromFloat(f)` arm accepted 1.0 / 1.5 as 1
+/// and, for a float outside i64 (1e20), PANICKED (UB in ReleaseFast) on an
+/// envelope whose signature had not been checked yet.
 fn readI64(value: ?std.json.Value) ?i64 {
     if (value) |v| switch (v) {
         .integer => |i| return i,
-        .float => |f| return @intFromFloat(f),
         else => return null,
     };
     return null;

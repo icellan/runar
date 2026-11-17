@@ -268,7 +268,11 @@ export function emitSha256Finalize(emit: (op: StackOp) => void): void {
   em.binOp('OP_NUM2BIN');       // 9-byte LE
   em.pushI(8n);
   em.split();                   // [8-byte LE, sign byte]
-  em.drop();                    // [8-byte LE]
+  // GK-BUG-013: msgBitLen must be in [0, 2^64). The 9th byte is the
+  // script-number sign (0x80 for a negative) or the 2^64 byte; dropping it let
+  // -L and 2^64 + L alias L. Require it to be 0x00 (a 1-byte push, not OP_0).
+  em.pushB(new Uint8Array([0x00]));
+  em.oc('OP_EQUALVERIFY'); em.depth -= 2; // [8-byte LE]
   // Reverse 8 bytes to BE: split(4), reverse each half, cat
   em.pushI(4n); em.split();    // [lo4_LE, hi4_LE]
   em.reverseBytes4();           // [lo4_LE, hi4_rev]

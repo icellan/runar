@@ -76,6 +76,17 @@
  * declared return type, in every tier, byte for byte.
  *
  * A missing toolchain FAILS this suite rather than skipping it.
+ *
+ * GK-GAP-010 / R3-GK010-GAPS: the preimages are method PARAMETERS that each
+ * method asserts with `assert(checkPreimage(p))` first (a readonly
+ * SigHashPreimage property is refused: it can never pass checkPreimage). The
+ * check's OP_PUSH_TX blob carries comparison opcodes of its own and rejects
+ * the synthetic preimages the executed legs need, so every count and every
+ * execution below is taken over the code AFTER the checks, split off by an
+ * exact structural match (`helpers/after-preimage-checks.ts`): the pinned
+ * prologues, one blob + OP_VERIFY per preimage, then the tail. The executed
+ * legs push the arguments and run that tail, i.e. the compiled bytes on the
+ * stack an accepting checkPreimage leaves.
  */
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -84,6 +95,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { compile } from 'runar-compiler';
 import { ScriptVM } from '../index.js';
+import { afterPreimageChecks } from './helpers/after-preimage-checks.js';
 
 const REPO = join(__dirname, '..', '..', '..', '..');
 const TMP = mkdtempSync(join(tmpdir(), 'runar-n054-'));
@@ -94,7 +106,7 @@ const TMP = mkdtempSync(join(tmpdir(), 'runar-n054-'));
 
 /** The six extractors the type checker declares `bigint`. */
 const NUMERIC_SRC = `import {
-  SmartContract, assert, SigHashPreimage,
+  SmartContract, assert, SigHashPreimage, checkPreimage,
   extractVersion, extractLocktime, extractSigHashType,
   extractAmount, extractSequence, extractInputIndex,
 } from 'runar-lang';
@@ -103,6 +115,7 @@ export class N054Numeric extends SmartContract {
   readonly x: bigint;
   constructor(x: bigint) { super(x); this.x = x; }
   public go(p: SigHashPreimage) {
+    assert(checkPreimage(p));
     assert(extractVersion(p) === 1n);
     assert(extractLocktime(p) === 2n);
     assert(extractSigHashType(p) === 65n);
@@ -122,7 +135,7 @@ export class N054Numeric extends SmartContract {
  * rescues the wrong classification, which is exactly why this defect survived.
  */
 const BYTES_SRC = `import {
-  SmartContract, assert, SigHashPreimage, ByteString,
+  SmartContract, assert, SigHashPreimage, ByteString, checkPreimage,
   extractHashPrevouts, extractHashSequence, extractOutpoint,
   extractOutputHash, extractOutputs, extractScriptCode, extractPrevOutputScript,
 } from 'runar-lang';
@@ -130,7 +143,9 @@ const BYTES_SRC = `import {
 export class N054Bytes extends SmartContract {
   readonly x: bigint;
   constructor(x: bigint) { super(x); this.x = x; }
-  public go(p: SigHashPreimage, q: SigHashPreimage, h: ByteString) {
+  public go(h: ByteString, p: SigHashPreimage, q: SigHashPreimage) {
+    assert(checkPreimage(p));
+    assert(checkPreimage(q));
     assert(extractHashPrevouts(p) === extractHashPrevouts(q));
     assert(extractHashSequence(p) === extractHashSequence(q));
     assert(extractOutpoint(p) === extractOutpoint(q));
@@ -143,12 +158,13 @@ export class N054Bytes extends SmartContract {
 `;
 
 /** `+` reads the same annotation: OP_ADD for a number, OP_CAT for bytes. */
-const PLUS_SRC = `import { SmartContract, assert, SigHashPreimage, extractLocktime, extractAmount } from 'runar-lang';
+const PLUS_SRC = `import { SmartContract, assert, SigHashPreimage, checkPreimage, extractLocktime, extractAmount } from 'runar-lang';
 
 export class N054Plus extends SmartContract {
   readonly x: bigint;
   constructor(x: bigint) { super(x); this.x = x; }
   public go(p: SigHashPreimage) {
+    assert(checkPreimage(p));
     assert(extractLocktime(p) + 1n > 0n);
     assert(extractAmount(p) + 1n > 0n);
   }
@@ -156,22 +172,27 @@ export class N054Plus extends SmartContract {
 `;
 
 /** Single numeric comparison, small enough to execute end-to-end. */
-const SEQ_SRC = `import { SmartContract, assert, SigHashPreimage, extractSequence } from 'runar-lang';
+const SEQ_SRC = `import { SmartContract, assert, SigHashPreimage, checkPreimage, extractSequence } from 'runar-lang';
 
 export class N054Seq extends SmartContract {
   readonly x: bigint;
   constructor(x: bigint) { super(x); this.x = x; }
-  public go(p: SigHashPreimage, n: bigint) { assert(extractSequence(p) === n); }
+  public go(n: bigint, p: SigHashPreimage) {
+    assert(checkPreimage(p));
+    assert(extractSequence(p) === n);
+  }
 }
 `;
 
 /** Single byte comparison, small enough to execute end-to-end. */
-const CODE_SRC = `import { SmartContract, assert, SigHashPreimage, extractScriptCode } from 'runar-lang';
+const CODE_SRC = `import { SmartContract, assert, SigHashPreimage, checkPreimage, extractScriptCode } from 'runar-lang';
 
 export class N054Code extends SmartContract {
   readonly x: bigint;
   constructor(x: bigint) { super(x); this.x = x; }
   public go(p: SigHashPreimage, q: SigHashPreimage) {
+    assert(checkPreimage(p));
+    assert(checkPreimage(q));
     assert(extractScriptCode(p) === extractScriptCode(q));
   }
 }
@@ -342,6 +363,32 @@ function preimage(opts: { scriptCode: string; sequence: string }): string {
     + '41000000';                // sighashType
 }
 
+/**
+ * The TS tier's script (fold OFF) after its `assert(checkPreimage(..))`
+ * prologue: the code under test, which the executed legs run on the pushed
+ * arguments (see the file header).
+ */
+function tailHex(src: string, file: string, prologues: readonly string[]): string {
+  const r = compile(src, { fileName: file, disableConstantFolding: true, constructorArgs: { x: 0n } });
+  const errs = r.diagnostics.filter((d) => d.severity === 'error');
+  expect(errs.map((d) => d.message).join(' | ')).toBe('');
+  return afterPreimageChecks((r.artifact as unknown as { script: string }).script, prologues);
+}
+
+/**
+ * Pinned prologues, one per checked preimage: the stack copy the check
+ * consumes (OP_DUP 76 / OP_OVER 78 / OP_2 OP_PICK 5279), then
+ * OP_CODESEPARATOR (ab). BYTES' `go(h, p, q)` gains the hidden
+ * `_prevOutScript_0` witness parameter on top, hence the deeper pick for `p`.
+ */
+const PROLOGUE = {
+  numeric: ['76ab'],
+  bytes: ['5279ab', '78ab'],
+  plus: ['76ab'],
+  seq: ['76ab'],
+  code: ['78ab', '76ab'],
+} as const;
+
 const vm = new ScriptVM();
 
 function exec(scriptHex: string): boolean {
@@ -392,7 +439,7 @@ describe('N-054 preimage extractor result typing', () => {
   // Cross-tier parity + per-extractor correctness
   // -------------------------------------------------------------------------
   it('the six bigint extractors compare NUMERICALLY in all seven tiers', () => {
-    const hex = compileEverywhere(NUMERIC_SRC, 'N054Numeric.runar.ts');
+    const hex = afterPreimageChecks(compileEverywhere(NUMERIC_SRC, 'N054Numeric.runar.ts'), PROLOGUE.numeric);
     const ops = opcodes(hex);
     expect(count(ops, [OP_NUMEQUAL, OP_NUMEQUALVERIFY]),
       `expected six numeric comparisons, got ${hex}`).toBe(6);
@@ -403,7 +450,7 @@ describe('N-054 preimage extractor result typing', () => {
   });
 
   it('the seven byte extractors compare BYTEWISE in all seven tiers', () => {
-    const hex = compileEverywhere(BYTES_SRC, 'N054Bytes.runar.ts');
+    const hex = afterPreimageChecks(compileEverywhere(BYTES_SRC, 'N054Bytes.runar.ts'), PROLOGUE.bytes);
     const ops = opcodes(hex);
     expect(count(ops, [OP_NUMEQUAL, OP_NUMEQUALVERIFY]),
       `a ByteString/Sha256 extractor is being compared NUMERICALLY: ${hex}`).toBe(0);
@@ -415,7 +462,7 @@ describe('N-054 preimage extractor result typing', () => {
   });
 
   it('`+` on a bigint extractor is arithmetic, not concatenation', () => {
-    const hex = compileEverywhere(PLUS_SRC, 'N054Plus.runar.ts');
+    const hex = afterPreimageChecks(compileEverywhere(PLUS_SRC, 'N054Plus.runar.ts'), PROLOGUE.plus);
     const ops = opcodes(hex);
     // Exactly ONE OP_CAT, and it is not the `+`: it is W1's zero-pad in
     // `extractLocktime` (`push [0x00] OP_CAT OP_BIN2NUM`, so the unsigned
@@ -456,14 +503,15 @@ describe('N-054 preimage extractor result typing', () => {
   // Executed semantics: the numeric side rejects valid spends
   // -------------------------------------------------------------------------
   it('a numeric extractor accepts a witness that encodes the right number differently', () => {
-    const hex = compileEverywhere(SEQ_SRC, 'N054Seq.runar.ts');
+    compileEverywhere(SEQ_SRC, 'N054Seq.runar.ts');
     const p = preimage({ scriptCode: '19' + '76a914' + '99'.repeat(20) + '88ac', sequence: '04000000' });
+    const hex = tailHex(SEQ_SRC, 'N054Seq.runar.ts', PROLOGUE.seq);
 
     // A spender that pushes the number 4 as `0400` — legal, minimally pushed,
-    // decoded as 4 by every script-number reader.
-    const nonMinimal = `${push(p)}${push('0400')}${hex}`;
+    // decoded as 4 by every script-number reader. `go(n, p)`: n, then p.
+    const nonMinimal = `${push('0400')}${push(p)}${hex}`;
     // …and one that pushes it minimally.
-    const minimal = `${push(p)}${push('04')}${hex}`;
+    const minimal = `${push('04')}${push(p)}${hex}`;
 
     expect(exec(minimal), 'minimal witness must spend').toBe(true);
     expect(exec(nonMinimal),
@@ -472,8 +520,8 @@ describe('N-054 preimage extractor result typing', () => {
     // Control: the byte-comparison variant of the very same script rejects it.
     // This is what the five OP_EQUAL tiers shipped.
     const bytewise = `${hex.slice(0, -2)}87`;
-    expect(exec(`${push(p)}${push('04')}${bytewise}`)).toBe(true);
-    expect(exec(`${push(p)}${push('0400')}${bytewise}`),
+    expect(exec(`${push('04')}${push(p)}${bytewise}`)).toBe(true);
+    expect(exec(`${push('0400')}${push(p)}${bytewise}`),
       'the byte-comparison variant is the over-strict one').toBe(false);
   });
 
@@ -481,7 +529,7 @@ describe('N-054 preimage extractor result typing', () => {
   // Executed semantics: the byte side accepts forgeries
   // -------------------------------------------------------------------------
   it('a byte extractor rejects a numerically-equal but byte-different scriptCode', () => {
-    const hex = compileEverywhere(CODE_SRC, 'N054Code.runar.ts');
+    compileEverywhere(CODE_SRC, 'N054Code.runar.ts');
     // `extractScriptCode` returns preimage[104 .. len-52], i.e. the varint
     // length prefix AND the script — it is a pure OP_SPLIT, it never parses
     // the varint. So the two blobs differ only in a trailing byte.
@@ -498,14 +546,16 @@ describe('N-054 preimage extractor result typing', () => {
     // DIFFERENT script.
     const q = preimage({ scriptCode: '19' + code + '00', sequence: '04000000' });
 
-    expect(exec(`${push(p)}${push(p)}${hex}`), 'identical scriptCodes must match').toBe(true);
-    expect(exec(`${push(p)}${push(q)}${hex}`),
-      'a zero-padded scriptCode must NOT match').toBe(false);
+    const tail = tailHex(CODE_SRC, 'N054Code.runar.ts', PROLOGUE.code);
+    // `go(p, q)`: p, then q.
+    const same = `${push(p)}${push(p)}${tail}`;
+    const padded = `${push(p)}${push(q)}${tail}`;
+    expect(exec(same), 'identical scriptCodes must match').toBe(true);
+    expect(exec(padded), 'a zero-padded scriptCode must NOT match').toBe(false);
 
     // Control: the numeric variant of the same script — what Rust shipped for
     // every byte extractor, and TypeScript for extractScriptCode — accepts it.
-    const numeric = `${hex.slice(0, -2)}9c`;
-    expect(exec(`${push(p)}${push(q)}${numeric}`),
-      'the numeric variant is the forgeable one').toBe(true);
+    const numeric = `${padded.slice(0, -2)}9c`;
+    expect(exec(numeric), 'the numeric variant is the forgeable one').toBe(true);
   });
 });

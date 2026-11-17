@@ -82,6 +82,7 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
     for (contract.methods) |method| {
         checker.checkMethod(method);
     }
+    try checkPreimageCheckedOnEveryPath(&checker, allocator, contract);
 
     const errors = try checker.errors.toOwnedSlice(allocator);
     const error_locations: []const ?types.SourceLocation = if (checker.error_locs.items.len == errors.len)
@@ -89,6 +90,289 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
     else
         &.{};
     return .{ .contract = contract, .errors = errors, .error_locations = error_locations };
+}
+
+// ============================================================================
+// GK-GAP-010: a public method's SigHashPreimage parameter must reach
+// checkPreimage on every path
+// ============================================================================
+
+/// spec/type-system.md 4.2: a SigHashPreimage parameter of a public method is
+/// checked exactly once. The affine checker refuses a second consumption; this
+/// refuses none. Every field an extractor reads from an unchecked preimage is
+/// chosen by the spender.
+///
+/// A must-analysis over the AST. A parameter counts as checked by a statement
+/// list when `checkPreimage(p)` is the asserted condition of `assert(...)` (the
+/// whole condition or any conjunct of its top-level `&&` chain) with `p` the
+/// parameter or a local alias of it, or when it is passed to a private method
+/// that itself checks that parameter on every path, at a point every execution
+/// of the list reaches (R2-GK010-ASSERT: a discarded, bound, negated, `||`-ed,
+/// compared or ternary-wrapped call, or one used as an `if` / ternary
+/// condition or returned from a helper, checks nothing): an `if` checks it
+/// only if both arms do (a missing else checks nothing), a ternary only if both
+/// arms do; the right operand of `&&` / `||` and a `for` loop body check
+/// nothing. A `return` ends its path: a private method checks a parameter only
+/// if every `return` (and the fall-through end) is reached after the check, and
+/// an arm that returns drops out of the join after its `if`. Origins are the
+/// ordinals of the method's SigHashPreimage parameters among themselves (a bit
+/// each, so a SigHashPreimage parameter is tracked wherever it sits in a long
+/// list; a public method with more than 64 of them is refused outright rather
+/// than left unchecked). A name assigned anywhere
+/// in the method body (the parameter itself or a local) never stands for a
+/// parameter: after `a = other` it no longer holds the parameter's value on
+/// every path.
+pub const PREIMAGE_NOT_CHECKED_FMT = "public method '{s}' must assert checkPreimage({s}) on every path";
+
+const PreimageCheck = struct {
+    allocator: Allocator,
+    contract: ContractNode,
+    /// Name -> origin bit (null = a local that shadows without aliasing).
+    /// Searched from the end down to `base`, so a branch or helper body can
+    /// truncate back to where it started.
+    aliases: std.ArrayListUnmanaged(struct { name: []const u8, bit: ?u6 }) = .empty,
+    base: usize = 0,
+    memo: std.StringHashMapUnmanaged(u64) = .empty,
+    in_progress: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Names assigned anywhere in the body being walked.
+    reassigned: std.StringHashMapUnmanaged(void) = .empty,
+
+    fn deinit(self: *PreimageCheck) void {
+        self.aliases.deinit(self.allocator);
+        self.memo.deinit(self.allocator);
+        self.in_progress.deinit(self.allocator);
+        self.reassigned.deinit(self.allocator);
+    }
+
+    fn collectReassigned(a: Allocator, stmts: []const Statement, out: *std.StringHashMapUnmanaged(void)) Allocator.Error!void {
+        for (stmts) |st| switch (st) {
+            .assign => |asg| if (!asg.target_is_property and asg.index_target == null) try out.put(a, asg.target, {}),
+            .if_stmt => |ifs| {
+                try collectReassigned(a, ifs.then_body, out);
+                if (ifs.else_body) |eb| try collectReassigned(a, eb, out);
+            },
+            .for_stmt => |f| try collectReassigned(a, f.body, out),
+            else => {},
+        };
+    }
+
+    /// Swap in the reassigned set of `body`; returns the previous set.
+    fn enterBody(self: *PreimageCheck, body: []const Statement) Allocator.Error!std.StringHashMapUnmanaged(void) {
+        var fresh: std.StringHashMapUnmanaged(void) = .empty;
+        try collectReassigned(self.allocator, body, &fresh);
+        const outer = self.reassigned;
+        self.reassigned = fresh;
+        return outer;
+    }
+
+    fn leaveBody(self: *PreimageCheck, outer: std.StringHashMapUnmanaged(void)) void {
+        self.reassigned.deinit(self.allocator);
+        self.reassigned = outer;
+    }
+
+    fn resolve(self: *PreimageCheck, e: Expression) ?u6 {
+        const name = switch (e) {
+            .identifier => |n| n,
+            else => return null,
+        };
+        if (self.reassigned.contains(name)) return null;
+        var i = self.aliases.items.len;
+        while (i > self.base) {
+            i -= 1;
+            const a = self.aliases.items[i];
+            if (std.mem.eql(u8, a.name, name)) return a.bit;
+        }
+        return null;
+    }
+
+    fn privateMethod(self: *PreimageCheck, name: []const u8) ?MethodNode {
+        for (self.contract.methods) |m| {
+            if (!m.is_public and std.mem.eql(u8, m.name, name)) return m;
+        }
+        return null;
+    }
+
+    fn bitOf(i: usize) u64 {
+        return @as(u64, 1) << @as(u6, @intCast(i));
+    }
+
+    /// The origin bit of `params[i]`: its ordinal among the SigHashPreimage
+    /// parameters, or null for any other type (or past the 64th).
+    fn preimageOrdinal(params: []const types.ParamNode, i: usize) ?u6 {
+        if (params[i].type_info != .sig_hash_preimage) return null;
+        var k: usize = 0;
+        for (params[0..i]) |q| {
+            if (q.type_info == .sig_hash_preimage) k += 1;
+        }
+        return if (k < 64) @intCast(k) else null;
+    }
+
+    fn pushParams(self: *PreimageCheck, m: MethodNode) Allocator.Error!void {
+        for (m.params, 0..) |p, i| {
+            try self.aliases.append(self.allocator, .{ .name = p.name, .bit = preimageOrdinal(m.params, i) });
+        }
+    }
+
+    fn mustParams(self: *PreimageCheck, m: MethodNode) Allocator.Error!u64 {
+        if (self.memo.get(m.name)) |r| return r;
+        for (self.in_progress.items) |n| if (std.mem.eql(u8, n, m.name)) return 0;
+        try self.in_progress.append(self.allocator, m.name);
+        defer _ = self.in_progress.pop();
+        const saved_len = self.aliases.items.len;
+        const saved_base = self.base;
+        self.base = saved_len;
+        defer {
+            self.aliases.shrinkRetainingCapacity(saved_len);
+            self.base = saved_base;
+        }
+        try self.pushParams(m);
+        const outer = try self.enterBody(m.body);
+        defer self.leaveBody(outer);
+        const done = try self.walkMethod(m.body);
+        try self.memo.put(self.allocator, m.name, done);
+        return done;
+    }
+
+    /// Intersects the checked sets of every `return` and of the fall-through
+    /// end of a method body.
+    fn walkMethod(self: *PreimageCheck, body: []const Statement) Allocator.Error!u64 {
+        var exits: u64 = std.math.maxInt(u64);
+        if (try self.walk(body, 0, &exits)) |fall| exits &= fall;
+        return exits;
+    }
+
+    /// `builtin` is false for `this.name(...)`: a contract method that happens
+    /// to be called `checkPreimage` is not the built-in and checks nothing by
+    /// its name.
+    fn callMust(self: *PreimageCheck, name: []const u8, args: []const Expression, builtin: bool) Allocator.Error!u64 {
+        var out: u64 = 0;
+        for (args) |a| out |= try self.exprMust(a);
+        // R2-GK010-ASSERT: the call alone checks nothing; only an asserted
+        // conjunct does (assertedMust).
+        if (builtin and std.mem.eql(u8, name, "checkPreimage")) return out;
+        if (builtin and std.mem.eql(u8, name, "assert")) {
+            if (args.len > 0) out |= self.assertedMust(args[0]);
+            return out;
+        }
+        if (self.privateMethod(name)) |target| {
+            const consumed = try self.mustParams(target);
+            for (args, 0..) |a, i| {
+                if (i >= target.params.len) break;
+                const k = preimageOrdinal(target.params, i) orelse continue;
+                if (consumed & bitOf(k) == 0) continue;
+                if (self.resolve(a)) |b| out |= bitOf(b);
+            }
+        }
+        return out;
+    }
+
+    /// The parameters an asserted condition checks: each conjunct of its
+    /// top-level `&&` chain that is a direct `checkPreimage(p)` call.
+    fn assertedMust(self: *PreimageCheck, cond: Expression) u64 {
+        return switch (cond) {
+            .binary_op => |b| if (b.op == .and_op) self.assertedMust(b.left) | self.assertedMust(b.right) else 0,
+            .call => |c| blk: {
+                if (!std.mem.eql(u8, c.callee, "checkPreimage") or c.args.len == 0) break :blk 0;
+                break :blk if (self.resolve(c.args[0])) |b| bitOf(b) else 0;
+            },
+            else => 0,
+        };
+    }
+
+    fn exprMust(self: *PreimageCheck, e: Expression) Allocator.Error!u64 {
+        return switch (e) {
+            .call => |c| try self.callMust(c.callee, c.args, true),
+            .method_call => |mc| try self.callMust(mc.method, mc.args, false),
+            .binary_op => |b| if (b.op == .and_op or b.op == .or_op)
+                try self.exprMust(b.left)
+            else
+                (try self.exprMust(b.left)) | (try self.exprMust(b.right)),
+            .ternary => |t| (try self.exprMust(t.condition)) |
+                ((try self.exprMust(t.then_expr)) & (try self.exprMust(t.else_expr))),
+            .unary_op => |u| try self.exprMust(u.operand),
+            .index_access => |ia| (try self.exprMust(ia.object)) | (try self.exprMust(ia.index)),
+            .array_literal => |els| blk: {
+                var out: u64 = 0;
+                for (els) |el| out |= try self.exprMust(el);
+                break :blk out;
+            },
+            else => 0,
+        };
+    }
+
+    fn declare(self: *PreimageCheck, name: []const u8, value: ?Expression) Allocator.Error!void {
+        const bit: ?u6 = if (value) |v| self.resolve(v) else null;
+        try self.aliases.append(self.allocator, .{ .name = name, .bit = bit });
+    }
+
+    /// The parameters checked at the end of `stmts`, or null when every path
+    /// through `stmts` returns first. Each `return` intersects its own checked
+    /// set into `exits`.
+    fn walk(self: *PreimageCheck, stmts: []const Statement, done_in: u64, exits: *u64) Allocator.Error!?u64 {
+        var done = done_in;
+        for (stmts) |st| {
+            switch (st) {
+                .const_decl => |d| {
+                    done |= try self.exprMust(d.value);
+                    try self.declare(d.name, d.value);
+                },
+                .let_decl => |d| {
+                    if (d.value) |v| done |= try self.exprMust(v);
+                    try self.declare(d.name, d.value);
+                },
+                .assign => |a| done |= try self.exprMust(a.value),
+                .expr_stmt => |es| done |= try self.exprMust(es.expr),
+                .assert_stmt => |ast| done |= (try self.exprMust(ast.condition)) | self.assertedMust(ast.condition),
+                .return_stmt => |r| {
+                    if (r.value) |v| done |= try self.exprMust(v);
+                    exits.* &= done;
+                    return null;
+                },
+                .if_stmt => |ifs| {
+                    done |= try self.exprMust(ifs.condition);
+                    const len = self.aliases.items.len;
+                    const then_done = try self.walk(ifs.then_body, done, exits);
+                    self.aliases.shrinkRetainingCapacity(len);
+                    const else_done: ?u64 = if (ifs.else_body) |eb| try self.walk(eb, done, exits) else done;
+                    self.aliases.shrinkRetainingCapacity(len);
+                    if (then_done == null and else_done == null) return null;
+                    done = if (then_done == null) else_done.? else if (else_done == null) then_done.? else then_done.? & else_done.?;
+                },
+                .for_stmt => |f| {
+                    // The body checks nothing for the code after the loop, but
+                    // a `return` inside it still ends a path.
+                    const len = self.aliases.items.len;
+                    _ = try self.walk(f.body, done, exits);
+                    self.aliases.shrinkRetainingCapacity(len);
+                },
+            }
+        }
+        return done;
+    }
+};
+
+fn checkPreimageCheckedOnEveryPath(checker: *TypeChecker, allocator: Allocator, contract: ContractNode) !void {
+    var pc: PreimageCheck = .{ .allocator = allocator, .contract = contract };
+    defer pc.deinit();
+    for (contract.methods) |m| {
+        if (!m.is_public) continue;
+        var any = false;
+        for (m.params) |p| any = any or p.type_info == .sig_hash_preimage;
+        if (!any) continue;
+        pc.aliases.clearRetainingCapacity();
+        pc.base = 0;
+        try pc.pushParams(m);
+        const outer = try pc.enterBody(m.body);
+        defer pc.leaveBody(outer);
+        const done = try pc.walkMethod(m.body);
+        for (m.params, 0..) |p, i| {
+            if (p.type_info != .sig_hash_preimage) continue;
+            if (PreimageCheck.preimageOrdinal(m.params, i)) |k| {
+                if (done & PreimageCheck.bitOf(k) != 0) continue;
+            }
+            checker.addErrorAt(m.source_loc, PREIMAGE_NOT_CHECKED_FMT, .{ m.name, p.name });
+        }
+    }
 }
 
 // ============================================================================

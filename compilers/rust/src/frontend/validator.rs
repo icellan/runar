@@ -41,6 +41,7 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     let call_depth_exceeded = check_no_recursion(contract, &mut errors);
     check_reserved_names(contract, &mut errors);
     check_redeclarations(contract, &mut errors);
+    check_duplicate_methods(contract, &mut errors);
     // N-180: the Rabin-provenance and sighash passes walk the private-method
     // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
     // refuses, so stop here.
@@ -62,6 +63,25 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     }
 
     ValidationResult { errors, warnings }
+}
+
+/// GK-BUG-015: a contract cannot declare two methods with the same name.
+/// Every name-keyed later pass (side-effect summary, private-method lookup,
+/// the affine consumption fixpoint, stack lowering) assumes one body per
+/// name; with two they disagree. Anchored on each repeat.
+fn check_duplicate_methods(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for m in &contract.methods {
+        if !seen.insert(m.name.as_str()) {
+            errors.push(Diagnostic::error(
+                format!(
+                    "method '{}' is already declared in this contract and cannot be re-declared",
+                    m.name
+                ),
+                Some(m.source_location.clone()),
+            ));
+        }
+    }
 }
 
 /// N-509: a local cannot be re-declared in the same scope (spec/grammar.md,
@@ -183,9 +203,40 @@ fn is_valid_property_primitive(name: &PrimitiveTypeName) -> bool {
 // Property validation
 // ---------------------------------------------------------------------------
 
+/// The diagnostic every tier shares (R3-GK010-GAPS).
+pub fn readonly_preimage_property_message(name: &str) -> String {
+    format!(
+        "readonly property '{}' cannot hold a SigHashPreimage: a preimage fixed in the locking script \
+         can never pass checkPreimage(), so every field an extractor reads from it is unverified",
+        name
+    )
+}
+
+/// `SigHashPreimage`, or a (nested) FixedArray of it.
+fn holds_sig_hash_preimage(t: &TypeNode) -> bool {
+    match t {
+        TypeNode::FixedArray { element, .. } => holds_sig_hash_preimage(element),
+        TypeNode::Primitive(p) => *p == PrimitiveTypeName::SigHashPreimage,
+        TypeNode::Custom(_) => false,
+    }
+}
+
 fn validate_properties(contract: &ContractNode, errors: &mut Vec<Diagnostic>, warnings: &mut Vec<Diagnostic>) {
     for prop in &contract.properties {
         validate_property_type(&prop.prop_type, &prop.source_location, errors);
+
+        // R3-GK010-GAPS: a readonly property is a constant in the locking
+        // script, and a sighash preimage commits to the outpoint of the
+        // transaction that carries that script, so checkPreimage() on it can
+        // never pass and every field an extractor reads from it is
+        // unverified. Refused at the declaration (before FixedArray
+        // expansion, so the name is the user's).
+        if prop.readonly && holds_sig_hash_preimage(&prop.prop_type) {
+            errors.push(Diagnostic::error(
+                readonly_preimage_property_message(&prop.name),
+                Some(prop.source_location.clone()),
+            ));
+        }
 
         // V27: Error when any property is named `txPreimage`
         if prop.name == "txPreimage" {

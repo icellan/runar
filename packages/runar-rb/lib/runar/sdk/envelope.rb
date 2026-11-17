@@ -42,7 +42,7 @@ module Runar
       #
       # 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
       # so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-      # also far above what the wire needs: the deepest of the 199 checked-in
+      # also far above what the wire needs: the deepest of the 201 checked-in
       # conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
       # tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
       # bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -87,6 +87,78 @@ module Runar
           when 0x7d, 0x5d # } ]
             depth -= 1 if depth.positive?
           end
+        end
+        false
+      end
+
+      # Is there a '/' (0x2F) outside a JSON string in +payload+? JSON has no
+      # comments, so such a byte means the text is not JSON even when Ruby's
+      # JSON.parse would accept it as a comment.
+      def self.payload_has_slash_outside_string?(payload)
+        in_string = false
+        i = 0
+        n = payload.bytesize
+        while i < n
+          b = payload.getbyte(i)
+          if in_string
+            if b == 0x5c # backslash: skip the escaped byte
+              i += 1
+            elsif b == 0x22
+              in_string = false
+            end
+          elsif b == 0x22
+            in_string = true
+          elsif b == 0x2f
+            return true
+          end
+          i += 1
+        end
+        false
+      end
+
+      # R2-DUPKEY. Does any object in +payload+ carry the same key twice?
+      #
+      # JSON.parse keeps the LAST of two equal keys, so a payload
+      # {"nonce":1,"nonce":<outer>} verified ok here while a keep-first tier
+      # said envelope-mismatch. Runs only on text JSON.parse has ACCEPTED (and
+      # the depth guard has bounded), so it can read the grammar directly. Keys
+      # are compared after unescaping -- each key's quoted text goes back
+      # through JSON.parse -- so "a" and "\u0061" collide. One key set per open
+      # object: the same key in sibling or nested objects is not a duplicate.
+      # Flat scan over bytes; every delimiter is ASCII, and no UTF-8
+      # continuation byte can equal one.
+      def self.payload_has_duplicate_key?(payload)
+        frames = [] # nil = array, Hash = { keys: {}, expect_key: bool }
+        i = 0
+        n = payload.bytesize
+        while i < n
+          b = payload.getbyte(i)
+          case b
+          when 0x22 # quote: scan to the closing quote
+            j = i + 1
+            while j < n
+              c = payload.getbyte(j)
+              break if c == 0x22
+              j += c == 0x5c ? 2 : 1
+            end
+            top = frames.last
+            if top && top[:expect_key]
+              key = JSON.parse(payload.byteslice(i, j - i + 1).force_encoding(Encoding::UTF_8))
+              return true if top[:keys].key?(key)
+              top[:keys][key] = true
+              top[:expect_key] = false
+            end
+            i = j
+          when 0x7b # {
+            frames.push({ keys: {}, expect_key: true })
+          when 0x5b # [
+            frames.push(nil)
+          when 0x7d, 0x5d # } ]
+            frames.pop
+          when 0x2c # ,
+            frames.last[:expect_key] = true if frames.last
+          end
+          i += 1
         end
         false
       end
@@ -345,6 +417,15 @@ module Runar
         SignedEnvelope.new(payload, sig_bytes.unpack1('H*'), pubkey, nonce, expires_at)
       end
 
+      I64_MIN = -(2**63)
+      I64_MAX = (2**63) - 1
+
+      # GK-BUG-009: a parsed JSON integer token inside the signed 64-bit range.
+      def self.i64_integer?(value)
+        value.is_a?(Integer) && value >= I64_MIN && value <= I64_MAX
+      end
+      private_class_method :i64_integer?
+
       # Verify a signed envelope. Returns a Hash with :ok (bool),
       # :reason (one of VERIFY_REASONS or nil), and :data (parsed payload
       # or nil).
@@ -388,6 +469,19 @@ module Runar
         # seven tiers.
         return { ok: false, reason: 'bad-json', data: nil } if payload_exceeds_max_depth?(envelope.payload)
 
+        # R3-GO-UTF8: the payload must be well-formed UTF-8. JSON.parse keeps
+        # invalid bytes as they are, so a signed payload carrying 0xFF, an
+        # overlong or a truncated sequence verified ok here while Zig's
+        # std.json refuses it. Checked on the raw bytes: a BINARY-tagged string
+        # reports valid_encoding? true whatever it holds.
+        return { ok: false, reason: 'bad-json', data: nil } unless envelope.payload.b.force_encoding(Encoding::UTF_8).valid_encoding?
+
+        # Ruby's JSON.parse (json >= 2.7) accepts /* */ and // comments by
+        # default; RFC 8259 has none and the other six tiers refuse them. A
+        # comment can also hide a quote from the duplicate-key scanner below
+        # (cj3). '/' outside a string is never JSON, so refuse it up front.
+        return { ok: false, reason: 'bad-json', data: nil } if payload_has_slash_outside_string?(envelope.payload)
+
         parsed = nil
         begin
           parsed = JSON.parse(envelope.payload)
@@ -395,9 +489,17 @@ module Runar
           return { ok: false, reason: 'bad-json', data: nil }
         end
         return { ok: false, reason: 'bad-json', data: nil } unless parsed.is_a?(Hash)
+        # R2-DUPKEY: a duplicate key is bad-json, decided here with every other
+        # parse failure (after expired, before envelope-mismatch).
+        return { ok: false, reason: 'bad-json', data: nil } if payload_has_duplicate_key?(envelope.payload)
 
-        # 4. Inner nonce / expiresAt must match outer fields.
-        if parsed['nonce'] != envelope.nonce || parsed['expiresAt'] != envelope.expiresAt
+        # 4. Inner nonce / expiresAt must match outer fields. GK-BUG-009: and
+        #    each must be a JSON integer token in i64 range. JSON.parse gives
+        #    an Integer only for an integer token (1.0 / 1e3 are Floats that
+        #    compare == to the Integer), and Ruby Integers are unbounded, so
+        #    both the type and the i64 range are checked explicitly.
+        if !i64_integer?(parsed['nonce']) || !i64_integer?(parsed['expiresAt']) ||
+           parsed['nonce'] != envelope.nonce || parsed['expiresAt'] != envelope.expiresAt
           return { ok: false, reason: 'envelope-mismatch', data: parsed }
         end
 

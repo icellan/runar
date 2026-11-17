@@ -75,12 +75,12 @@ RSpec.describe 'Counter' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'increment', [], provider, wallet[:signer],
         Runar::SDK::CallOptions.new(new_state: { 'count' => 99 })
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects decrement from 0 (assert count > 0)' do
@@ -92,11 +92,11 @@ RSpec.describe 'Counter' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'decrement', [], provider, wallet[:signer],
         Runar::SDK::CallOptions.new(new_state: { 'count' => -1 })
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

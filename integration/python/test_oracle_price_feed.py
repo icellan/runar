@@ -34,6 +34,7 @@ Important Notes
 import pytest
 
 from conftest import (
+    assert_node_rejected,
     compile_contract, create_provider, create_funded_wallet, create_wallet,
     generate_rabin_key_pair, rabin_sign,
 )
@@ -159,21 +160,15 @@ class TestOraclePriceFeed:
         msg_bytes = num2bin_le(price, 8)
         result = rabin_sign(msg_bytes, rabin_kp)
 
-        # A negative test must prove the NODE rejected this spend.
-        # pytest.raises(Exception) catches anything at all, including the
-        # SDK declining to build the transaction, so record the broadcast
-        # count and assert the failing call actually reached consensus.
-        broadcasts_before_0 = provider.broadcast_attempts
-        with pytest.raises(Exception):
+        # A negative test must prove the NODE refused this spend, and why:
+        # an accepted tx whose confirming mine fails also raises after a
+        # broadcast (GK-BUG-004). See conftest.assert_node_rejected.
+        with assert_node_rejected(provider):
             contract.call(
                 "settle",
                 [price, result["sig"], result["padding"], None],
                 provider, receiver_wallet["signer"],
             )
-        assert provider.broadcast_attempts > broadcasts_before_0, (
-            "the rejected call must have been broadcast to the node, "
-            "not refused by the SDK before a transaction was built"
-        )
 
     def test_wrong_receiver_rejected(self):
         """Settle with wrong receiver signer should be rejected."""
@@ -196,19 +191,12 @@ class TestOraclePriceFeed:
         result = rabin_sign(msg_bytes, rabin_kp)
 
         # Try to settle with wrong signer (not the receiver)
-        # A negative test must prove the NODE rejected this spend.
-        # pytest.raises(Exception) catches anything at all, including the
-        # SDK declining to build the transaction, so record the broadcast
-        # count and assert the failing call actually reached consensus.
-        broadcasts_before_1 = provider.broadcast_attempts
-        with pytest.raises(Exception):
+        # A negative test must prove the NODE refused this spend, and why:
+        # an accepted tx whose confirming mine fails also raises after a
+        # broadcast (GK-BUG-004). See conftest.assert_node_rejected.
+        with assert_node_rejected(provider):
             contract.call(
                 "settle",
                 [price, result["sig"], result["padding"], None],
                 provider, wrong_wallet["signer"],
             )
-
-        assert provider.broadcast_attempts > broadcasts_before_1, (
-            "the rejected call must have been broadcast to the node, "
-            "not refused by the SDK before a transaction was built"
-        )

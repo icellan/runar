@@ -192,6 +192,7 @@ fn test_schnorr_zkp_invalid_s_rejected() {
     // Tamper: use a completely wrong s value
     let tampered_s = "0100".to_string(); // s=1 (very wrong)
 
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "verify",
         &[
@@ -202,5 +203,5 @@ fn test_schnorr_zkp_invalid_s_rejected() {
         &*signer,
         None,
     );
-    assert!(result.is_err(), "verify with tampered s should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

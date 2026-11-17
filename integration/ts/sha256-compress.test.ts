@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest';
 import { compileSource } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 import { createHash } from 'crypto';
 
 // ---- SHA-256 constants and helpers ----
@@ -321,8 +321,8 @@ class Sha256RejectWrong extends SmartContract {
     await contract.deploy(provider, signer, { satoshis: 500000 });
 
     // Should fail: wrong expected hash
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('verify', [SHA256_INIT, block], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 });

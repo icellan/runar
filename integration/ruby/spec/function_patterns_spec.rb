@@ -156,13 +156,13 @@ RSpec.describe 'FunctionPatterns' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 10_000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'deposit',
         [nil, 50],
         provider, wrong_wallet[:signer],
         Runar::SDK::CallOptions.new(new_state: { 'balance' => 150 })
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

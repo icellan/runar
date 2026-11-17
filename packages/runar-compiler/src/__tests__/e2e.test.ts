@@ -244,8 +244,8 @@ describe('End-to-end: compile()', () => {
 
   describe('compile options: fileName', () => {
     it('uses provided fileName in the contract', () => {
-      const result = compile(P2PKH_SOURCE, { fileName: 'my-contract.ts' });
-      expect(result.contract!.sourceFile).toBe('my-contract.ts');
+      const result = compile(P2PKH_SOURCE, { fileName: 'my-contract.runar.ts' });
+      expect(result.contract!.sourceFile).toBe('my-contract.runar.ts');
     });
 
     it('defaults to contract.ts when fileName is not provided', () => {

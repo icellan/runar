@@ -126,9 +126,9 @@ RSpec.describe 'TicTacToe' do # rubocop:disable RSpec/DescribeClass
                   Runar::SDK::CallOptions.new(satoshis: 10_000)) # N-027: pays the 5000 bet
 
     # Player O tries to move when it's X's turn
-    expect do
+    expect_node_rejected(provider) do
       contract.call('move', [4, player_o[:pub_key_hex], nil], provider, player_o[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects join when game is already playing' do
@@ -145,10 +145,10 @@ RSpec.describe 'TicTacToe' do # rubocop:disable RSpec/DescribeClass
                   Runar::SDK::CallOptions.new(satoshis: 10_000)) # N-027: pays the 5000 bet
 
     another = create_funded_wallet(provider)
-    expect do
+    expect_node_rejected(provider) do
       # Paid (N-027), so only the status guard can reject it.
       contract.call('join', [another[:pub_key_hex], nil], provider, another[:signer],
                     Runar::SDK::CallOptions.new(satoshis: 15_000))
-    end.to raise_error(StandardError)
+    end
   end
 end

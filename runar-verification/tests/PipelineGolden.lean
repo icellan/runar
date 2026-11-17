@@ -724,15 +724,26 @@ the constants had been honest all along.
 -- two `nVersion != 1` -> `nVersion > 1` doc-comment edits (-2 bytes); the
 -- same three shards were re-run on that model and again returned `[fresh]`,
 -- byte-exact.
+-- 2026-11-16 (GK-BUG-013): the model fingerprint moved to
+-- v1:65f:7257276b:05651e2f45016f76 (Stack/Lower.lean: `shaEmitFinalize`
+-- checks the 9th byte of msgBitLen's 9-byte OP_NUM2BIN form with
+-- `<00> OP_EQUALVERIFY` instead of dropping it, so sha256Finalize refuses a
+-- msgBitLen outside [0, 2^64), as all seven compiler tiers now do). Sharded
+-- live regens (`RUNAR_VERIFICATION_REGEN=1 RUNAR_VERIFICATION_SHARD=1|8|22
+-- RUNAR_VERIFICATION_SHARDS=22`) returned all three `.regenLive` anchors
+-- `[fresh]` and byte-equal to their expected-script.hex (none calls
+-- sha256Finalize), so only their fingerprints move. The same runs
+-- live-compiled every `baselineMatches` fixture byte-exact, including the
+-- moved sha256-finalize golden (69509 B) and the new ternary-expression.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
+  ⟨"babybear", .regenLive, "v1:65f:7257276b:05651e2f45016f76"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:65f:7257276b:05651e2f45016f76"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -755,7 +766,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
+  ⟨"state-covenant", .regenLive, "v1:65f:7257276b:05651e2f45016f76"⟩,
 ]
 
 /--
@@ -914,7 +925,11 @@ number. It is pinned from both sides:
 -- (`state-array-set`, `state-digest-log`, `state-leaderboard`, `state-ledger`,
 -- `state-notary`, `state-owner-box`), all byte-exact, all in baselineMatches:
 -- 78 = baselineMatches (75) + (22 - 19).
-def expectedByteExact : Nat := 79
+--
+-- 2026-11-16 (GK-GAP-003): `ternary-expression` (byte-exact, baselineMatches;
+-- the first fixture pinning a surface-level conditional expression):
+-- 80 = baselineMatches (77) + (22 - 19).
+def expectedByteExact : Nat := 80
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -943,8 +958,10 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 compiles to `OP_RUNAR_UNKNOWN_BUILTIN` and is not byte-exact).
 2026-10-31 (N-456): 98 -> 99 for N-456's `multisig-verify-fused` fixture
 (in `baselineMatches`; pins the fused OP_CHECKMULTISIGVERIFY).
+2026-11-16 (GK-GAP-003): 99 -> 100 for `ternary-expression` (in
+`baselineMatches`; bigint, ByteString and nested conditional-expression arms).
 -/
-def expectedFixtureTotal : Nat := 99
+def expectedFixtureTotal : Nat := 100
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -1023,6 +1040,7 @@ def baselineMatches : List String := [
   "stateful-counter",
   "stateful-wots-gate",
   "terminal-varlen-read",
+  "ternary-expression",
   "token-ft",
   "token-nft"
 ]
@@ -1347,7 +1365,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 99 := by rfl
+        + lowerDivergencePending.length = 100 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

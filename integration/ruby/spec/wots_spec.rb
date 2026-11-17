@@ -3,10 +3,10 @@
 # WOTS+ integration spec — exercises the standalone `verifyWOTS` builtin
 # (without the ECDSA hybrid wrapper covered by post_quantum_wallet_spec.rb).
 #
-# Ported from integration/ts and integration/go WOTS tests. The full spend
-# path requires raw-transaction construction with a 2,144-byte signature;
-# this spec covers the compile-and-deploy half so a regression in the
-# WOTS codegen module is caught at the SDK level.
+# The contract stores the 64-byte WOTS+ public key and calls verifyWOTS on it
+# directly, so it is deployed with the raw key (kp[:pk]). The spend legs
+# (GK-GAP-007) prove a valid signature unlocks the deployed UTXO on regtest and
+# a tampered one is refused by the node.
 
 require 'spec_helper'
 
@@ -73,5 +73,47 @@ RSpec.describe 'verifyWOTS' do # rubocop:disable RSpec/DescribeClass
     )
     expect(txid).to be_truthy
     expect(txid.length).to eq(64)
+  end
+
+  WOTS_SPEND_MSG = 'runar wots integration spend'
+
+  def deploy_wots_verify(provider, signer, kp)
+    artifact = compile_source_wots(WOTS_INLINE_SOURCE, 'WotsVerify.runar.ts')
+    contract = Runar::SDK::RunarContract.new(artifact, [kp[:pk]])
+    contract.deploy(provider, signer, Runar::SDK::DeployOptions.new(satoshis: 20_000))
+    contract
+  end
+
+  def wots_test_keypair
+    wots_keygen("\x42" + ("\x00" * 31), "\x01" + ("\x00" * 31))
+  end
+
+  it 'spends a WOTS+-locked UTXO with a valid signature on regtest' do
+    kp       = wots_test_keypair
+    provider = create_provider
+    wallet   = create_funded_wallet(provider)
+    contract = deploy_wots_verify(provider, wallet[:signer], kp)
+
+    sig_hex = wots_sign(WOTS_SPEND_MSG.b, kp[:sk], kp[:pub_seed])
+    txid, _tx = contract.call('verify', [WOTS_SPEND_MSG.b.unpack1('H*'), sig_hex], provider, wallet[:signer])
+    expect(txid.length).to eq(64)
+  end
+
+  it 'rejects a tampered WOTS+ signature at the node' do
+    kp       = wots_test_keypair
+    provider = create_provider
+    wallet   = create_funded_wallet(provider)
+    contract = deploy_wots_verify(provider, wallet[:signer], kp)
+
+    sig_hex = wots_sign(WOTS_SPEND_MSG.b, kp[:sk], kp[:pub_seed])
+    tampered = (sig_hex[0, 2].to_i(16) ^ 0x01).to_s(16).rjust(2, '0') + sig_hex[2..]
+
+    before = provider.broadcast_attempts
+    expect do
+      contract.call('verify', [WOTS_SPEND_MSG.b.unpack1('H*'), tampered], provider, wallet[:signer])
+    end.to raise_error(RuntimeError, /mandatory-script-verify-flag-failed/)
+    # The attack transaction reached the node; the refusal is consensus, not
+    # an SDK-side failure before broadcast.
+    expect(provider.broadcast_attempts).to be > before
   end
 end

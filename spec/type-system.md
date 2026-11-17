@@ -304,12 +304,17 @@ In the UTXO model, a coin can only be spent once. If a contract's logic allows a
 
 ### 4.2 Affine Values
 
-The following types are treated as **affine** (may be used at most once):
+The following types are treated as **affine**:
 
-| Type | Reason |
+| Type | Rule |
 |---|---|
-| `SigHashPreimage` | Must be checked exactly once via `checkPreimage()` |
-| `Sig` | Should be verified, not duplicated |
+| `SigHashPreimage` | A `SigHashPreimage` parameter of a public method must be passed to `checkPreimage()` **exactly once**: at most once (affine), and on every path through the method as an asserted condition, `assert(checkPreimage(p))` (see 4.3) |
+| `Sig` | May be consumed at most once; should be verified, not duplicated |
+
+An unchecked preimage is a byte string the spender chose: every field an
+extractor (`extractAmount`, `extractOutputHash`, ...) reads from it is
+attacker-controlled. Requiring the check on every path closes that hole; the
+at-most-once half keeps a second `checkPreimage` from being emitted.
 
 ### 4.3 Affine Rules
 
@@ -330,24 +335,91 @@ The following types are treated as **affine** (may be used at most once):
     ──────────────────────────────────────
     OK: x consumed in both branches exactly once
 
-                    Conditional Partial
-    x : T_affine
-    if (cond) { use(x) } else { /* no use */ }
-    ─────────────────────────────────────────────
-    WARNING: x may not be consumed on all paths
+                    Preimage Checked On Every Path
+    p : SigHashPreimage, a parameter of a public method m
+    some path through m does not assert checkPreimage(p)
+    ─────────────────────────────────────────────────────
+    ERROR: public method 'm' must assert checkPreimage(p) on every path
 ```
+
+"Asserts `checkPreimage(p)`" is a must-analysis over the method body. A call
+`checkPreimage(x)` checks `p` only when it is the asserted condition of an
+`assert(...)`: the whole condition, or any conjunct of the top-level `&&`
+chain inside it (`assert(checkPreimage(p))`,
+`assert(flag && checkPreimage(p) && other)`), with `x` either `p` or a local
+alias of it (`const q = p; assert(checkPreimage(q))`). `p` is also checked by
+a call to a private method that itself checks that parameter on every path.
+Nothing else checks `p`, because nothing else makes the spend fail when the
+preimage is not the transaction's:
+
+- a discarded call (`checkPreimage(p);`) or one bound to a local
+  (`const ok = checkPreimage(p); assert(ok);`);
+- a negated, compared, `||`-ed or ternary-wrapped call
+  (`assert(!checkPreimage(p))`, `assert(checkPreimage(p) === true)`,
+  `assert(checkPreimage(p) || flag)`, `assert(c ? checkPreimage(p) : true)`);
+- a call used as an `if` or ternary condition;
+- a call returned from a helper (`return checkPreimage(p);`), even when the
+  caller asserts the helper's result.
+
+A construct checks `p` only when every execution of it does:
+
+- an `if` checks `p` only if both arms do; an `if` without `else` checks nothing;
+- a ternary `c ? a : b` checks `p` only if both `a` and `b` do;
+- outside the asserted `&&` chain above, the right operand of `&&` / `||`
+  checks nothing (it may be short-circuited); inside it every conjunct
+  counts, since a short-circuited conjunct fails the assert anyway;
+- a `for` loop body checks nothing (the bound may be zero);
+- a `return` ends its path: a private method checks `p` only if every
+  `return` in it (including one inside a loop or a nested `if`) and its
+  fall-through end are each reached after the check. An `if` arm that returns
+  drops out of the join after that `if`.
+
+The rule applies to every parameter of type `SigHashPreimage` on a public
+method, stateless or stateful. The implicit `txPreimage` of a
+`StatefulSmartContract` is not a parameter at this stage; the compiler injects
+its `checkPreimage`. A `Sig` that is never consumed is not an error.
+
+Two other places a preimage could sit are refused outright, so no unchecked
+preimage reaches an extractor through them:
+
+- **A readonly property holding a `SigHashPreimage`** (scalar, or a
+  `FixedArray` of any nesting depth whose element is `SigHashPreimage`) is a
+  validate error at its declaration, on every surface (in the Rust DSL a plain
+  field of a `SmartContract`, in Python a `SmartContract` annotation, in Go a
+  `runar:"readonly"` field):
+
+  ```
+  readonly property '<name>' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified
+  ```
+
+  A readonly property is a constant in the locking script, and a sighash
+  preimage commits to the `scriptCode` and outpoint of the very output that
+  carries that script, so no preimage fixed there can ever be the spending
+  transaction's: `checkPreimage(this.p)` is unsatisfiable, and without it
+  every field an extractor reads from `this.p` is unverified. This rule does
+  not cover a mutable `SigHashPreimage` state field of a
+  `StatefulSmartContract`.
+- **A `FixedArray<SigHashPreimage, N>` method parameter** is refused by the
+  validator like every `FixedArray` method parameter (each tier words that
+  diagnostic itself).
 
 ### 4.4 Practical Impact
 
 ```typescript
 public unlock(sig: Sig, pubKey: PubKey, preimage: SigHashPreimage): void {
-    // preimage must be checked exactly once:
-    assert(this.checkPreimage(preimage));  // consumes preimage
+    // preimage must be checked exactly once, on every path:
+    assert(checkPreimage(preimage));  // consumes preimage
 
     // This would be an error:
-    // assert(this.checkPreimage(preimage));  // ERROR: preimage already consumed
+    // assert(checkPreimage(preimage));  // ERROR: preimage already consumed
 
     assert(checkSig(sig, pubKey));  // consumes sig
+}
+
+public read(preimage: SigHashPreimage): void {
+    // ERROR: public method 'read' must assert checkPreimage(preimage) on
+    // every path
+    assert(extractAmount(preimage) > 0n);
 }
 ```
 

@@ -539,7 +539,11 @@ public final class Sha256 {
         em.binOp("OP_NUM2BIN");
         em.pushI(8);
         em.split();
-        em.drop();
+        // GK-BUG-013: msgBitLen must be in [0, 2^64). The 9th byte is the
+        // script-number sign (0x80 for a negative) or the 2^64 byte; dropping it
+        // let -L and 2^64 + L alias L. Require it to be 0x00 (a 1-byte push, not OP_0).
+        em.pushB(new byte[]{0x00});
+        em.oc("OP_EQUALVERIFY"); em.depth -= 2;
         em.pushI(4); em.split();
         em.reverseBytes4();
         em.swap();

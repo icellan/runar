@@ -221,19 +221,14 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(1);
 }
 
-const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, runar_java, anf_json, unknown };
+const FileFormat = enum { source, anf_json, unknown };
 
+/// GK-GAP-006: the CLI used to carry its own case-sensitive copy of
+/// `compiler_api.detectFormat`. It now asks that one (ASCII-case-insensitive)
+/// and adds only the CLI's `.json` -> IR route.
 fn detectFormat(path: []const u8) FileFormat {
-    if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
-    if (std.mem.endsWith(u8, path, ".runar.ts")) return .runar_ts;
-    if (std.mem.endsWith(u8, path, ".runar.sol")) return .runar_sol;
-    if (std.mem.endsWith(u8, path, ".runar.move")) return .runar_move;
-    if (std.mem.endsWith(u8, path, ".runar.go")) return .runar_go;
-    if (std.mem.endsWith(u8, path, ".runar.rs")) return .runar_rs;
-    if (std.mem.endsWith(u8, path, ".runar.py")) return .runar_py;
-    if (std.mem.endsWith(u8, path, ".runar.rb")) return .runar_rb;
-    if (std.mem.endsWith(u8, path, ".runar.java")) return .runar_java;
-    if (std.mem.endsWith(u8, path, ".json")) return .anf_json;
+    if (compiler_api.detectFormat(path) != .unknown) return .source;
+    if (std.ascii.endsWithIgnoreCase(path, ".json")) return .anf_json;
     return .unknown;
 }
 
@@ -445,7 +440,7 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // rather than a Zig contract.
     switch (detectFormat(path)) {
         .unknown, .anf_json => {
-            std.debug.print("error: unsupported format for {s}\n", .{path});
+            std.debug.print("error: " ++ compiler_api.UNSUPPORTED_EXTENSION_FMT ++ "\n", .{path});
             return error.UnsupportedFormat;
         },
         else => {},

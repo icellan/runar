@@ -603,7 +603,10 @@ func (c *MSMCanonicalBody) Verify() {
 	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	art, err := CompileFromSource(srcPath, CompileOptions{Groth16WAVKey: s.vkPath})
+	// R2-MSM-UNBOUND: `!= 8` binds no statement, so the vk.json pins slot 2
+	// (to the value every spend below uses) and the body keeps its shape.
+	pinnedVK := writePinnedVK(t, s.vkPath, map[int]*big.Int{2: canonical[2]})
+	art, err := CompileFromSource(srcPath, CompileOptions{Groth16WAVKey: pinnedVK})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

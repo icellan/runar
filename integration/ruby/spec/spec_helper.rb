@@ -20,6 +20,7 @@ require 'uri'
 
 require 'runar/sdk'
 require 'runar/sdk/local_signer'
+require_relative 'node_rejection'
 
 PROJECT_ROOT = File.expand_path('../../..', __dir__).freeze
 
@@ -259,9 +260,16 @@ module IntegrationHelpers
   # @param provider [Runar::SDK::RPCProvider]
   # @return [Runar::SDK::RPCProvider] same instance, with broadcast patched
   def instrument_broadcast(provider)
+    provider.instance_variable_set(:@broadcast_attempts, 0)
     provider.singleton_class.class_eval do
+      # Transactions handed to the node. Negative specs assert on the DELTA
+      # around the attacking call: an error with no new attempt is an SDK-side
+      # failure, not a consensus rejection.
+      attr_reader :broadcast_attempts
+
       alias_method :__runar_broadcast_orig, :broadcast unless method_defined?(:__runar_broadcast_orig)
       define_method(:broadcast) do |tx, *rest, **kw|
+        @broadcast_attempts += 1
         tx_hex = if tx.respond_to?(:to_hex)
                    tx.to_hex
                  elsif tx.is_a?(String)
@@ -291,7 +299,7 @@ module IntegrationHelpers
       username: RPC_USER,
       password: RPC_PASS
     )
-    instrument_broadcast(provider)
+    NodeRejection.instrument(instrument_broadcast(provider))
   end
 
   # ---------------------------------------------------------------------------
@@ -545,6 +553,7 @@ end
 
 RSpec.configure do |config|
   config.include IntegrationHelpers
+  config.include NodeRejection
 
   config.before(:suite) do
     unless IntegrationHelpers.node_available?

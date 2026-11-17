@@ -57,13 +57,18 @@ class SigStateVarLenTest {
     private static final String WRITE_FILE = "VarLenStateWrite.runar.ts";
     private static final String READ_FILE = "VarLenStateRead.runar.ts";
 
-    /** Mutating method — drives the state-continuation WRITE path. */
+    /**
+     * Mutating method — drives the state-continuation WRITE path. The field is
+     * rewritten from itself: a public SigHashPreimage parameter must reach
+     * checkPreimage on every path (GK-GAP-010), which the ByteString control
+     * could not mirror.
+     */
     private static String writeSrc(String propType) {
         return "import { StatefulSmartContract } from 'runar-lang';\n"
             + "class VarLenStateWrite extends StatefulSmartContract {\n"
             + "  tag: " + propType + ";\n"
             + "  constructor(tag: " + propType + ") { super(tag); this.tag = tag; }\n"
-            + "  public update(next: " + propType + "): void { this.tag = next; }\n"
+            + "  public update(): void { this.tag = this.tag; }\n"
             + "}\n";
     }
 

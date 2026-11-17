@@ -136,7 +136,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'send',
         [nil, recipient[:pub_key_hex], 5000],
@@ -145,7 +145,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           { 'satoshis' => 5000, 'state' => { 'owner' => recipient[:pub_key_hex], 'balance' => 1000, 'mergeBalance' => 0 } }
         ])
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'transfers using SDK multi-output support: splits 1 UTXO into 2 outputs' do
@@ -218,7 +218,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
 
     parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
 
-    expect do
+    expect_node_rejected(provider) do
       contract1.call(
         'merge',
         [nil, 1600, nil, parent2, 4000],
@@ -229,7 +229,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 400, 'mergeBalance' => 1600 } }]
         )
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects merge with deflated total (negative otherBalance fails assert)' do
@@ -247,7 +247,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
 
     parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
 
-    expect do
+    expect_node_rejected(provider) do
       contract1.call(
         'merge',
         [nil, 100, nil, parent2, 4000],
@@ -258,7 +258,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 400, 'mergeBalance' => 100 } }]
         )
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'merges edge case: zero-balance UTXO with a non-zero UTXO' do
@@ -306,7 +306,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
 
     parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
 
-    expect do
+    expect_node_rejected(provider) do
       contract1.call(
         'merge',
         [nil, 600, nil, parent2, 4000],
@@ -317,7 +317,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 400, 'mergeBalance' => 600 } }]
         )
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'transfers exact balance to recipient (1 output, no change)' do
@@ -359,7 +359,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
     # Claim recipient gets 800, sender keeps 500 = 1300 total (inflated from 1000)
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'transfer',
         [nil, recipient[:pub_key_hex], 800, 2000],
@@ -369,7 +369,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           { 'satoshis' => 2000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 500, 'mergeBalance' => 0 } }
         ])
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects transfer with deflated output balances' do
@@ -386,7 +386,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
     # Claim recipient gets 300, sender keeps 200 = 500 total (deflated from 1000)
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'transfer',
         [nil, recipient[:pub_key_hex], 300, 2000],
@@ -396,7 +396,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           { 'satoshis' => 2000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 200, 'mergeBalance' => 0 } }
         ])
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects transfer of zero amount (fails assert amount > 0)' do
@@ -412,7 +412,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     ])
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'transfer',
         [nil, recipient[:pub_key_hex], 0, 2000],
@@ -422,7 +422,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           { 'satoshis' => 2000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 1000, 'mergeBalance' => 0 } }
         ])
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects transfer exceeding balance (fails assert amount <= totalBalance)' do
@@ -438,7 +438,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     ])
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'transfer',
         [nil, recipient[:pub_key_hex], 2000, 2000],
@@ -447,7 +447,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           { 'satoshis' => 2000, 'state' => { 'owner' => recipient[:pub_key_hex], 'balance' => 2000, 'mergeBalance' => 0 } }
         ])
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects transfer with wrong signer (checkSig fails)' do
@@ -462,7 +462,7 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract = Runar::SDK::RunarContract.new(artifact, [owner_wallet[:pub_key_hex], 1000, 0, token_id_hex])
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'transfer',
         [nil, recipient[:pub_key_hex], 300, 2000],
@@ -472,6 +472,6 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
           { 'satoshis' => 2000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 700, 'mergeBalance' => 0 } }
         ])
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

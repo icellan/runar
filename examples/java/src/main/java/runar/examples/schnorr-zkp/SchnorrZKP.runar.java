@@ -75,6 +75,10 @@ class SchnorrZKP extends SmartContract {
         // Verify R is on the curve.
         assertThat(ecOnCurve(rPoint));
 
+        // Verify P is on the curve: the identity O (all-zero) would make
+        // R + e*P collapse to R (GK-BUG-011).
+        assertThat(ecOnCurve(this.pubKey));
+
         // Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P)).
         // Rúnar Point is structurally a 64-byte ByteString (x[32] || y[32]);
         // the canonical TS source passes Points directly to cat, and the

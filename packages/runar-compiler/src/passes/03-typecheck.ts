@@ -53,8 +53,224 @@ export function typecheck(contract: ContractNode): TypeCheckResult {
   for (const method of contract.methods) {
     checker.checkMethod(method);
   }
+  errors.push(...checkPreimageCheckedOnEveryPath(contract));
 
   return { typedContract: contract, errors: errors.map(capDiagnostic) };
+}
+
+// ---------------------------------------------------------------------------
+// GK-GAP-010: a public method's SigHashPreimage parameter must reach
+// checkPreimage on every path
+// ---------------------------------------------------------------------------
+
+/** The diagnostic every tier shares. */
+export function preimageNotCheckedMessage(method: string, param: string): string {
+  return (
+    `public method '${method}' must assert checkPreimage(${param}) on every path`
+  );
+}
+
+const isPreimageType = (t: TypeNode): boolean =>
+  t.kind === 'primitive_type' && t.name === 'SigHashPreimage';
+
+/**
+ * spec/type-system.md 4.2: a SigHashPreimage parameter of a public method is
+ * checked exactly once. The affine checker refuses a second consumption; this
+ * refuses none. Every field an extractor reads from an unchecked preimage is
+ * chosen by the spender.
+ *
+ * A must-analysis over the AST. A parameter counts as checked by a statement
+ * list when `checkPreimage(p)` is the asserted condition of `assert(...)` (the
+ * whole condition or any conjunct of its top-level `&&` chain) with `p` the
+ * parameter or a local alias of it, or when it is passed to a private method
+ * that itself checks that parameter on every path, at a point every execution
+ * of the list reaches (R2-GK010-ASSERT: a discarded, bound, negated, `||`-ed,
+ * compared or ternary-wrapped call, or one used as an `if` / ternary condition
+ * or returned from a helper, checks nothing):
+ *   - an `if` checks it only if both arms do (a missing else checks nothing);
+ *   - a ternary checks it only if both arms do;
+ *   - the right operand of `&&` / `||` checks nothing (short-circuit);
+ *   - a `for` loop body checks nothing (the bound may be zero);
+ *   - a `return` ends its path: a private method checks a parameter only if
+ *     every `return` (and the fall-through end) is reached after the check,
+ *     and an arm that returns drops out of the join after its `if`.
+ * A name assigned anywhere in the method body (the parameter itself or a
+ * local) never stands for a parameter: after `a = other` it no longer holds
+ * the parameter's value on every path.
+ */
+/** The operands of a top-level `&&` chain (`e` itself if it is not one). */
+function conjuncts(e: Expression): Expression[] {
+  return e.kind === 'binary_expr' && e.op === '&&' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e];
+}
+
+function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagnostic[] {
+  type Aliases = Map<string, string>;
+  const privates = new Map<string, MethodNode>();
+  for (const m of contract.methods) if (m.visibility !== 'public') privates.set(m.name, m);
+  const memo = new Map<string, Set<number>>();
+
+  let reassigned = new Set<string>();
+  const collectReassigned = (stmts: readonly Statement[], out: Set<string> = new Set()): Set<string> => {
+    for (const st of stmts) {
+      if (st.kind === 'assignment' && st.target.kind === 'identifier') out.add(st.target.name);
+      else if (st.kind === 'if_statement') {
+        collectReassigned(st.then, out);
+        collectReassigned(st.else ?? [], out);
+      } else if (st.kind === 'for_statement') collectReassigned(st.body, out);
+    }
+    return out;
+  };
+  const resolve = (e: Expression, aliases: Aliases): string | undefined =>
+    e.kind === 'identifier' && !reassigned.has(e.name) ? aliases.get(e.name) : undefined;
+  const union = (a: Set<string>, b: Set<string>): Set<string> => new Set([...a, ...b]);
+  const intersect = (a: Set<string>, b: Set<string>): Set<string> => new Set([...a].filter((x) => b.has(x)));
+
+  const privateTarget = (callee: Expression): MethodNode | undefined => {
+    if (callee.kind === 'property_access' || callee.kind === 'member_expr') return privates.get(callee.property);
+    if (callee.kind === 'identifier') return privates.get(callee.name);
+    return undefined;
+  };
+
+  const mustParams = (m: MethodNode, stack: ReadonlySet<string>): Set<number> => {
+    const cached = memo.get(m.name);
+    if (cached) return cached;
+    if (stack.has(m.name)) return new Set();
+    const aliases: Aliases = new Map();
+    for (const p of m.params) if (isPreimageType(p.type)) aliases.set(p.name, p.name);
+    const outer = reassigned;
+    reassigned = collectReassigned(m.body);
+    const exits: Set<string>[] = [];
+    const fall = walk(m.body, new Set(), new Map(aliases), new Set([...stack, m.name]), exits);
+    if (fall !== null) exits.push(fall);
+    const done = exits.reduce(intersect);
+    reassigned = outer;
+    const result = new Set<number>();
+    m.params.forEach((p, i) => {
+      if (aliases.has(p.name) && done.has(p.name)) result.add(i);
+    });
+    memo.set(m.name, result);
+    return result;
+  };
+
+  const exprMust = (e: Expression, aliases: Aliases, stack: ReadonlySet<string>): Set<string> => {
+    switch (e.kind) {
+      case 'call_expr': {
+        let out = new Set<string>();
+        for (const a of e.args) out = union(out, exprMust(a, aliases, stack));
+        if (e.callee.kind === 'member_expr') out = union(out, exprMust(e.callee.object, aliases, stack));
+        // R2-GK010-ASSERT: the call alone checks nothing; only an asserted
+        // conjunct does (the `assert` branch below).
+        if (e.callee.kind === 'identifier' && e.callee.name === 'checkPreimage') return out;
+        if (e.callee.kind === 'identifier' && e.callee.name === 'assert') {
+          for (const c of e.args[0] ? conjuncts(e.args[0]) : []) {
+            if (c.kind === 'call_expr' && c.callee.kind === 'identifier' && c.callee.name === 'checkPreimage' && c.args[0]) {
+              const origin = resolve(c.args[0], aliases);
+              if (origin !== undefined) out.add(origin);
+            }
+          }
+          return out;
+        }
+        const target = privateTarget(e.callee);
+        if (target) {
+          for (const i of mustParams(target, stack)) {
+            const origin = e.args[i] ? resolve(e.args[i]!, aliases) : undefined;
+            if (origin !== undefined) out.add(origin);
+          }
+        }
+        return out;
+      }
+      case 'binary_expr':
+        if (e.op === '&&' || e.op === '||') return exprMust(e.left, aliases, stack);
+        return union(exprMust(e.left, aliases, stack), exprMust(e.right, aliases, stack));
+      case 'ternary_expr':
+        return union(
+          exprMust(e.condition, aliases, stack),
+          intersect(exprMust(e.consequent, aliases, stack), exprMust(e.alternate, aliases, stack)),
+        );
+      case 'unary_expr':
+        return exprMust(e.operand, aliases, stack);
+      case 'index_access':
+        return union(exprMust(e.object, aliases, stack), exprMust(e.index, aliases, stack));
+      case 'member_expr':
+        return exprMust(e.object, aliases, stack);
+      case 'array_literal': {
+        let out = new Set<string>();
+        for (const el of e.elements) out = union(out, exprMust(el, aliases, stack));
+        return out;
+      }
+      default:
+        return new Set();
+    }
+  };
+
+  /**
+   * The parameters checked at the end of `stmts`, or `null` when every path
+   * through `stmts` returns first. Each `return` records its own checked set
+   * in `exits`.
+   */
+  function walk(
+    stmts: readonly Statement[],
+    doneIn: Set<string>,
+    aliases: Aliases,
+    stack: ReadonlySet<string>,
+    exits: Set<string>[],
+  ): Set<string> | null {
+    let done = new Set(doneIn);
+    for (const st of stmts) {
+      switch (st.kind) {
+        case 'variable_decl': {
+          done = union(done, exprMust(st.init, aliases, stack));
+          const origin = resolve(st.init, aliases);
+          if (origin !== undefined) aliases.set(st.name, origin);
+          else aliases.delete(st.name);
+          break;
+        }
+        case 'assignment':
+          done = union(done, exprMust(st.value, aliases, stack));
+          break;
+        case 'expression_statement':
+          done = union(done, exprMust(st.expression, aliases, stack));
+          break;
+        case 'return_statement':
+          exits.push(st.value ? union(done, exprMust(st.value, aliases, stack)) : done);
+          return null;
+        case 'if_statement': {
+          done = union(done, exprMust(st.condition, aliases, stack));
+          const thenDone = walk(st.then, done, new Map(aliases), stack, exits);
+          const elseDone = walk(st.else ?? [], done, new Map(aliases), stack, exits);
+          if (thenDone === null && elseDone === null) return null;
+          done = thenDone === null ? elseDone! : elseDone === null ? thenDone : intersect(thenDone, elseDone);
+          break;
+        }
+        case 'for_statement':
+          // The body checks nothing for the code after the loop, but a
+          // `return` inside it still ends a path.
+          walk(st.body, done, new Map(aliases), stack, exits);
+          break;
+        default:
+          break;
+      }
+    }
+    return done;
+  }
+
+  const errors: CompilerDiagnostic[] = [];
+  for (const m of contract.methods) {
+    if (m.visibility !== 'public') continue;
+    const tracked = m.params.filter((p) => isPreimageType(p.type)).map((p) => p.name);
+    if (tracked.length === 0) continue;
+    reassigned = collectReassigned(m.body);
+    const exits: Set<string>[] = [];
+    const fall = walk(m.body, new Set(), new Map(tracked.map((n) => [n, n])), new Set([m.name]), exits);
+    if (fall !== null) exits.push(fall);
+    const done = exits.reduce(intersect);
+    for (const name of tracked) {
+      if (!done.has(name)) {
+        errors.push(makeDiagnostic(preimageNotCheckedMessage(m.name, name), 'error', m.sourceLocation));
+      }
+    }
+  }
+  return errors;
 }
 
 // ---------------------------------------------------------------------------

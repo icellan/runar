@@ -89,7 +89,7 @@ class AnfLoaderTest {
             }
 
             @Public
-            public void increment(SigHashPreimage preimage) {
+            public void increment() {
                 this.count = this.count + 1;
                 this.addOutput(0L, this.count);
             }

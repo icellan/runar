@@ -34,8 +34,29 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
     fixture['rejection_vectors'].each do |v|
       env = Runar::SDK::Envelope::SignedEnvelope.from_h(v['envelope'])
       r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
-      expect(r[:ok]).to be(false), "rejection #{v['reason']} should be ok=false"
-      expect(r[:reason]).to eq(v['reason']), "rejection #{v['reason']}: got #{r[:reason]}"
+      vid = v['_vector_id'] || v['reason']
+      expect(r[:ok]).to be(false), "rejection #{v['reason']} (#{vid}) should be ok=false"
+      expect(r[:reason]).to eq(v['reason']), "rejection #{v['reason']} (#{vid}): got #{r[:reason]}"
+    end
+  end
+
+  # GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list allows
+  # nobody; nil (not supplied) skips the check. al2 is the control that
+  # reddens if a fix treats an absent allowlist like an empty one.
+  it 'honours an empty allowlist as deny-all and a nil allowlist as no check' do
+    env = Runar::SDK::Envelope::SignedEnvelope.from_h(fixture['valid_envelope'])
+    vectors = fixture['allowlist_vectors']
+    expect(vectors).not_to be_empty
+    vectors.each do |v|
+      vid = v['_vector_id']
+      r = Runar::SDK::Envelope.verify_envelope(envelope: env, expected_keys: v['expected_keys'],
+                                               now_ms: fixture['verify_now_ms'])
+      if v['expect_ok']
+        expect(r[:ok]).to be(true), "#{vid}: expected ok=true, got reason=#{r[:reason]}"
+      else
+        expect(r[:ok]).to be(false), "#{vid}: expected ok=false"
+        expect(r[:reason]).to eq(v['reason']), "#{vid}: got reason=#{r[:reason]}"
+      end
     end
   end
 
@@ -104,6 +125,24 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
         expect(r[:reason]).to eq(v['reason']), "#{vid}: got reason=#{r[:reason]}"
       end
     end
+  end
+
+  # R2-DUPKEY. A payload object with two members of the same key (compared
+  # after unescaping, at any depth) is bad-json, decided in the parse step:
+  # after expired, before envelope-mismatch / bad-sig. JSON.parse keeps the
+  # LAST value, so the dk* vectors verified ok here before the fix; the dkc*
+  # controls (same key in DIFFERENT objects) must stay ok.
+  it 'gives every duplicate-key vector its listed verdict' do
+    vectors = fixture['duplicate_key_vectors']
+    expect(vectors).not_to be_empty
+    failures = vectors.filter_map do |v|
+      env = Runar::SDK::Envelope::SignedEnvelope.from_h(v['envelope'])
+      r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
+      want = v['expect_ok'] ? 'ok' : v['reason']
+      got = r[:ok] ? 'ok' : r[:reason]
+      "#{v['_vector_id']}: got #{got}, want #{want}" unless got == want
+    end
+    expect(failures).to eq([])
   end
 
   # F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
@@ -201,6 +240,30 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
       else
         expect(r[:ok]).to be(false), "#{vid}: expected ok=false"
         expect(r[:reason]).to eq(v['reason']), "#{vid}: got reason=#{r[:reason]}"
+      end
+    end
+  end
+
+  # R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. JSON.parse
+  # keeps the raw bytes, so this tier verified ok every ju* vector. The bytes
+  # are replayed both UTF-8-tagged and BINARY-tagged: a BINARY string reports
+  # valid_encoding? true whatever it holds, so a check on the string's own tag
+  # would pass these. juc1 (well-formed multi-byte UTF-8) is the control.
+  it 'refuses a payload that is not well-formed UTF-8 as bad-json' do
+    vectors = fixture['invalid_utf8_vectors']
+    expect(vectors).not_to be_empty
+    vectors.each do |v|
+      vid = v['_vector_id']
+      [Encoding::UTF_8, Encoding::BINARY].each do |enc|
+        payload = [v['payload_hex']].pack('H*').force_encoding(enc)
+        env = Runar::SDK::Envelope::SignedEnvelope.new(payload, v['sig'], v['pubkey'], v['nonce'], v['expiresAt'])
+        r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
+        if v['expect_ok']
+          expect(r[:ok]).to be(true), "#{vid} (#{enc}): expected ok=true, got reason=#{r[:reason]}"
+        else
+          expect(r[:ok]).to be(false), "#{vid} (#{enc}): expected ok=false"
+          expect(r[:reason]).to eq(v['reason']), "#{vid} (#{enc}): got reason=#{r[:reason]}"
+        end
       end
     end
   end

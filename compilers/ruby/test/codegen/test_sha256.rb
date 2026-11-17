@@ -116,6 +116,20 @@ class TestSha256Codegen < Minitest::Test
   def test_sha256_finalize_op_count_golden
     ops = []
     RunarCompiler::Codegen::SHA256Codegen.emit_sha256_finalize(->(op) { ops << op })
-    assert_equal 63946, ops.length, "sha256Finalize op count drift"
+    # GK-BUG-013: 63946 -> 63947 (the dropped 9th byte became <00> OP_EQUALVERIFY).
+    assert_equal 63947, ops.length, "sha256Finalize op count drift"
+  end
+
+  # GK-BUG-013: `<9> OP_NUM2BIN <8> OP_SPLIT` leaves the msgBitLen sign byte (or
+  # the 2^64 byte) on top. It must be required to equal 0x00, not dropped.
+  def test_sha256_finalize_checks_the_ninth_byte_is_zero
+    ops = []
+    RunarCompiler::Codegen::SHA256Codegen.emit_sha256_finalize(->(op) { ops << op })
+    assert_equal({ op: "opcode", code: "OP_SPLIT" }, ops[3])
+    assert_equal "push", ops[4][:op]
+    assert_equal "bytes", ops[4][:value][:kind]
+    assert_equal "\x00".b, ops[4][:value][:bytes_val].b
+    assert_equal({ op: "opcode", code: "OP_EQUALVERIFY" }, ops[5])
+    refute(ops[0, 6].any? { |op| op[:op] == "drop" }, "the 9th byte is still dropped")
   end
 end

@@ -54,13 +54,19 @@ import runar.compiler.ir.anf.UpdateProp;
  * <p>This module is the canonical DEFINITION of DCE for the Java compiler —
  * one extracted implementation, mirroring the Zig reference in
  * {@code compilers/zig/src/passes/dce.zig} — but it is NOT a standalone
- * pipeline pass (F-275). Its only caller is {@code AnfOptimize.run()},
- * which runs it over every method once {@code AnfOptimize.optimizeEcMethod}
- * has rewritten them, and only when a rewrite fired (N-097: the TS reference
- * gate) behind the {@code anyChanged}/{@code hasEcCalls} fast path, so
- * a program in which no EC rewrite fires is never DCE'd. The earlier
- * inline implementation in {@code AnfOptimize.java} has been surgically
- * extracted here.
+ * pipeline pass (F-275). Full DCE ({@code eliminateDead}) has one caller,
+ * {@code AnfOptimize.run()}, which runs it over every method once
+ * {@code AnfOptimize.optimizeEcMethod} has rewritten them, and only when a
+ * rewrite fired (N-097: the TS reference gate) behind the
+ * {@code anyChanged}/{@code hasEcCalls} fast path, so a program in which no
+ * EC rewrite fires is never fully DCE'd. The earlier inline implementation in
+ * {@code AnfOptimize.java} has been surgically extracted here.
+ *
+ * <p>The candidate-restricted {@code eliminateDeadAmong} has a second
+ * production caller (GK-DOC-007): {@code ConstantFold.runAndPrune} (N-138),
+ * which removes only the operand bindings the fold itself orphaned.
+ * {@code AnfOptimize.run()} also uses it, after full DCE, for orphans inside
+ * if arms and loop bodies.
  *
  * <p>Behaviour: byte-for-byte identical, at the time of that extraction, to
  * the previous inline DCE in {@code AnfOptimize.java}. Verified by the

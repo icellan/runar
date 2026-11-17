@@ -666,7 +666,7 @@ type Addr = ByteString
 func AssertGroth16WitnessAssisted()
 ```
 
-Marker intrinsic recognised by the compiler to start a Mode-3 witness-assisted Groth16 verifier preamble in a stateful contract. Has no Go runtime effect. [bn254.go](bn254.go).
+**Refused by the compiler** (GK-BUG-006): this raw witness-assisted Groth16 verifier never sees the public inputs, so it accepts an honest proof of any statement the spender picks. Use `AssertGroth16WitnessAssistedWithMSM`. Has no Go runtime effect. [bn254.go](bn254.go).
 
 #### `AssertGroth16WitnessAssistedWithMSM`
 
@@ -674,7 +674,7 @@ Marker intrinsic recognised by the compiler to start a Mode-3 witness-assisted G
 func AssertGroth16WitnessAssistedWithMSM()
 ```
 
-Variant of `AssertGroth16WitnessAssisted` that emits the multi-scalar-multiplication backend. [bn254.go](bn254.go).
+Marker intrinsic recognised by the compiler to start a Mode-3 witness-assisted Groth16 verifier preamble that recomputes the public-input multi-scalar multiplication on-chain, binding the proof to the five witness scalars. The method must still fix the statement — with `pinnedPublicInputs` in the vk.json or `Groth16PublicInput(i)` assertions in its body. Has no Go runtime effect. [bn254.go](bn254.go).
 
 #### `Assert`
 
@@ -886,6 +886,16 @@ func CompileCheck(contractFile string) error
 ```
 
 Run the Rúnar frontend (parse → validate → typecheck) on a contract source file. Auto-dispatches on extension across all nine `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` formats. Returns `error` on any frontend failure with a colon-joined list of issues. [compile_check.go](compile_check.go).
+
+`CompileCheck` has no vk.json. A method that calls `AssertGroth16WitnessAssistedWithMSM` and binds its statement only through `pinnedPublicInputs` in the vk.json is therefore refused here ("does not bind the proved statement"), even though the compiler accepts it with `--groth16-wa-vk` / `CompileOptions.Groth16WAVKey`. Check such a contract with `CompileCheckWithGroth16VK`.
+
+#### `CompileCheckWithGroth16VK`
+
+```go
+func CompileCheckWithGroth16VK(contractFile, vkPath string) error
+```
+
+`CompileCheck` with the SP1-format Groth16 vk.json the contract will be compiled with. The vk.json is loaded and validated the same way `--groth16-wa-vk` loads it (an unreadable or malformed file is an error), and its `pinnedPublicInputs` count as binding the statement of every `AssertGroth16WitnessAssistedWithMSM` method. A vk.json that pins no slot binds nothing, so a method that also binds nothing in its body is still refused. [compile_check.go](compile_check.go).
 
 #### `ComputeNewState` / `ComputeNewStateAndDataOutputs`
 

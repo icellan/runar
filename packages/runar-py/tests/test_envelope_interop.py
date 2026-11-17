@@ -49,10 +49,31 @@ def test_verify_rejection_vectors(fixture: dict) -> None:
     for v in fixture["rejection_vectors"]:
         env = SignedEnvelope.from_dict(v["envelope"])
         r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
-        assert not r.ok, f"rejection {v['reason']!r} should not be OK"
+        vid = v.get("_vector_id", v["reason"])
+        assert not r.ok, f"rejection {v['reason']!r} ({vid}) should not be OK"
         assert r.reason == VerifyEnvelopeReason(v["reason"]), (
-            f"rejection {v['reason']!r}: got reason={r.reason}"
+            f"rejection {v['reason']!r} ({vid}): got reason={r.reason}"
         )
+
+
+def test_allowlist_vectors(fixture: dict) -> None:
+    """GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list
+    allows nobody; ``None`` (not supplied) skips the check. al2 is the control
+    that reddens if a fix treats an absent allowlist like an empty one.
+    """
+    env = SignedEnvelope.from_dict(fixture["valid_envelope"])
+    vectors = fixture["allowlist_vectors"]
+    assert vectors, "allowlist_vectors missing or empty"
+    for v in vectors:
+        vid = v["_vector_id"]
+        r = verify_envelope(env, expected_keys=v["expected_keys"], now_ms=fixture["verify_now_ms"])
+        if v["expect_ok"]:
+            assert r.ok, f"{vid}: expected ok=True, got reason={r.reason}"
+        else:
+            assert not r.ok, f"{vid}: expected ok=False"
+            assert r.reason == VerifyEnvelopeReason(v["reason"]), (
+                f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )
 
 
 def test_signing_vectors(fixture: dict) -> None:
@@ -128,6 +149,27 @@ def test_payload_depth_vectors(fixture: dict) -> None:
             assert r.reason == VerifyEnvelopeReason(v["reason"]), (
                 f"{vid}: got reason={r.reason}, want {v['reason']}"
             )
+
+
+def test_duplicate_key_vectors(fixture: dict) -> None:
+    """R2-DUPKEY. A payload object with two members of the same key (compared
+    after unescaping, at any depth) is bad-json, decided in the parse step:
+    after expired, before envelope-mismatch / bad-sig. json.loads keeps the
+    LAST value, so before the fix dk1..dk10 verified ok (dk8 mismatch, dk11
+    bad-sig). The dkc* controls (same key in DIFFERENT objects) stay ok.
+    """
+    vectors = fixture["duplicate_key_vectors"]
+    assert vectors, "duplicate_key_vectors missing or empty"
+    failures = []
+    for v in vectors:
+        vid = v["_vector_id"]
+        env = SignedEnvelope.from_dict(v["envelope"])
+        r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
+        want = "ok" if v["expect_ok"] else v["reason"]
+        got = "ok" if r.ok else r.reason.value
+        if got != want:
+            failures.append(f"{vid}: got {got}, want {want}")
+    assert not failures, "\n".join(failures)
 
 
 def test_malleability_vectors(fixture: dict) -> None:
@@ -215,4 +257,33 @@ def test_clock_skew_vectors(fixture: dict) -> None:
             assert not r.ok, f"{vid}: expected ok=False"
             assert r.reason == VerifyEnvelopeReason(v["reason"]), (
                 f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )
+
+
+def test_invalid_utf8_vectors(fixture: dict) -> None:
+    """R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json.
+
+    A Python ``str`` cannot hold the raw bytes; the only way such a payload
+    reaches ``verify_envelope`` is as surrogate escapes (the
+    ``surrogateescape`` decode of the wire bytes), so that is what this replay
+    feeds. ``verify_envelope`` used to RAISE ``UnicodeEncodeError`` out of its
+    size guard for any str holding a surrogate, instead of answering. juc1
+    (well-formed multi-byte UTF-8) is the control.
+    """
+    vectors = fixture["invalid_utf8_vectors"]
+    assert vectors
+    for v in vectors:
+        raw = bytes.fromhex(v["payload_hex"])
+        payload = raw.decode("utf-8", "surrogateescape")
+        env = SignedEnvelope(
+            payload=payload, sig=v["sig"], pubkey=v["pubkey"],
+            nonce=v["nonce"], expiresAt=v["expiresAt"],
+        )
+        r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
+        if v["expect_ok"]:
+            assert r.ok, f"{v['_vector_id']}: expected ok, got {r.reason}"
+        else:
+            assert not r.ok, f"{v['_vector_id']}: expected ok=false"
+            assert r.reason is not None and r.reason.value == v["reason"], (
+                f"{v['_vector_id']}: got {r.reason}"
             )

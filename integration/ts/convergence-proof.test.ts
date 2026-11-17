@@ -12,7 +12,7 @@ import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
 import { ecMulGen, encodePoint, EC_N } from './helpers/crypto.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 /**
  * Generate test data for ConvergenceProof:
@@ -91,8 +91,8 @@ describe('ConvergenceProof', () => {
 
     await contract.deploy(provider, signer, {});
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('proveConvergence', [wrongDelta], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 });

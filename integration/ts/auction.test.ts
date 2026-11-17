@@ -26,7 +26,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 describe('Auction', () => {
   it('should compile the Auction contract', () => {
@@ -155,8 +155,8 @@ describe('Auction', () => {
     // deadline.
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('close', [null], provider, wrongSigner, { locktime: 1 }),
-    ).rejects.toThrow();
+    );
   });
 });

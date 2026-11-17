@@ -1537,10 +1537,9 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return big.NewInt(int64(v.BitLen() - 1))
 
 	case "bool":
-		if anfIsTruthy(args[0]) {
-			return big.NewInt(1)
-		}
-		return big.NewInt(0)
+		// GK-BUG-010: `bool(x): boolean` in runar-lang, so a native bool --
+		// a boolean state field assigned from it must serialize as one.
+		return anfIsTruthy(args[0])
 
 	case "mulDiv":
 		a := anfToBigInt(args[0])

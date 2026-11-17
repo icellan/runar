@@ -43,13 +43,16 @@ class TestSigStateVarLen < Minitest::Test
 
   VAR_LEN_TYPES = %w[Sig SigHashPreimage].freeze
 
-  # Mutating method -- drives the state-continuation WRITE path.
+  # Mutating method -- drives the state-continuation WRITE path. The field is
+  # rewritten from itself: a public SigHashPreimage parameter must reach
+  # checkPreimage on every path (GK-GAP-010), which the ByteString control
+  # could not mirror.
   def write_src(prop_type)
     <<~TS
       class VarLenStateWrite extends StatefulSmartContract {
         tag: #{prop_type};
         constructor(tag: #{prop_type}) { super(tag); this.tag = tag; }
-        public update(next: #{prop_type}) { this.tag = next; }
+        public update() { this.tag = this.tag; }
       }
     TS
   end

@@ -83,6 +83,26 @@ pub fn rpcCall(allocator: std.mem.Allocator, method: []const u8, params_json: []
     return extractJsonResult(allocator, result.stdout);
 }
 
+// The node's own message for the most recent RPC that it answered with an
+// error (`RpcError.RpcFailed`). Negative tests read it to pin WHY the node
+// refused a spend. Truncated to the buffer; the reasons that matter
+// ("mandatory-script-verify-flag-failed (...)") are short.
+threadlocal var last_rpc_error_buf: [512]u8 = undefined;
+threadlocal var last_rpc_error_len: usize = 0;
+
+/// Record `msg` as the node's latest RPC error message (also used by the
+/// node-free guard suite's stub node).
+pub fn setLastRpcError(msg: []const u8) void {
+    const n = @min(msg.len, last_rpc_error_buf.len);
+    @memcpy(last_rpc_error_buf[0..n], msg[0..n]);
+    last_rpc_error_len = n;
+}
+
+/// The node's message for the latest RPC it refused.
+pub fn lastRpcError() []const u8 {
+    return last_rpc_error_buf[0..last_rpc_error_len];
+}
+
 /// Extract the "result" field from a JSON-RPC response body.
 fn extractJsonResult(allocator: std.mem.Allocator, response_body: []const u8) ![]u8 {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, response_body, .{}) catch return RpcError.ParseFailed;
@@ -94,10 +114,12 @@ fn extractJsonResult(allocator: std.mem.Allocator, response_body: []const u8) ![
     // Check for error
     if (root.object.get("error")) |err_val| {
         if (err_val != .null) {
+            setLastRpcError("");
             if (err_val == .object) {
                 if (err_val.object.get("message")) |msg| {
                     if (msg == .string) {
                         std.log.warn("RPC error: {s}", .{msg.string});
+                        setLastRpcError(msg.string);
                     }
                 }
             }
@@ -138,6 +160,30 @@ pub fn requireNodeAvailable(allocator: std.mem.Allocator) void {
             "Start with: cd integration && ./regtest.sh start",
         );
     }
+    // GK-BUG-001: reachable is not enough — refuse a mainnet/testnet node, as
+    // the Go (EnsureRegtest) and Java (ensureRegtest) suites do.
+    ensureRegtestWith(real_node, allocator) catch {
+        @panic("SAFETY: the configured node is not on regtest! Refusing to run integration tests.");
+    };
+}
+
+pub const RegtestGuardError = error{NotRegtest};
+
+/// Pure chain guard (GK-BUG-001): accept only a `getblockchaininfo` result
+/// whose `chain` is "regtest".
+pub fn checkRegtestChain(allocator: std.mem.Allocator, info_json: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, info_json, .{}) catch return RegtestGuardError.NotRegtest;
+    defer parsed.deinit();
+    if (parsed.value != .object) return RegtestGuardError.NotRegtest;
+    const chain = parsed.value.object.get("chain") orelse return RegtestGuardError.NotRegtest;
+    if (chain != .string or !std.mem.eql(u8, chain.string, "regtest")) return RegtestGuardError.NotRegtest;
+}
+
+/// Ask the node behind `ops` for its chain and refuse anything but regtest.
+pub fn ensureRegtestWith(ops: NodeOps, allocator: std.mem.Allocator) !void {
+    const info = try ops.getBlockchainInfo(ops.ctx, allocator);
+    defer allocator.free(info);
+    try checkRegtestChain(allocator, info);
 }
 
 /// Get the current block height.
@@ -210,11 +256,59 @@ pub fn getRawTransactionVerbose(allocator: std.mem.Allocator, txid: []const u8) 
     return rpcCall(allocator, "getrawtransaction", params);
 }
 
+// ---------------------------------------------------------------------------
+// Node-operation seam (GK-BUG-001 / GK-BUG-004)
+//
+// The funding and broadcast-and-mine helpers take their node calls through
+// this table so the node-free guard suite can drive them against a stub node.
+// `real_node` is the curl-backed implementation every integration test uses.
+// ---------------------------------------------------------------------------
+
+pub const NodeOps = struct {
+    ctx: ?*anyopaque = null,
+    getBlockchainInfo: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]u8,
+    importAddress: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8) anyerror!void,
+    sendToAddress: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8, btc_amount: f64) anyerror![]u8,
+    sendRawTransaction: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) anyerror![]u8,
+    mine: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, n: i64) anyerror!void,
+};
+
+fn realGetBlockchainInfo(_: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+    return rpcCall(allocator, "getblockchaininfo", "[]");
+}
+fn realImportAddress(_: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8) anyerror!void {
+    return importAddress(allocator, address);
+}
+fn realSendToAddress(_: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8, btc_amount: f64) anyerror![]u8 {
+    return sendToAddress(allocator, address, btc_amount);
+}
+fn realSendRawTransaction(_: ?*anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) anyerror![]u8 {
+    return sendRawTransaction(allocator, tx_hex);
+}
+fn realMine(_: ?*anyopaque, allocator: std.mem.Allocator, n: i64) anyerror!void {
+    return mine(allocator, n);
+}
+
+pub const real_node: NodeOps = .{
+    .getBlockchainInfo = realGetBlockchainInfo,
+    .importAddress = realImportAddress,
+    .sendToAddress = realSendToAddress,
+    .sendRawTransaction = realSendRawTransaction,
+    .mine = realMine,
+};
+
+/// Broadcast and auto-mine 1 block through `ops`. Returns txid.
+pub fn broadcastAndMineWith(ops: NodeOps, allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 {
+    const txid = try ops.sendRawTransaction(ops.ctx, allocator, tx_hex);
+    errdefer allocator.free(txid);
+    // GK-BUG-004: a failed confirming mine is an error, not a success.
+    try ops.mine(ops.ctx, allocator, 1);
+    return txid;
+}
+
 /// Broadcast and auto-mine 1 block. Returns txid.
 pub fn broadcastAndMine(allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 {
-    const txid = try sendRawTransaction(allocator, tx_hex);
-    mine(allocator, 1) catch {};
-    return txid;
+    return broadcastAndMineWith(real_node, allocator, tx_hex);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,12 +394,21 @@ pub fn newWallet(allocator: std.mem.Allocator) !Wallet {
     };
 }
 
+/// Fund an address through `ops`: import it, send BTC, mine a block.
+pub fn fundAddressWith(ops: NodeOps, allocator: std.mem.Allocator, address: []const u8, btc_amount: f64) ![]u8 {
+    // GK-BUG-001: never spend from a non-regtest node's wallet.
+    try ensureRegtestWith(ops, allocator);
+    try ops.importAddress(ops.ctx, allocator, address);
+    const txid = try ops.sendToAddress(ops.ctx, allocator, address, btc_amount);
+    errdefer allocator.free(txid);
+    // GK-BUG-004: an unconfirmed funding tx must not be reported as funded.
+    try ops.mine(ops.ctx, allocator, 1);
+    return txid;
+}
+
 /// Fund a wallet: import address, send BTC, mine a block.
 pub fn fundWallet(allocator: std.mem.Allocator, wallet: *const Wallet, btc_amount: f64) ![]u8 {
-    try importAddress(allocator, wallet.address);
-    const txid = try sendToAddress(allocator, wallet.address, btc_amount);
-    mine(allocator, 1) catch {};
-    return txid;
+    return fundAddressWith(real_node, allocator, wallet.address, btc_amount);
 }
 
 // ---------------------------------------------------------------------------
@@ -326,19 +429,71 @@ pub const RPCProvider = struct {
     /// `>= 1`. The counter is cumulative and is never reset, and every negative
     /// test deploys its fixture through this same provider instance first — so
     /// `>= 1` is already satisfied before the call under test is made, and
-    /// holds whether or not the attack transaction ever reached the node. The
-    /// shape that measures what the comment claims is:
+    /// holds whether or not the attack transaction ever reached the node. Even
+    /// a delta is not enough since GK-BUG-004: an ACCEPTED tx whose confirming
+    /// mine fails is an error after an attempt too. The shape that measures
+    /// what a negative test claims is:
     ///
-    ///     const broadcasts_before = rpc_provider.broadcast_attempts;
+    ///     const probe = rpc_provider.rejectionProbe();
     ///     ... the attacking call ...
-    ///     try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+    ///     try rpc_provider.expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED);
     ///
     /// `negative_assertion_guard_test.zig` proves the difference and ratchets
-    /// the suite against the absolute form.
+    /// the suite against the absolute and bare-delta forms.
     broadcast_attempts: usize = 0,
+    /// Broadcasts the node ACCEPTED at sendrawtransaction -- including ones
+    /// whose confirming mine then failed. Since GK-BUG-004 that case is an
+    /// error too, so "error + moved attempt counter" no longer proves a
+    /// rejection; `expectNodeRejected` checks this does NOT move.
+    node_accepted: usize = 0,
+    /// Broadcasts the node REFUSED at sendrawtransaction (`RpcError.RpcFailed`).
+    node_rejections: usize = 0,
+    /// The outcome of the most recent broadcast, and the node's message when
+    /// it was a refusal.
+    last_outcome: BroadcastOutcome = .none,
+    last_rejection_buf: [512]u8 = undefined,
+    last_rejection_len: usize = 0,
+    /// Node calls go through this table; the guard suite swaps in a stub.
+    ops: NodeOps = real_node,
+
+    pub const BroadcastOutcome = enum { none, accepted, accepted_mine_failed, node_rejected, other_failure };
+
+    /// Snapshot to take immediately before the attacking call.
+    pub const RejectionProbe = struct { attempts: usize, accepted: usize, rejections: usize };
 
     pub fn init(allocator: std.mem.Allocator) RPCProvider {
         return .{ .allocator = allocator };
+    }
+
+    pub fn rejectionProbe(self: *const RPCProvider) RejectionProbe {
+        return .{ .attempts = self.broadcast_attempts, .accepted = self.node_accepted, .rejections = self.node_rejections };
+    }
+
+    pub fn lastRejection(self: *const RPCProvider) []const u8 {
+        return self.last_rejection_buf[0..self.last_rejection_len];
+    }
+
+    /// Require that, since `probe`, the call handed at least one transaction
+    /// to the node, the node accepted none of them, and the LAST one was
+    /// refused by the node with a message containing `reason`.
+    pub fn checkNodeRejected(self: *const RPCProvider, probe: RejectionProbe, reason: []const u8) NodeRejectionError!void {
+        if (self.broadcast_attempts == probe.attempts) return NodeRejectionError.NeverBroadcast;
+        if (self.node_accepted != probe.accepted) return NodeRejectionError.NodeAccepted;
+        if (self.node_rejections == probe.rejections or self.last_outcome != .node_rejected) return NodeRejectionError.NeverRuled;
+        if (std.mem.indexOf(u8, self.lastRejection(), reason) == null) return NodeRejectionError.WrongReason;
+    }
+
+    /// `checkNodeRejected`, logging the evidence when it fails.
+    pub fn expectNodeRejected(self: *const RPCProvider, probe: RejectionProbe, reason: []const u8) !void {
+        self.checkNodeRejected(probe, reason) catch |err| {
+            std.log.err("not a node rejection ({s}): attempts {d}->{d}, accepted {d}->{d}, rejections {d}->{d}, last={s}, node said '{s}', expected '{s}'", .{
+                @errorName(err),               probe.attempts,   self.broadcast_attempts,
+                probe.accepted,                self.node_accepted, probe.rejections,
+                self.node_rejections,          @tagName(self.last_outcome), self.lastRejection(),
+                reason,
+            });
+            return err;
+        };
     }
 
     pub fn provider(self: *RPCProvider) runar.Provider {
@@ -416,7 +571,28 @@ pub const RPCProvider = struct {
         // Count the ATTEMPT, before the node can reject it — that is exactly
         // what distinguishes a consensus rejection from an SDK-side failure.
         self.broadcast_attempts += 1;
-        const txid = broadcastAndMine(allocator, tx_hex) catch return runar.sdk_provider.ProviderError.BroadcastFailed;
+        const txid = self.ops.sendRawTransaction(self.ops.ctx, allocator, tx_hex) catch |err| {
+            if (err == RpcError.RpcFailed) {
+                self.node_rejections += 1;
+                self.last_outcome = .node_rejected;
+                const msg = lastRpcError();
+                const n = @min(msg.len, self.last_rejection_buf.len);
+                @memcpy(self.last_rejection_buf[0..n], msg[0..n]);
+                self.last_rejection_len = n;
+            } else {
+                self.last_outcome = .other_failure;
+            }
+            return runar.sdk_provider.ProviderError.BroadcastFailed;
+        };
+        self.node_accepted += 1;
+        // GK-BUG-004: a failed confirming mine is an error, not a success --
+        // but the node DID accept the spend, which is what node_accepted says.
+        self.ops.mine(self.ops.ctx, allocator, 1) catch {
+            allocator.free(txid);
+            self.last_outcome = .accepted_mine_failed;
+            return runar.sdk_provider.ProviderError.BroadcastFailed;
+        };
+        self.last_outcome = .accepted;
         return txid;
     }
 
@@ -496,20 +672,39 @@ pub fn assertTxAccepted(allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 
     return sendRawTransaction(allocator, tx_hex);
 }
 
-/// Broadcast a transaction and expect it to be rejected.
-pub fn assertTxRejected(allocator: std.mem.Allocator, tx_hex: []const u8) !void {
-    const txid = sendRawTransaction(allocator, tx_hex) catch return; // Rejected as expected
-    defer allocator.free(txid);
-    return error.RpcFailed; // Should have been rejected
+/// The reason SV Node gives for a spend whose unlocking script fails (a false
+/// assert, a failed checkSig, a script error such as OP_SPLIT out of range).
+pub const SCRIPT_VERIFY_FAILED = "mandatory-script-verify-flag-failed";
+
+pub const NodeRejectionError = error{
+    /// The node ACCEPTED the transaction.
+    NodeAccepted,
+    /// The call never handed a transaction to the node (SDK-side failure).
+    NeverBroadcast,
+    /// The broadcast failed without the node ruling on it (transport etc.).
+    NeverRuled,
+    /// The node refused it, but not for the expected reason.
+    WrongReason,
+};
+
+/// Broadcast `tx_hex` through `ops` and require the NODE to refuse it with a
+/// message containing `reason`. The old form (`catch return`) passed on ANY
+/// error -- an unreachable node, a malformed reply -- so it proved nothing.
+pub fn assertTxRejectedWith(ops: NodeOps, allocator: std.mem.Allocator, tx_hex: []const u8, reason: []const u8) !void {
+    const txid = ops.sendRawTransaction(ops.ctx, allocator, tx_hex) catch |err| {
+        if (err != RpcError.RpcFailed) return NodeRejectionError.NeverRuled;
+        if (std.mem.indexOf(u8, lastRpcError(), reason) == null) return NodeRejectionError.WrongReason;
+        return;
+    };
+    allocator.free(txid);
+    return NodeRejectionError.NodeAccepted;
 }
 
-/// Mine a block and verify the transaction has confirmations.
-pub fn assertTxInBlock(allocator: std.mem.Allocator, txid: []const u8) !void {
-    mine(allocator, 1) catch {};
-    const result = getRawTransactionVerbose(allocator, txid) catch return;
-    defer allocator.free(result);
-    // If we can fetch it, it's in a block
+/// Broadcast a transaction and require the node to refuse it with `reason`.
+pub fn assertTxRejected(allocator: std.mem.Allocator, tx_hex: []const u8, reason: []const u8) !void {
+    return assertTxRejectedWith(real_node, allocator, tx_hex, reason);
 }
+
 
 // ---------------------------------------------------------------------------
 // JSON utility helpers

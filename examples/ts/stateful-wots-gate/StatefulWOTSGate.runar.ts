@@ -2,9 +2,12 @@ import { StatefulSmartContract, assert, verifyWOTS } from 'runar-lang';
 import type { ByteString } from 'runar-lang';
 
 // StatefulWOTSGate - stateful + post-quantum interaction fixture (GAP-407).
-// A counter whose state mutation is gated on a WOTS+ one-time signature,
-// composing the auto-injected stateful covenant (checkPreimage + 0x41 sighash
-// pin + state continuation) with a ~10 KB post-quantum verify in one script.
+// TEST FIXTURE, NOT AN AUTHORIZATION GATE: wotsPubKey is a spender-supplied witness,
+// so anyone can advance the counter; it exists to exercise stateful covenant +
+// WOTS+ verify composition (GAP-407).
+// It composes the auto-injected stateful covenant (checkPreimage + 0x41
+// sighash pin + state continuation) with a ~10 KB post-quantum verify in one
+// script.
 class StatefulWOTSGate extends StatefulSmartContract {
   count: bigint;
 
