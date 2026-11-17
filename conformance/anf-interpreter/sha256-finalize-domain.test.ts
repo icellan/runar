@@ -127,7 +127,10 @@ const drivers: Array<Driver & { present: string }> = [
   },
 ];
 
-const missing = drivers.filter((d) => !existsSync(d.present));
+/** Build-state proof, as cross-interpreter.test.ts's isDriverAvailable. */
+const isDriverAvailable = (d: { present: string }): boolean => existsSync(d.present);
+
+const missing = drivers.filter((d) => !isDriverAvailable(d));
 enforceDriverGate('sha256Finalize domain', missing.map((d) => ({ name: d.name, setupHint: 'see drivers/PROTOCOL.md' })), process.env);
 
 const TMP = mkdtempSync(join(tmpdir(), 'sha256-finalize-domain-'));
@@ -168,7 +171,7 @@ describe('D11: sha256Finalize over the witness rows (TS SDK reference)', () => {
 });
 
 for (const d of drivers) {
-  describe.skipIf(!existsSync(d.present))(`D11: sha256Finalize over the witness rows (${d.name} SDK)`, () => {
+  describe.skipIf(!isDriverAvailable(d))(`D11: sha256Finalize over the witness rows (${d.name} SDK)`, () => {
     for (const v of vectors) {
       it(`${v.name}: ${v.error === null ? 'digest' : 'refused, no digest'}`, () => {
         const file = join(TMP, `${d.name}-${v.name}.json`);

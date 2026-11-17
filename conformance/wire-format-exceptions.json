@@ -11,11 +11,11 @@
     },
     {
       "path": "compilers/python/runar_compiler/codegen/stack.py",
-      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs any nVersion other than 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
-      "date": "2026-11-12",
-      "expires": "2027-05-11",
-      "sha256": "bae25e691171d96650364f40844d9022f7c3c77ab3c9e7f1556bd7067d35c92e",
-      "reviewer": "fix-session: nVersion wording"
+      "reason": "Refusal-only: _lower_load_prop now raises for an undeclared property even when no constructor-param property is registered (the empty-list placeholder carve-out compiled a stateless contract reading this.ghost / this.txPreimage into an always-aborting script). No accepted program's bytes change: multi-format fold-OFF 892/892 against the goldens.",
+      "date": "2026-11-17",
+      "expires": "2027-05-16",
+      "sha256": "949e5647e1bf194029d0f160b38399c0429ca61514cb5e35a76c11116bf2dbfc",
+      "reviewer": "fix-session: PR F python ghost-property refusal"
     },
     {
       "path": "compilers/ruby/lib/runar_compiler/codegen/stack.rb",
