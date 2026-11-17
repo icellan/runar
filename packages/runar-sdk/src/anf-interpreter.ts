@@ -1117,6 +1117,10 @@ function evalCall(
     case 'hash256': return hashFn('hash256', args[0]);
     case 'hash160': return hashFn('hash160', args[0]);
     case 'ripemd160': return hashFn('ripemd160', args[0]);
+    // D11: the compiled script's partial-SHA-256 finalize, refusing exactly
+    // what it refuses (F-114 state size, F-142 remaining length, GK-BUG-013
+    // msgBitLen domain) with the diagnostics every tier shares.
+    case 'sha256Finalize': return sha256FinalizeFn(args[0], args[1], args[2]);
 
     // Assert — skip (on-chain handles it)
     case 'assert': return undefined;
@@ -1512,6 +1516,85 @@ function hashFn(
     case 'ripemd160': result = Hash.ripemd160(bytes); break;
   }
   return Utils.toHex(result);
+}
+
+// ---------------------------------------------------------------------------
+// Partial SHA-256 (D11): sha256Finalize, FIPS 180-4 padding + the final one
+// or two compressions, the same function as the runar-testing interpreter and
+// every runar-lang runtime.
+// ---------------------------------------------------------------------------
+
+const SHA256_K = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+const rotr32 = (x: number, n: number): number => ((x >>> n) | (x << (32 - n))) >>> 0;
+
+/** One SHA-256 block compression: 32-byte state + 64-byte block -> 32-byte state. */
+function sha256CompressBytes(state: number[], block: number[]): number[] {
+  const word = (b: number[], i: number): number =>
+    ((b[i]! << 24) | (b[i + 1]! << 16) | (b[i + 2]! << 8) | b[i + 3]!) >>> 0;
+  const h = Array.from({ length: 8 }, (_, i) => word(state, i * 4));
+  const w = new Array<number>(64);
+  for (let i = 0; i < 16; i++) w[i] = word(block, i * 4);
+  for (let t = 16; t < 64; t++) {
+    const s0 = (rotr32(w[t - 15]!, 7) ^ rotr32(w[t - 15]!, 18) ^ (w[t - 15]! >>> 3)) >>> 0;
+    const s1 = (rotr32(w[t - 2]!, 17) ^ rotr32(w[t - 2]!, 19) ^ (w[t - 2]! >>> 10)) >>> 0;
+    w[t] = (s1 + w[t - 7]! + s0 + w[t - 16]!) >>> 0;
+  }
+  let [a, b, c, d, e, f, g, hh] = h as [number, number, number, number, number, number, number, number];
+  for (let t = 0; t < 64; t++) {
+    const S1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) >>> 0;
+    const ch = ((e & f) ^ (~e & g)) >>> 0;
+    const temp1 = (hh + S1 + ch + SHA256_K[t]! + w[t]!) >>> 0;
+    const S0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) >>> 0;
+    const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+    const temp2 = (S0 + maj) >>> 0;
+    hh = g; g = f; f = e;
+    e = (d + temp1) >>> 0;
+    d = c; c = b; b = a;
+    a = (temp1 + temp2) >>> 0;
+  }
+  const out: number[] = [];
+  [a, b, c, d, e, f, g, hh].forEach((v, i) => {
+    const x = (h[i]! + v) >>> 0;
+    out.push(x >>> 24, (x >>> 16) & 0xff, (x >>> 8) & 0xff, x & 0xff);
+  });
+  return out;
+}
+
+function sha256FinalizeFn(stateArg: unknown, remainingArg: unknown, bitLenArg: unknown): string {
+  const state = Utils.toArray(String(stateArg ?? ''), 'hex');
+  const remaining = Utils.toArray(String(remainingArg ?? ''), 'hex');
+  if (typeof bitLenArg !== 'bigint') throw new Error('sha256Finalize: msgBitLen must be a bigint');
+  if (state.length !== 32) throw new Error(`sha256Finalize: state must be 32 bytes, got ${state.length}`);
+  // Past 119 bytes the padding needs a third block, which the script never
+  // emits: it aborts (F-142).
+  if (remaining.length > 119) {
+    throw new Error(`sha256Finalize: remaining must be 0-119 bytes, got ${remaining.length}`);
+  }
+  // GK-BUG-013: the script requires the 9th byte of msgBitLen's 9-byte
+  // OP_NUM2BIN form to be 0x00, i.e. 0 <= msgBitLen < 2^64.
+  if (bitLenArg < 0n || bitLenArg >= 1n << 64n) {
+    throw new Error(`sha256Finalize: msgBitLen must be in [0, 2^64), got ${bitLenArg}`);
+  }
+  const blocks = remaining.length + 1 + 8 <= 64 ? 1 : 2;
+  const padded = new Array<number>(blocks * 64).fill(0);
+  remaining.forEach((v, i) => { padded[i] = v; });
+  padded[remaining.length] = 0x80;
+  for (let i = 0; i < 8; i++) {
+    padded[padded.length - 1 - i] = Number((bitLenArg >> BigInt(8 * i)) & 0xffn);
+  }
+  let s = state;
+  for (let i = 0; i < blocks; i++) s = sha256CompressBytes(s, padded.slice(i * 64, (i + 1) * 64));
+  return Utils.toHex(s);
 }
 
 // ---------------------------------------------------------------------------

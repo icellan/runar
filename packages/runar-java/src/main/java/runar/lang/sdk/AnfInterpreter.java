@@ -1503,6 +1503,13 @@ public final class AnfInterpreter {
             case "hash256":    return hashHex("hash256", args.get(0));
             case "hash160":    return hashHex("hash160", args.get(0));
             case "ripemd160":  return hashHex("ripemd160", args.get(0));
+            // D11: the compiled script's partial-SHA-256 finalize. It used to
+            // throw UnsupportedOperationException for every input.
+            case "sha256Finalize":
+                return sha256FinalizeHex(
+                    args.size() > 0 ? args.get(0) : null,
+                    args.size() > 1 ? args.get(1) : null,
+                    args.size() > 2 ? args.get(2) : null);
 
             case "assert":     return null;
 
@@ -1713,7 +1720,6 @@ public final class AnfInterpreter {
             case "verifySLHDSA_SHA2_256s":
             case "verifySLHDSA_SHA2_256f":
             case "sha256Compress":
-            case "sha256Finalize":
             case "poseidon2Hash":
             case "bn254FieldAdd":
             case "bn254FieldMul":
@@ -1730,6 +1736,32 @@ public final class AnfInterpreter {
     // ------------------------------------------------------------------
     // Hash / number helpers
     // ------------------------------------------------------------------
+
+    /**
+     * D11: {@code sha256Finalize(state, remaining, msgBitLen)} as the compiled
+     * script computes it, refusing exactly what the script refuses (F-114
+     * state size, F-142 remaining length, GK-BUG-013 msgBitLen domain) with
+     * the diagnostics every tier shares.
+     */
+    private static String sha256FinalizeHex(Object stateArg, Object remainingArg, Object bitLenArg) {
+        byte[] state = HEX.parseHex(asString(stateArg));
+        byte[] remaining = HEX.parseHex(asString(remainingArg));
+        if (!(bitLenArg instanceof BigInteger) && !(bitLenArg instanceof Long) && !(bitLenArg instanceof Integer)) {
+            throw new IllegalArgumentException("sha256Finalize: msgBitLen must be a bigint");
+        }
+        BigInteger bitLen = toBigInt(bitLenArg);
+        if (state.length != 32) {
+            throw new IllegalArgumentException("sha256Finalize: state must be 32 bytes, got " + state.length);
+        }
+        if (remaining.length > 119) {
+            throw new IllegalArgumentException("sha256Finalize: remaining must be 0-119 bytes, got " + remaining.length);
+        }
+        if (bitLen.signum() < 0 || bitLen.bitLength() > 64) {
+            throw new IllegalArgumentException("sha256Finalize: msgBitLen must be in [0, 2^64), got " + bitLen);
+        }
+        return HEX.formatHex(MockCrypto.sha256Finalize(
+            new runar.lang.types.ByteString(state), new runar.lang.types.ByteString(remaining), bitLen).toByteArray());
+    }
 
     private static String hashHex(String name, Object input) {
         byte[] data = HEX.parseHex(asString(input));

@@ -1,6 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const der_mod = @import("sdk_der.zig");
+const runar_builtins = @import("builtins.zig");
 
 // ---------------------------------------------------------------------------
 // ANF Interpreter — compute state transitions from ANF IR
@@ -1010,7 +1011,10 @@ fn evalNode(
             // values outside i64 (Rabin keys / signatures), and it does no
             // integer math here. Every other builtin would compute with a
             // `.wide` argument as 0.
-            if (!std.mem.eql(u8, c.func, "verifyRabinSig")) {
+            // D11: `sha256Finalize` takes its msgBitLen as an integer in
+            // [0, 2^64), so a value in [2^63, 2^64) arrives `.wide`; it does
+            // its own range check below instead of the blanket refusal.
+            if (!std.mem.eql(u8, c.func, "verifyRabinSig") and !std.mem.eql(u8, c.func, "sha256Finalize")) {
                 for (c.args) |arg_ref| {
                     if (isWide(env.get(arg_ref) orelse anf_none)) return error.ScriptNumberError;
                 }
@@ -1024,6 +1028,14 @@ fn evalNode(
             // costs nothing and cannot miss a builtin.
             for (c.args) |arg_ref| {
                 try assertMinimalNumericOperand(eval_ctx, arg_ref, env.get(arg_ref) orelse anf_none);
+            }
+            // D11: the compiled script's partial-SHA-256 finalize. It used to
+            // fall through to the `none` default, so a state field derived
+            // from it was silently wrong. What the script refuses (F-114 state
+            // size, F-142 remaining length, GK-BUG-013 msgBitLen domain) takes
+            // the on-chain-abort channel; Zig has no message channel.
+            if (std.mem.eql(u8, c.func, "sha256Finalize")) {
+                return sha256FinalizeVal(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env), getArg(c.args, 2, env));
             }
             // Strict mode: a `call(assert, x)` lowering path must enforce the
             // predicate the same way the dedicated `assert` ANF node does.
@@ -2121,6 +2133,49 @@ fn evalMethodCall(
 // ---------------------------------------------------------------------------
 // Hash helpers
 // ---------------------------------------------------------------------------
+
+/// D11: `sha256Finalize(state, remaining, msgBitLen)` as the compiled script
+/// computes it. `error.ScriptNumberError` where the script refuses: a state
+/// that is not 32 bytes, more than 119 remaining bytes, or msgBitLen outside
+/// [0, 2^64) (the shared diagnostics read "sha256Finalize: ..." elsewhere).
+fn sha256FinalizeVal(allocator: std.mem.Allocator, state_v: ANFValue, remaining_v: ANFValue, bit_len_v: ANFValue) error{ OutOfMemory, ScriptNumberError }!ANFValue {
+    const state_hex = switch (state_v) {
+        .bytes => |b| b,
+        else => return error.ScriptNumberError,
+    };
+    const remaining_hex = switch (remaining_v) {
+        .bytes => |b| b,
+        else => return error.ScriptNumberError,
+    };
+    const bit_len: u64 = switch (bit_len_v) {
+        .int => |n| std.math.cast(u64, n) orelse return error.ScriptNumberError,
+        .wide => |digits| std.fmt.parseInt(u64, digits, 10) catch return error.ScriptNumberError,
+        else => return error.ScriptNumberError,
+    };
+    const state = bsvz.primitives.hex.decode(allocator, state_hex) catch return error.ScriptNumberError;
+    defer allocator.free(state);
+    const remaining = bsvz.primitives.hex.decode(allocator, remaining_hex) catch return error.ScriptNumberError;
+    defer allocator.free(remaining);
+    if (state.len != 32) return error.ScriptNumberError;
+    if (remaining.len > 119) return error.ScriptNumberError;
+
+    const blocks: usize = if (remaining.len + 1 + 8 <= 64) 1 else 2;
+    var padded = [_]u8{0} ** 128;
+    @memcpy(padded[0..remaining.len], remaining);
+    padded[remaining.len] = 0x80;
+    std.mem.writeInt(u64, padded[blocks * 64 - 8 .. blocks * 64][0..8], bit_len, .big);
+
+    var out: [32]u8 = undefined;
+    @memcpy(&out, state);
+    for (0..blocks) |i| {
+        var next: [32]u8 = undefined;
+        runar_builtins.sha256CompressBlock(&next, &out, padded[i * 64 .. (i + 1) * 64]);
+        out = next;
+    }
+    const hex_out = try allocator.alloc(u8, 64);
+    _ = bsvz.primitives.hex.encodeLower(&out, hex_out) catch return error.OutOfMemory;
+    return .{ .bytes = hex_out };
+}
 
 fn hashFn(allocator: std.mem.Allocator, name: []const u8, input: ANFValue) ANFValue {
     const hex_str = switch (input) {

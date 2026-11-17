@@ -30,7 +30,7 @@
     "conformance:construct-ledger": "npx vitest run conformance/construct-ledger.test.ts",
     "conformance:bip143-fixture-locktime": "npx vitest run conformance/scripts/__tests__/bip143-fixture-locktime.test.ts",
     "conformance:wire-primitives": "npx vitest run conformance/wire-primitives.test.ts",
-    "conformance:anf-parity": "npx vitest run conformance/anf-interpreter/cross-interpreter.test.ts",
+    "conformance:anf-parity": "npx vitest run conformance/anf-interpreter/cross-interpreter.test.ts conformance/anf-interpreter/sha256-finalize-domain.test.ts",
     "conformance:anf-parity:strict": "npx vitest run conformance/anf-interpreter/cross-interpreter-strict.test.ts",
     "conformance:anf-parity:real-crypto": "npx vitest run conformance/anf-interpreter/cross-interpreter-real-crypto.test.ts conformance/anf-interpreter/checksig-encoding-abort.test.ts conformance/anf-interpreter/checkmultisig-onchain.test.ts",
     "conformance:typecheck": "npx tsc --noEmit -p conformance/tsconfig.typecheck.json",

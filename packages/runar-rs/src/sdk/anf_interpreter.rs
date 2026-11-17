@@ -1232,7 +1232,10 @@ fn eval_value(
             // takes values outside i64 (Rabin keys / signatures), and it does
             // no integer math here. Every other builtin would compute with a
             // `Wide` argument as 0.
-            if func != "verifyRabinSig" && args.iter().any(Val::is_wide) {
+            // D11: `sha256Finalize` takes its msgBitLen as an integer in
+            // [0, 2^64), so a value in [2^63, 2^64) arrives `Wide`; it does
+            // its own range check below instead of the blanket refusal.
+            if func != "verifyRabinSig" && func != "sha256Finalize" && args.iter().any(Val::is_wide) {
                 return Err(wide_refusal(strict, binding_name));
             }
             // The single funnel every numeric builtin (`abs`, `min`, `max`,
@@ -1249,6 +1252,18 @@ fn eval_value(
                         binding_name: binding_name.to_string(),
                     });
                 }
+            }
+            // D11: the compiled script's partial-SHA-256 finalize. It used to
+            // fall through to the `Undefined` default (a state field derived
+            // from it read as 0). What the script refuses (F-114 state size,
+            // F-142 remaining length, GK-BUG-013 msgBitLen domain) is refused
+            // through the abort channel, the shared diagnostic in the binding
+            // name as N-163's refusal carries its reason.
+            if func == "sha256Finalize" {
+                return sha256_finalize_val(&args).map_err(|msg| AssertionFailureError {
+                    method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                    binding_name: format!("{} ({})", binding_name, msg),
+                });
             }
             // Strict mode: a `call(assert, x)` lowering path enforces the
             // predicate the same way the dedicated `assert` ANF node does.
@@ -1909,6 +1924,38 @@ fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
         "log2" => arg(0) <= 0,
         _ => false,
     }
+}
+
+/// D11: `sha256Finalize(state, remaining, msgBitLen)` as the compiled script
+/// computes it, or the shared diagnostic for an input the script refuses.
+fn sha256_finalize_val(args: &[Val]) -> Result<Val, String> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(Val::Undefined);
+    let state = hex_to_bytes(&arg(0).as_hex());
+    let remaining = hex_to_bytes(&arg(1).as_hex());
+    let bit_len: num_bigint::BigInt = match arg(2) {
+        Val::Int(n) => n.into(),
+        Val::Wide(n) => n,
+        _ => return Err("sha256Finalize: msgBitLen must be a bigint".to_string()),
+    };
+    if state.len() != 32 {
+        return Err(format!("sha256Finalize: state must be 32 bytes, got {}", state.len()));
+    }
+    if remaining.len() > 119 {
+        return Err(format!("sha256Finalize: remaining must be 0-119 bytes, got {}", remaining.len()));
+    }
+    let bit_len_u64 = u64::try_from(&bit_len)
+        .map_err(|_| format!("sha256Finalize: msgBitLen must be in [0, 2^64), got {}", bit_len))?;
+    let blocks = if remaining.len() + 1 + 8 <= 64 { 1 } else { 2 };
+    let mut padded = vec![0u8; blocks * 64];
+    padded[..remaining.len()].copy_from_slice(&remaining);
+    padded[remaining.len()] = 0x80;
+    let end = padded.len();
+    padded[end - 8..].copy_from_slice(&bit_len_u64.to_be_bytes());
+    let mut out = state;
+    for i in 0..blocks {
+        out = crate::prelude::sha256_compress(&out, &padded[i * 64..(i + 1) * 64]);
+    }
+    Ok(Val::Bytes(bytes_to_hex(&out)))
 }
 
 /// N-163: the refusal for a `Wide` value used where the interpreter would
