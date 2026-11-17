@@ -3760,6 +3760,41 @@
       "reviewer": "fix-session: Grok v1-readiness remediation",
       "date": "2026-11-16",
       "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-finalize-after-compress.json",
+      "sha256": "7d083155574b4daddb3793040017070afe1b5ab71dd0c1d13fbac6bc27f6c394",
+      "verified-against": "second-implementation",
+      "reason": "PR F (D11): sha256Finalize is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned null/'0n' or refused the builtin. These strict-mode goldens were stamped from the TS reference interpreter and checked against two independent oracles: (1) the lenient-mode goldens for the same cases, whose digests were computed with Python hashlib (and runar-py's builtin for 2^63+24), and (2) the compiled script on the real @bsv/sdk Spend, which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-finalize-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-finalize.json (including the [0, 2^64) bit-length refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR F follow-ups (D9-D11)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-finalize-bitlen-above-2p63.json",
+      "sha256": "eb9f36e5c00b031769effb1b11c75a0ee769ed60c2ddb18c330e9b21d2b8d76c",
+      "verified-against": "second-implementation",
+      "reason": "PR F (D11): sha256Finalize is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned null/'0n' or refused the builtin. These strict-mode goldens were stamped from the TS reference interpreter and checked against two independent oracles: (1) the lenient-mode goldens for the same cases, whose digests were computed with Python hashlib (and runar-py's builtin for 2^63+24), and (2) the compiled script on the real @bsv/sdk Spend, which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-finalize-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-finalize.json (including the [0, 2^64) bit-length refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR F follow-ups (D9-D11)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-finalize-literal-bitlen.json",
+      "sha256": "1f0271a2dc1aa405f7cfa9bb1dfbabaf1ba3cde1801ee03c5a902943b221b192",
+      "verified-against": "second-implementation",
+      "reason": "PR F (D11): sha256Finalize is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned null/'0n' or refused the builtin. These strict-mode goldens were stamped from the TS reference interpreter and checked against two independent oracles: (1) the lenient-mode goldens for the same cases, whose digests were computed with Python hashlib (and runar-py's builtin for 2^63+24), and (2) the compiled script on the real @bsv/sdk Spend, which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-finalize-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-finalize.json (including the [0, 2^64) bit-length refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR F follow-ups (D9-D11)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-finalize-one-block.json",
+      "sha256": "1f0271a2dc1aa405f7cfa9bb1dfbabaf1ba3cde1801ee03c5a902943b221b192",
+      "verified-against": "second-implementation",
+      "reason": "PR F (D11): sha256Finalize is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned null/'0n' or refused the builtin. These strict-mode goldens were stamped from the TS reference interpreter and checked against two independent oracles: (1) the lenient-mode goldens for the same cases, whose digests were computed with Python hashlib (and runar-py's builtin for 2^63+24), and (2) the compiled script on the real @bsv/sdk Spend, which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-finalize-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-finalize.json (including the [0, 2^64) bit-length refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR F follow-ups (D9-D11)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-finalize-two-block.json",
+      "sha256": "7b00f030112551501d39f338fe457f9dec6feb76f8e46ff92de2fade5e03fd68",
+      "verified-against": "second-implementation",
+      "reason": "PR F (D11): sha256Finalize is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned null/'0n' or refused the builtin. These strict-mode goldens were stamped from the TS reference interpreter and checked against two independent oracles: (1) the lenient-mode goldens for the same cases, whose digests were computed with Python hashlib (and runar-py's builtin for 2^63+24), and (2) the compiled script on the real @bsv/sdk Spend, which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-finalize-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-finalize.json (including the [0, 2^64) bit-length refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR F follow-ups (D9-D11)"
     }
   ]
 }
