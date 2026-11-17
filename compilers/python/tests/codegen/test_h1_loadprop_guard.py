@@ -102,3 +102,56 @@ def test_legit_ctor_param_prop_lowers_without_error() -> None:
     )
     # Must not raise.
     lower_to_stack(program)
+
+
+def test_raises_on_load_prop_when_no_constructor_param_is_registered() -> None:
+    """A ghost property in a contract with NO constructor-param property used to
+    keep the historical placeholder (slot 0) for the sake of an inline
+    ``constructor(readonly n)`` property this tier's TS parser was assumed not
+    to surface. Every tier's validator now refuses that shape ("constructor
+    parameter 'n' does not initialise any property"), so the carve-out only
+    served undeclared names: a stateless contract reading ``this.txPreimage``
+    or ``this.ghost`` compiled to a 27-byte script whose spend aborts on an
+    empty placeholder -- funds locked for good -- while the other six tiers
+    refuse it. Fail closed like them."""
+    program = ANFProgram(
+        contract_name="Ghost",
+        properties=[],
+        methods=[
+            ANFMethod(
+                name="spend",
+                params=[],
+                is_public=True,
+                body=[
+                    ANFBinding(name="t0", value=ANFValue(kind="load_prop", name="ghost")),
+                    ANFBinding(name="t1", value=ANFValue(kind="assert", value_ref="t0")),
+                ],
+            )
+        ],
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        lower_to_stack(program)
+    assert "property 'ghost'" in str(excinfo.value)
+    assert "Known constructor-param properties: []." in str(excinfo.value)
+
+
+@pytest.mark.parametrize("prop", ["ghost", "txPreimage"])
+def test_source_reading_an_undeclared_property_is_refused(prop: str, tmp_path) -> None:
+    from runar_compiler.compiler import CompilationError, compile_from_source
+
+    path = tmp_path / "Ghost.runar.ts"
+    path.write_text(
+        "import { SmartContract, assert, extractAmount } from 'runar-lang';\n\n"
+        "class Ghost extends SmartContract {\n"
+        "  constructor() {\n    super();\n  }\n\n"
+        "  public spend(x: bigint) {\n"
+        f"    assert(extractAmount(this.{prop}) >= x);\n"
+        "  }\n}\n"
+    )
+    # Stack-lowering refusals surface as RuntimeError (the CLI reports them as
+    # "Compilation error: Stack lowering: ..." and exits 1), as for the ghost
+    # with a non-empty constructor-param list.
+    with pytest.raises((CompilationError, RuntimeError)) as excinfo:
+        compile_from_source(str(path))
+    assert f"property '{prop}'" in str(excinfo.value)
+    assert "no deploy-time slot" in str(excinfo.value)
