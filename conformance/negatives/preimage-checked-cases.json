@@ -1,5 +1,5 @@
 {
-  "_comment": "GK-GAP-010 (tightened by R2-GK010-ASSERT): a public method's SigHashPreimage parameter counts as checked only where checkPreimage(p) is the asserted condition of assert(...), directly or as any conjunct of the top-level && chain inside it, on every path (spec/type-system.md 4.2-4.3). A discarded call, a call bound to a local, a negated, ||-ed, compared or ternary-wrapped call, a call used as an if / ternary condition and a helper that returns checkPreimage(p) check nothing. Refused cases carry the shared diagnostic; accepted cases must compile to the same bytes in every tier. A `return` ends its path: a private helper's asserted check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it). A contract method named checkPreimage is not the built-in (method-named-checkpreimage). R3-GK010-GAPS + D9: ANY property that holds a SigHashPreimage (readonly or mutable, scalar or FixedArray element, stateless or stateful) is refused at its declaration with its own diagnostic (readonly-*property* and mutable-*property* cases): a readonly one is a constant in the locking script, a mutable one was written by an earlier spend, so either way it was fixed before the spending transaction existed, checkPreimage on it can never pass and every extractor read of it is unverified. The implicit txPreimage of StatefulSmartContract is not a declared property and is unaffected. A FixedArray<SigHashPreimage> method parameter is refused by every tier's validator (fixedarray-parameter; each tier words that diagnostic itself, so only the substring FixedArray is pinned).",
+  "_comment": "GK-GAP-010 (tightened by R2-GK010-ASSERT): a public method's SigHashPreimage parameter counts as checked only where checkPreimage(p) is the asserted condition of assert(...), directly or as any conjunct of the top-level && chain inside it, on every path (spec/type-system.md 4.2-4.3). A discarded call, a call bound to a local, a negated, ||-ed, compared or ternary-wrapped call, a call used as an if / ternary condition and a helper that returns checkPreimage(p) check nothing. Refused cases carry the shared diagnostic; accepted cases must compile to the same bytes in every tier. A `return` ends its path: a private helper's asserted check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it). A contract method named checkPreimage is not the built-in (method-named-checkpreimage). R3-GK010-GAPS + D9: ANY property that holds a SigHashPreimage (readonly or mutable, scalar or FixedArray element, stateless or stateful) is refused at its declaration with its own diagnostic (readonly-*property* and mutable-*property* cases): a readonly one is a constant in the locking script, a mutable one was written by an earlier spend, so either way it was fixed before the spending transaction existed, checkPreimage on it can never pass and every extractor read of it is unverified. The implicit txPreimage of StatefulSmartContract is not a declared property and is unaffected. A FixedArray<SigHashPreimage> method parameter is refused by every tier's validator (fixedarray-parameter; each tier words that diagnostic itself, so only the substring FixedArray is pinned). D14: every preimage extractor (extractVersion, extractHashPrevouts, extractHashSequence, extractOutpoint, extractInputIndex, extractScriptCode, extractAmount, extractSequence, extractOutputHash, extractOutputs, extractLocktime, extractSigHashType) must read a CHECKED preimage: its argument must be a SigHashPreimage parameter of the enclosing method (a public method's is checked on every path by the rule above), a never-reassigned local alias of one, or the implicit txPreimage of a StatefulSmartContract; and every argument passed to a private method's SigHashPreimage parameter must itself be one, so a helper extracting from its own parameter reads a checked preimage. Anything else (a ByteString parameter or property, even one passed to checkPreimage; a laundering local or helper return; a ternary) is refused with one shared diagnostic naming the extractor or helper (extractor-* cases).",
   "refuse": [
     {
       "name": "extract-only",
@@ -216,6 +216,66 @@
       "file": "Pc.runar.rs",
       "src": "use runar::prelude::*;\n\n#[runar::stateful_contract]\npub struct PcRsMutProp {\n    pub pre: SigHashPreimage,\n    pub count: Bigint,\n}\n\nimpl PcRsMutProp {\n    pub fn bump(&mut self, x: Bigint) {\n        assert!(extract_amount(&self.pre) >= x);\n        self.count = self.count + 1;\n    }\n}\n",
       "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-bytestring-param",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcBsParam extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(x: ByteString) {\n    assert(extractAmount(x) >= this.minAmount);\n  }\n}\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-bytestring-param-checked",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcBsParamChecked extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(x: ByteString) {\n    assert(checkPreimage(x));\n    assert(extractAmount(x) >= this.minAmount);\n  }\n}\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-bytestring-property",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcBsProp extends SmartContract {\n  readonly minAmount: bigint;\n  readonly pre: ByteString;\n\n  constructor(minAmount: bigint, pre: ByteString) {\n    super(minAmount, pre);\n    this.minAmount = minAmount;\n    this.pre = pre;\n  }\n\n  public spend(txPreimage: SigHashPreimage) {\n    assert(checkPreimage(txPreimage));\n    assert(extractLocktime(this.pre) >= this.minAmount);\n  }\n}\n",
+      "error": "extractLocktime() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-local-laundering",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcLaunderLocal extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(x: ByteString) {\n    const p: SigHashPreimage = x;\n    assert(extractAmount(p) >= this.minAmount);\n  }\n}\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-helper-arg-laundering",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcLaunderHelperArg extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(x: ByteString) {\n    assert(this.amount(x) >= this.minAmount);\n  }\n\n  private amount(p: SigHashPreimage): bigint {\n    return extractAmount(p);\n  }\n}\n",
+      "error": "amount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-helper-bytestring-param",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcHelperBsParam extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage) {\n    assert(checkPreimage(txPreimage));\n    assert(this.amount(txPreimage) >= this.minAmount);\n  }\n\n  private amount(p: ByteString): bigint {\n    return extractAmount(p);\n  }\n}\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-helper-return-laundering",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcLaunderHelperRet extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(x: ByteString) {\n    assert(extractAmount(this.wrap(x)) >= this.minAmount);\n  }\n\n  private wrap(p: ByteString): SigHashPreimage {\n    return p;\n  }\n}\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-ternary-arg",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcTernaryArg extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(checkPreimage(txPreimage));\n    assert(extractAmount(flag ? txPreimage : txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-stateful-bytestring-param",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcStatefulBs extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: ByteString) {\n    assert(extractAmount(x) >= 1000n);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "extractor-py-bytestring-param",
+      "file": "Pc.runar.py",
+      "src": "from runar import SmartContract, ByteString, public, assert_, extract_amount\n\nclass PcPyBsParam(SmartContract):\n    min_amount: int\n\n    def __init__(self, min_amount: int):\n        super().__init__(min_amount)\n        self.min_amount = min_amount\n\n    @public\n    def spend(self, x: ByteString):\n        assert_(extract_amount(x) >= self.min_amount)\n",
+      "error": "extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified"
     }
   ],
   "accept": [
@@ -288,6 +348,21 @@
       "name": "java-assert-that",
       "file": "Pc.runar.java",
       "src": "import runar.lang.SmartContract;\nimport runar.lang.annotations.Public;\nimport runar.lang.annotations.Readonly;\nimport runar.lang.types.ByteString;\nimport runar.lang.types.SigHashPreimage;\n\nimport static runar.lang.Builtins.assertThat;\nimport static runar.lang.Builtins.checkPreimage;\nimport static runar.lang.Builtins.extractOutputHash;\nimport static runar.lang.Builtins.hash256;\n\nclass PcJavaAssertThat extends SmartContract {\n\n    @Readonly ByteString payload;\n\n    PcJavaAssertThat(ByteString payload) {\n        super(payload);\n        this.payload = payload;\n    }\n\n    @Public\n    void spend(SigHashPreimage txPreimage) {\n        assertThat(checkPreimage(txPreimage));\n        assertThat(hash256(this.payload).equals(extractOutputHash(txPreimage)));\n    }\n}\n"
+    },
+    {
+      "name": "extractor-helper-checked-arg",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcHelperExtract extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage) {\n    this.atLeast(txPreimage, this.minAmount);\n    assert(checkPreimage(txPreimage));\n  }\n\n  private atLeast(p: SigHashPreimage, min: bigint): void {\n    this.inner(p, min);\n  }\n\n  private inner(q: SigHashPreimage, min: bigint): void {\n    assert(extractAmount(q) >= min);\n  }\n}\n"
+    },
+    {
+      "name": "extractor-alias-of-checked",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcAliasExtract extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage) {\n    assert(checkPreimage(txPreimage));\n    const q: SigHashPreimage = txPreimage;\n    assert(extractAmount(q) >= this.minAmount);\n  }\n}\n"
+    },
+    {
+      "name": "extractor-stateful-implicit",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount, extractLocktime, extractOutputHash } from 'runar-lang';\n\nclass PcStatefulImplicit extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump() {\n    assert(extractLocktime(this.txPreimage) >= 0n);\n    assert(this.lt() >= 0n);\n    this.count = this.count + 1n;\n  }\n\n  private lt(): bigint {\n    return extractLocktime(this.txPreimage);\n  }\n}\n"
     }
   ]
 }

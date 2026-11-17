@@ -53,6 +53,7 @@ func TypeCheckWithOptions(contract *ContractNode, opts TypeCheckOptions) *TypeCh
 		checker.checkMethod(method)
 	}
 	checker.errors = append(checker.errors, checkPreimageCheckedOnEveryPath(contract)...)
+	checker.errors = append(checker.errors, checkExtractorsReadCheckedPreimages(contract)...)
 	checker.errors = append(checker.errors, checkGroth16WAStatementBound(contract, opts.Groth16WAStatementPinned)...)
 
 	return &TypeCheckResult{

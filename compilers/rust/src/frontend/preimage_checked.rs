@@ -312,3 +312,205 @@ pub fn check_preimage_checked_on_every_path(contract: &ContractNode) -> Vec<Diag
     }
     errors
 }
+
+// ---------------------------------------------------------------------------
+// D14: a preimage extractor reads only a CHECKED preimage
+// ---------------------------------------------------------------------------
+
+/// The builtins that read a field out of a sighash preimage (argument 1).
+pub const PREIMAGE_EXTRACTORS: &[&str] = &[
+    "extractVersion", "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
+    "extractInputIndex", "extractScriptCode", "extractAmount", "extractSequence",
+    "extractOutputHash", "extractOutputs", "extractLocktime", "extractSigHashType",
+];
+
+/// The diagnostic every tier shares; `func` is the extractor or private method.
+pub fn unchecked_preimage_arg_message(func: &str) -> String {
+    format!(
+        "{}() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter \
+         (one a public method must assert with checkPreimage()) or the implicit txPreimage of a \
+         StatefulSmartContract; any other value is not bound to the spending transaction, so every \
+         field an extractor reads from it is unverified",
+        func
+    )
+}
+
+struct ExtractorCheck<'a> {
+    privates: HashMap<&'a str, &'a MethodNode>,
+    implicit: bool,
+    reassigned: HashSet<String>,
+    ctx_params: HashSet<String>,
+    method: &'a MethodNode,
+    errors: Vec<Diagnostic>,
+}
+
+impl<'a> ExtractorCheck<'a> {
+    fn is_checked(&self, e: &Expression, checked: &HashSet<String>) -> bool {
+        match e {
+            Expression::Identifier { name, .. } => checked.contains(name) && !self.reassigned.contains(name),
+            Expression::PropertyAccess { property, .. } => self.implicit && property == "txPreimage",
+            Expression::MemberExpr { object, property } => {
+                self.implicit
+                    && property == "txPreimage"
+                    && matches!(object.as_ref(), Expression::Identifier { name, .. } if self.ctx_params.contains(name))
+            }
+            _ => false,
+        }
+    }
+
+    fn report(&mut self, func: &str) {
+        self.errors.push(Diagnostic::error(
+            unchecked_preimage_arg_message(func),
+            Some(self.method.source_location.clone()),
+        ));
+    }
+
+    fn visit_expr(&mut self, e: &Expression, checked: &HashSet<String>) {
+        match e {
+            Expression::CallExpr { callee, args, .. } => {
+                let extractor = match callee.as_ref() {
+                    Expression::Identifier { name, .. } if PREIMAGE_EXTRACTORS.contains(&name.as_str()) => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(name) = extractor {
+                    if !args.first().map_or(false, |a| self.is_checked(a, checked)) {
+                        self.report(&name);
+                    }
+                } else {
+                    let target_name = match callee.as_ref() {
+                        Expression::PropertyAccess { property, .. } => Some(property.as_str()),
+                        Expression::MemberExpr { property, .. } => Some(property.as_str()),
+                        Expression::Identifier { name, .. } => Some(name.as_str()),
+                        _ => None,
+                    };
+                    if let Some(target) = target_name.and_then(|n| self.privates.get(n).copied()) {
+                        let bad = target.params.iter().enumerate().any(|(i, p)| {
+                            is_preimage(&p.param_type) && !args.get(i).map_or(false, |a| self.is_checked(a, checked))
+                        });
+                        if bad {
+                            self.report(&target.name);
+                        }
+                    }
+                }
+                self.visit_expr(callee, checked);
+                for a in args {
+                    self.visit_expr(a, checked);
+                }
+            }
+            Expression::BinaryExpr { left, right, .. } => {
+                self.visit_expr(left, checked);
+                self.visit_expr(right, checked);
+            }
+            Expression::UnaryExpr { operand, .. }
+            | Expression::IncrementExpr { operand, .. }
+            | Expression::DecrementExpr { operand, .. } => self.visit_expr(operand, checked),
+            Expression::TernaryExpr { condition, consequent, alternate } => {
+                self.visit_expr(condition, checked);
+                self.visit_expr(consequent, checked);
+                self.visit_expr(alternate, checked);
+            }
+            Expression::MemberExpr { object, .. } => self.visit_expr(object, checked),
+            Expression::IndexAccess { object, index } => {
+                self.visit_expr(object, checked);
+                self.visit_expr(index, checked);
+            }
+            Expression::ArrayLiteral { elements } => {
+                for el in elements {
+                    self.visit_expr(el, checked);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_stmts(&mut self, stmts: &[Statement], checked_in: &HashSet<String>) {
+        let mut checked = checked_in.clone();
+        for st in stmts {
+            match st {
+                Statement::VariableDecl { name, init, .. } => {
+                    self.visit_expr(init, &checked);
+                    if self.is_checked(init, &checked) && !self.reassigned.contains(name) {
+                        checked.insert(name.clone());
+                    } else {
+                        checked.remove(name);
+                    }
+                }
+                Statement::Assignment { target, value, .. } => {
+                    self.visit_expr(target, &checked);
+                    self.visit_expr(value, &checked);
+                }
+                Statement::ExpressionStatement { expression, .. } => self.visit_expr(expression, &checked),
+                Statement::ReturnStatement { value, .. } => {
+                    if let Some(v) = value {
+                        self.visit_expr(v, &checked);
+                    }
+                }
+                Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                    self.visit_expr(condition, &checked);
+                    self.visit_stmts(then_branch, &checked);
+                    if let Some(e) = else_branch {
+                        self.visit_stmts(e, &checked);
+                    }
+                }
+                Statement::ForStatement { init, condition, update, body, .. } => {
+                    let mut lp = checked.clone();
+                    self.visit_stmts(std::slice::from_ref(init.as_ref()), &lp);
+                    if let Statement::VariableDecl { name, .. } = init.as_ref() {
+                        lp.remove(name);
+                    }
+                    self.visit_expr(condition, &lp);
+                    self.visit_stmts(std::slice::from_ref(update.as_ref()), &lp);
+                    self.visit_stmts(body, &lp);
+                }
+            }
+        }
+    }
+}
+
+/// D14 (spec/type-system.md 4.3): a provenance rule on top of GK-GAP-010 (the
+/// subtype rules let any ByteString stand where a SigHashPreimage is expected,
+/// so typing the extractor's parameter proves nothing). Inside a method a
+/// "checked preimage" is a SigHashPreimage parameter of that method (a public
+/// method's is asserted on every path by `check_preimage_checked_on_every_path`;
+/// a private method's is covered by the call-site rule), a local declared from
+/// one (GK-010's alias rule), or, in a StatefulSmartContract, the implicit
+/// txPreimage (`this.txPreimage` / `ctx.txPreimage`). A name assigned anywhere
+/// in the method never counts, and nothing in a constructor does. Every
+/// extractor's argument, and every argument passed to a private method's
+/// SigHashPreimage parameter, must be a checked preimage.
+pub fn check_extractors_read_checked_preimages(contract: &ContractNode) -> Vec<Diagnostic> {
+    let privates: HashMap<&str, &MethodNode> = contract
+        .methods
+        .iter()
+        .filter(|m| m.visibility != Visibility::Public)
+        .map(|m| (m.name.as_str(), m))
+        .collect();
+    let implicit = contract.parent_class == "StatefulSmartContract"
+        && !contract.properties.iter().any(|p| p.name == "txPreimage");
+    let mut errors = Vec::new();
+    for m in &contract.methods {
+        let mut reassigned = HashSet::new();
+        collect_reassigned(&m.body, &mut reassigned);
+        let ctx_params = m
+            .params
+            .iter()
+            .filter(|p| matches!(&p.param_type, TypeNode::Custom(n) if n == "StatefulContext"))
+            .map(|p| p.name.clone())
+            .collect();
+        let initial: HashSet<String> =
+            m.params.iter().filter(|p| is_preimage(&p.param_type)).map(|p| p.name.clone()).collect();
+        let mut c = ExtractorCheck {
+            privates: privates.clone(),
+            implicit,
+            reassigned,
+            ctx_params,
+            method: m,
+            errors: Vec::new(),
+        };
+        c.visit_stmts(&m.body, &initial);
+        errors.extend(c.errors);
+    }
+    errors
+}

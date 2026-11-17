@@ -189,6 +189,40 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
         });
       }
     }
+
+    // D14: an extractor (or a private method's SigHashPreimage parameter)
+    // must be handed a checked preimage, never a ByteString or a laundered
+    // value; one shared diagnostic, pinned here literally.
+    const UNCHECKED_ARG = (fn: string): string =>
+      `${fn}() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter ` +
+      '(one a public method must assert with checkPreimage()) or the implicit txPreimage of a ' +
+      'StatefulSmartContract; any other value is not bound to the spending transaction, so every ' +
+      'field an extractor reads from it is unverified';
+    it('every extractor corpus refusal carries the pinned diagnostic', () => {
+      const ext = data.refuse.filter((c) => c.name.startsWith('extractor-'));
+      expect(ext.length).toBeGreaterThanOrEqual(10);
+      for (const c of ext) {
+        const fn = /^(\w+)\(\) needs/.exec(c.error)?.[1] ?? '';
+        expect(c.error, c.name).toBe(UNCHECKED_ARG(fn));
+      }
+    });
+    for (const [extFixture, fn] of [
+      ['N533-ts-extractor-bytestring-param.runar.ts', 'extractAmount'],
+      ['N534-ts-extractor-bytestring-property.runar.ts', 'extractLocktime'],
+      ['N535-ts-extractor-laundered-local.runar.ts', 'extractAmount'],
+    ] as const) {
+      const extHeader = readFileSync(join(__dirname, extFixture), 'utf8');
+      it(`${extFixture} documents the pinned diagnostic`, () => {
+        expect(extHeader.replace(/\n(\/\/|#) +/g, ' ')).toContain(UNCHECKED_ARG(fn));
+      });
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${extFixture} with the pinned diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(extFixture, extHeader));
+          expect(status, `${tier.id} accepted ${extFixture} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(UNCHECKED_ARG(fn));
+        });
+      }
+    }
   });
 
   describe('D10: a stateless Rust-DSL contract cannot declare tx_preimage', () => {

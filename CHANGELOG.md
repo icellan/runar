@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Checked preimage extractor arguments, IR-loader preimage properties, SDK `sha256Compress` (PR G)
 
+- **All seven compilers — breaking:** a preimage extractor (`extractVersion`, `extractHashPrevouts`,
+  `extractHashSequence`, `extractOutpoint`, `extractInputIndex`, `extractScriptCode`,
+  `extractAmount`, `extractSequence`, `extractOutputHash`, `extractOutputs`, `extractLocktime`,
+  `extractSigHashType`) reads only a checked preimage: its argument, and every argument passed to
+  a private method's `SigHashPreimage` parameter, must be a `SigHashPreimage` parameter (which
+  GK-GAP-010 forces through `assert(checkPreimage(...))`), a local declared from one, or the
+  implicit `txPreimage` of a `StatefulSmartContract`. A `ByteString` parameter or property, a
+  laundering local, a helper's return value or a ternary used to compile with the value never
+  checked against the transaction; it is now a type error (`<fn>() needs a checked
+  SigHashPreimage: ...`, spec/type-system.md 4.3).
 - **SDK ANF interpreters (TS, Go, Rust, Python, Zig, Ruby, Java):** `sha256Compress` is computed
   as the compiled script computes it (one SHA-256 block compression; it returned nil / None /
   undefined in five SDKs and was refused in TS and Java), and refused for a state that is not 32

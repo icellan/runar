@@ -75,6 +75,7 @@ def type_check(contract: ContractNode) -> TypeCheckResult:
     for method in contract.methods:
         checker.check_method(method)
     checker.errors.extend(check_preimage_checked_on_every_path(contract))
+    checker.errors.extend(check_extractors_read_checked_preimages(contract))
 
     return TypeCheckResult(contract=contract, errors=checker.errors)
 
@@ -287,6 +288,159 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
                     severity=Severity.ERROR,
                     loc=m.source_location,
                 ))
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# D14: a preimage extractor reads only a CHECKED preimage
+# ---------------------------------------------------------------------------
+
+# The builtins that read a field out of a sighash preimage (argument 1).
+PREIMAGE_EXTRACTORS = frozenset({
+    "extractVersion", "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
+    "extractInputIndex", "extractScriptCode", "extractAmount", "extractSequence",
+    "extractOutputHash", "extractOutputs", "extractLocktime", "extractSigHashType",
+})
+
+
+def unchecked_preimage_arg_message(fn: str) -> str:
+    """The diagnostic every tier shares; ``fn`` is the extractor or private method."""
+    return (
+        f"{fn}() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter "
+        "(one a public method must assert with checkPreimage()) or the implicit txPreimage of a "
+        "StatefulSmartContract; any other value is not bound to the spending transaction, so every "
+        "field an extractor reads from it is unverified"
+    )
+
+
+def _collect_reassigned_names(stmts: list[Statement] | None) -> set[str]:
+    out: set[str] = set()
+    for st in stmts or []:
+        if isinstance(st, AssignmentStmt) and isinstance(st.target, Identifier):
+            out.add(st.target.name)
+        elif isinstance(st, IfStmt):
+            out |= _collect_reassigned_names(st.then) | _collect_reassigned_names(st.else_ or [])
+        elif isinstance(st, ForStmt):
+            out |= _collect_reassigned_names(st.body)
+    return out
+
+
+def check_extractors_read_checked_preimages(contract: ContractNode) -> list[Diagnostic]:
+    """D14 (spec/type-system.md 4.3): a provenance rule on top of GK-GAP-010
+    (the subtype rules let any ByteString stand where a SigHashPreimage is
+    expected, so typing the extractor's parameter proves nothing). Inside a
+    method a "checked preimage" is a SigHashPreimage parameter of that method
+    (a public method's is asserted on every path by
+    check_preimage_checked_on_every_path; a private method's is covered by the
+    call-site rule), a local declared from one (GK-010's alias rule), or, in a
+    StatefulSmartContract, the implicit txPreimage (``this.txPreimage`` /
+    ``ctx.txPreimage``). A name assigned anywhere in the method never counts,
+    and nothing in a constructor does. Every extractor's argument, and every
+    argument passed to a private method's SigHashPreimage parameter, must be a
+    checked preimage."""
+    privates = {m.name: m for m in contract.methods if m.visibility != "public"}
+    implicit = contract.parent_class == "StatefulSmartContract" and not any(
+        p.name == "txPreimage" for p in contract.properties
+    )
+    errors: list[Diagnostic] = []
+
+    for m in contract.methods:
+        reassigned = _collect_reassigned_names(m.body)
+        ctx_params = {
+            p.name for p in m.params
+            if isinstance(p.type, CustomType) and p.type.name == "StatefulContext"
+        }
+
+        def is_checked(e: Expression | None, checked: set[str]) -> bool:
+            if isinstance(e, Identifier):
+                return e.name in checked and e.name not in reassigned
+            if not implicit:
+                return False
+            if isinstance(e, PropertyAccessExpr):
+                return e.property == "txPreimage"
+            return (
+                isinstance(e, MemberExpr) and e.property == "txPreimage"
+                and isinstance(e.object, Identifier) and e.object.name in ctx_params
+            )
+
+        def report(fn: str) -> None:
+            errors.append(Diagnostic(
+                message=unchecked_preimage_arg_message(fn),
+                severity=Severity.ERROR,
+                loc=m.source_location,
+            ))
+
+        def visit_expr(e: Expression | None, checked: set[str]) -> None:
+            if e is None:
+                return
+            if isinstance(e, CallExpr):
+                callee = e.callee
+                if isinstance(callee, Identifier) and callee.name in PREIMAGE_EXTRACTORS:
+                    if not e.args or not is_checked(e.args[0], checked):
+                        report(callee.name)
+                else:
+                    target = None
+                    if isinstance(callee, (PropertyAccessExpr, MemberExpr)):
+                        target = privates.get(callee.property)
+                    elif isinstance(callee, Identifier):
+                        target = privates.get(callee.name)
+                    if target is not None and any(
+                        _is_preimage_type(p.type) and (i >= len(e.args) or not is_checked(e.args[i], checked))
+                        for i, p in enumerate(target.params)
+                    ):
+                        report(target.name)
+                visit_expr(callee, checked)
+                for a in e.args:
+                    visit_expr(a, checked)
+            elif isinstance(e, BinaryExpr):
+                visit_expr(e.left, checked)
+                visit_expr(e.right, checked)
+            elif isinstance(e, (UnaryExpr, IncrementExpr, DecrementExpr)):
+                visit_expr(e.operand, checked)
+            elif isinstance(e, TernaryExpr):
+                visit_expr(e.condition, checked)
+                visit_expr(e.consequent, checked)
+                visit_expr(e.alternate, checked)
+            elif isinstance(e, MemberExpr):
+                visit_expr(e.object, checked)
+            elif isinstance(e, IndexAccessExpr):
+                visit_expr(e.object, checked)
+                visit_expr(e.index, checked)
+            elif isinstance(e, ArrayLiteralExpr):
+                for el in e.elements:
+                    visit_expr(el, checked)
+
+        def visit_stmts(stmts: list[Statement] | None, checked_in: set[str]) -> None:
+            checked = set(checked_in)
+            for st in stmts or []:
+                if isinstance(st, VariableDeclStmt):
+                    visit_expr(st.init, checked)
+                    if st.init is not None and is_checked(st.init, checked) and st.name not in reassigned:
+                        checked.add(st.name)
+                    else:
+                        checked.discard(st.name)
+                elif isinstance(st, AssignmentStmt):
+                    visit_expr(st.target, checked)
+                    visit_expr(st.value, checked)
+                elif isinstance(st, ExpressionStmt):
+                    visit_expr(st.expr, checked)
+                elif isinstance(st, ReturnStmt):
+                    visit_expr(st.value, checked)
+                elif isinstance(st, IfStmt):
+                    visit_expr(st.condition, checked)
+                    visit_stmts(st.then, checked)
+                    visit_stmts(st.else_ or [], checked)
+                elif isinstance(st, ForStmt):
+                    loop = set(checked)
+                    if st.init is not None:
+                        visit_expr(st.init.init, loop)
+                        loop.discard(st.init.name)
+                    visit_expr(st.condition, loop)
+                    if st.update is not None:
+                        visit_stmts([st.update], loop)
+                    visit_stmts(st.body, loop)
+
+        visit_stmts(m.body, {p.name for p in m.params if _is_preimage_type(p.type)})
     return errors
 
 

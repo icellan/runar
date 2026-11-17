@@ -418,6 +418,40 @@ preimage reaches an extractor through them:
   validator like every `FixedArray` method parameter (each tier words that
   diagnostic itself).
 
+**Extractors read only a checked preimage (D14).** `ByteString` and
+`SigHashPreimage` are mutually assignable, so the declared type of an
+extractor's argument proves nothing: `spend(x: ByteString) {
+assert(extractAmount(x) >= this.n) }` used to compile in every tier with `x`
+never checked against the transaction. The rule is therefore on provenance,
+not type. Inside a method, a *checked preimage* is:
+
+- a `SigHashPreimage` parameter of that method (a public method's is checked
+  on every path by the rule above; a private method's by the call-site rule
+  below);
+- a local declared from a checked preimage and never assigned
+  (`const q = p`), exactly as the rule above treats aliases;
+- in a `StatefulSmartContract`, the implicit `txPreimage` (`this.txPreimage`,
+  `ctx.txPreimage`), whose `checkPreimage` the compiler injects.
+
+Nothing in a constructor counts. The argument of every preimage extractor
+(`extractVersion`, `extractHashPrevouts`, `extractHashSequence`,
+`extractOutpoint`, `extractInputIndex`, `extractScriptCode`, `extractAmount`,
+`extractSequence`, `extractOutputHash`, `extractOutputs`, `extractLocktime`,
+`extractSigHashType`), and every argument passed to a private method's
+`SigHashPreimage` parameter, must be a checked preimage. Anything else is a
+type error: a `ByteString` parameter or property (even one passed to
+`checkPreimage`), a laundering local (`const p: SigHashPreimage = x`), a
+helper's return value, a ternary. The diagnostic names the extractor or the
+private method:
+
+```
+extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified
+```
+
+`extractPrevOutputScript(index, script)` is not a preimage extractor: it takes
+an input index and a script, and checks the script against the implicit
+`txPreimage` itself.
+
 ### 4.4 Practical Impact
 
 ```typescript

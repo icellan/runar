@@ -141,11 +141,13 @@ def test_source_reading_an_undeclared_property_is_refused(prop: str, tmp_path) -
 
     path = tmp_path / "Ghost.runar.ts"
     path.write_text(
-        "import { SmartContract, assert, extractAmount } from 'runar-lang';\n\n"
+        "import { SmartContract, assert, len } from 'runar-lang';\n\n"
         "class Ghost extends SmartContract {\n"
         "  constructor() {\n    super();\n  }\n\n"
         "  public spend(x: bigint) {\n"
-        f"    assert(extractAmount(this.{prop}) >= x);\n"
+        # D14: an extractor would now refuse the undeclared property at
+        # typecheck; len() reaches the stack-lowering guard this pins.
+        f"    assert(len(this.{prop}) >= x);\n"
         "  }\n}\n"
     )
     # Stack-lowering refusals surface as RuntimeError (the CLI reports them as
