@@ -242,7 +242,7 @@ All domain types (`PubKey`, `Sig`, `Point`, etc.) are representational subtypes 
 **The sizes in the table ARE enforced on-chain where a value enters the script from outside:**
 
 - **Public-method parameters.** Every `Point` (64), `P256Point` (64), `P384Point` (96), `Sha256` (32), `Ripemd160` (20) and `Addr` (20) parameter is width-checked at method entry (`OP_SIZE <width> OP_NUMEQUALVERIFY` on a copy), so an oversized argument aborts the script instead of carrying extra bytes into an output it is spliced into (#180). This includes the compiler-injected `_changePKH` of a stateful method (#213).
-- **`PubKey` parameters** get the same 33-byte check UNLESS every use of the key, including inside private helpers it is passed to, is an argument of `checkSig`, `checkMultiSig` or `hash160`. That keeps a plain P2PKH on its standard template; a `PubKey` that is concatenated, compared, written to state or put in an output is checked.
+- **`PubKey` parameters** get the same 33-byte check UNLESS every use of the key, including inside private helpers it is passed to, is an argument of `checkSig`, `checkMultiSig` or `hash160`. That keeps a plain P2PKH on its standard template; a `PubKey` that is concatenated, compared, written to state or put in an output is checked. The rule is conservative: a key returned from a ternary/`if` arm or a private helper (`checkSig(sig, pick ? a : b)`) is also checked, even though it only reaches `checkSig`; write `pick ? checkSig(sig, a) : checkSig(sig, b)` to keep it unchecked.
 - **`Sig` parameters are never checked** (DER signatures are variable-width).
 - **Mutable state fields** of a fixed-width type are width-checked before every continuation write (N-045).
 

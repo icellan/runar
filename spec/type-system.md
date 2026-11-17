@@ -133,6 +133,16 @@ Two exceptions:
   standard `OP_DUP OP_HASH160 <pkh> OP_EQUALVERIFY OP_CHECKSIG` template. Any other
   use (`cat`, a comparison, an output, a state write, another built-in) makes the
   parameter gated at exactly 33 bytes. An unused `PubKey` parameter is not gated.
+
+  The analysis is deliberately conservative (fail closed), so it gates some keys
+  that only ever reach a signature check:
+  - a key that leaves a body as its VALUE -- the result of an `if`/ternary arm
+    (`pick ? a : b`), or a private helper's return value (`return k`) -- counts as
+    another use, even if the selected value then only reaches `checkSig`;
+  - a key reached through a local that branch merges re-bind into an alias cycle
+    counts as another use.
+  Pass the key to `checkSig` directly (`pick ? checkSig(sig, a) : checkSig(sig, b)`)
+  to keep it ungated.
 - **`Sig` is never gated.** A DER signature is variable-width (and the empty
   signature is a valid "no" vote under NULLFAIL).
 
