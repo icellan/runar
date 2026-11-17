@@ -908,6 +908,12 @@ pub const PreparedCall = struct {
     /// Empty when the method has no auto-injected intent params. The
     /// stateful unlock script reuses this verbatim at finalize time.
     intent_witness_hex: []u8 = &.{},
+    /// The contract's state before prepareCall advanced it (restored when
+    /// finalizeCall fails) and the post-call state it advanced to (re-applied
+    /// when a retried finalizeCall of the same PreparedCall succeeds). Owned;
+    /// finalizeCall moves one of them into the contract.
+    state_before: ?[]StateValue = null,
+    state_after: ?[]StateValue = null,
 
     pub fn deinit(self: *PreparedCall, allocator: std.mem.Allocator) void {
         allocator.free(self.tx_hex);
@@ -924,6 +930,12 @@ pub const PreparedCall = struct {
         if (self.method_selector.len > 0) allocator.free(self.method_selector);
         if (self.change_pkh.len > 0) allocator.free(self.change_pkh);
         if (self.intent_witness_hex.len > 0) allocator.free(self.intent_witness_hex);
+        inline for (.{ self.state_before, self.state_after }) |opt| {
+            if (opt) |vals| {
+                for (vals) |v| v.deinit(allocator);
+                allocator.free(vals);
+            }
+        }
         self.* = .{
             .tx_hex = &.{},
             .sighashes = &.{},

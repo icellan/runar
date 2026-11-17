@@ -57,6 +57,12 @@ public final class PreparedCall {
      * {@code null} on the legacy stateless and terminal paths.
      */
     final RunarContract.PushTxLayout pushTx;
+    /**
+     * The contract's local state before prepareCall advanced it to
+     * {@link #continuation}; finalizeCall restores it when the broadcast
+     * fails. {@code null} on paths that do not advance the state.
+     */
+    final Map<String, Object> stateBefore;
 
     PreparedCall(
         String txHex,
@@ -105,6 +111,25 @@ public final class PreparedCall {
         String intentWitnessHex,
         RunarContract.PushTxLayout pushTx
     ) {
+        this(txHex, sighashes, sigIndices, methodName, resolvedArgs, contractUtxo,
+             isStateful, continuation, newLockingScriptHex, newSatoshis, intentWitnessHex, pushTx, null);
+    }
+
+    PreparedCall(
+        String txHex,
+        List<byte[]> sighashes,
+        List<Integer> sigIndices,
+        String methodName,
+        List<Object> resolvedArgs,
+        UTXO contractUtxo,
+        boolean isStateful,
+        Map<String, Object> continuation,
+        String newLockingScriptHex,
+        long newSatoshis,
+        String intentWitnessHex,
+        RunarContract.PushTxLayout pushTx,
+        Map<String, Object> stateBefore
+    ) {
         this.txHex = txHex;
         // Deep-copy each sighash array so callers cannot mutate the
         // stored digest by poking at the returned reference.
@@ -123,6 +148,9 @@ public final class PreparedCall {
         this.newSatoshis = newSatoshis;
         this.intentWitnessHex = intentWitnessHex == null ? "" : intentWitnessHex;
         this.pushTx = pushTx;
+        this.stateBefore = stateBefore == null
+            ? null
+            : Collections.unmodifiableMap(new java.util.LinkedHashMap<>(stateBefore));
     }
 
     /** Tx hex with 72-byte zero-filled placeholders at every Sig slot. */

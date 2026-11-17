@@ -732,6 +732,19 @@ pub const RunarContract = struct {
         if (self.current_utxo == null) return ContractError.NotDeployed;
         const contract_utxo = self.current_utxo.?;
 
+        // The state this call starts from. call() advances self.state to the
+        // post-call state before anything is broadcast; when the call fails
+        // (the node refuses it, or it is never sent) the chain is still at
+        // this state, so the local state must be too. Before this, a refused
+        // call left the state advanced and the next call was built from a
+        // state the chain never reached.
+        var state_before: ?[]types.StateValue = try self.getState();
+        defer if (state_before) |sb| freeStateValues(self.allocator, sb);
+        errdefer {
+            self.adoptState(state_before.?);
+            state_before = null;
+        }
+
         // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
         {
             var ctx_buf: [256]u8 = undefined;
@@ -2402,6 +2415,15 @@ pub const RunarContract = struct {
         }
 
         // ---- Apply explicit new_state (no ANF auto-compute in prepare) ---
+        // The state this call starts from: restored here if prepare fails
+        // after applying new_state, otherwise handed to the PreparedCall so
+        // finalizeCall can restore it when the broadcast fails.
+        var state_before: ?[]types.StateValue = try self.getState();
+        defer if (state_before) |sb| freeStateValues(self.allocator, sb);
+        errdefer {
+            self.adoptState(state_before.?);
+            state_before = null;
+        }
         var new_satoshis: i64 = contract_utxo.satoshis;
         if (options) |o| {
             if (o.satoshis > 0) new_satoshis = o.satoshis;
@@ -2685,6 +2707,9 @@ pub const RunarContract = struct {
         // has no op_push_tx_sig field to carry it to) -- don't dupe/own it.
         const preimage_owned = try self.allocator.dupe(u8, ptx_result.preimage_hex);
         const intent_witness_owned = try self.allocator.dupe(u8, witness_hex);
+        const state_after = try self.getState();
+        const moved_state_before = state_before;
+        state_before = null;
 
         return types.PreparedCall{
             .tx_hex = signed_tx,
@@ -2705,6 +2730,8 @@ pub const RunarContract = struct {
             .needs_new_amount = needs_new_amount,
             .code_sep_idx = code_sep_idx,
             .intent_witness_hex = intent_witness_owned,
+            .state_before = moved_state_before,
+            .state_after = state_after,
         };
     }
 
@@ -2824,6 +2851,20 @@ pub const RunarContract = struct {
         signatures: []const []const u8,
         prov_arg: ?provider_mod.Provider,
     ) ![]u8 {
+        // Only a PreparedCall that still spends the tracked UTXO owns the
+        // state: a repeat of one that was already committed must not touch it.
+        const owns_state = if (self.current_utxo) |u|
+            std.mem.eql(u8, u.txid, prepared.contract_utxo.txid) and u.output_index == prepared.contract_utxo.output_index
+        else
+            false;
+        // Nothing was broadcast (or the node refused it): the chain is still
+        // at the state this call started from, so the local state must be too.
+        errdefer if (owns_state) {
+            if (prepared.state_before) |sb| {
+                self.adoptState(sb);
+                prepared.state_before = null;
+            }
+        };
         const prov = prov_arg orelse self.provider orelse return ContractError.NoProviderOrSigner;
 
         if (signatures.len != prepared.sig_indices.len) {
@@ -2898,7 +2939,23 @@ pub const RunarContract = struct {
             self.current_utxo = null;
         }
 
+        // A retry of a PreparedCall whose first finalize failed must commit
+        // the post-call state the transaction carries.
+        if (owns_state) {
+            if (prepared.state_after) |sa| {
+                self.adoptState(sa);
+                prepared.state_after = null;
+            }
+        }
+
         return txid;
+    }
+
+    /// Replace `self.state` with `vals`, taking ownership of it.
+    fn adoptState(self: *RunarContract, vals: []types.StateValue) void {
+        for (self.state) |*s| s.deinit(self.allocator);
+        if (self.state.len > 0) self.allocator.free(self.state);
+        self.state = vals;
     }
 
     /// Build the full stateful unlocking script:
@@ -4416,6 +4473,12 @@ fn writeVarIntHex(allocator: std.mem.Allocator, n: usize) ![]u8 {
         return allocator.dupe(u8, &buf);
     }
     return error.OutOfMemory;
+}
+
+/// Free a state slice returned by `RunarContract.getState`.
+fn freeStateValues(allocator: std.mem.Allocator, vals: []types.StateValue) void {
+    for (vals) |v| v.deinit(allocator);
+    allocator.free(vals);
 }
 
 fn hexByteAt(hex: []const u8, pos: usize) usize {

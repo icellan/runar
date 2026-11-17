@@ -355,6 +355,11 @@ class PreparedCall:
     # `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
     # Empty when the method has no auto-injected intent params.
     intent_witness_hex: str = ''
+    # The local state before prepare_call advanced it (restored when
+    # finalize_call fails) and the post-call state it advanced to (re-applied
+    # when a retried finalize_call of the same PreparedCall succeeds).
+    state_before: dict | None = None
+    state_after: dict | None = None
 
 
 # SdkValue is the union of types that can be passed as contract arguments
