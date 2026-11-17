@@ -1,0 +1,37 @@
+{
+  "fixture": "schnorr-zkp",
+  "kind": "stateless-signed",
+  "note": "SchnorrZKP verify(rPoint, s) on a real @bsv/sdk Spend. No signature: the witness is a Schnorr proof of knowledge of k for pubKey = k*G, built from textbook secp256k1 affine arithmetic and node's SHA-256 (k = 42, nonce r = 12345, e = bin2num(hash256(R || P)), s = r + e*k mod n), never from the code under test; the same proof GK-BUG-011's Spend test (packages/runar-testing/src/__tests__/gk-bug-011-schnorr-zkp-identity-pubkey.test.ts) builds. Moved here from coverage-ledger.json, where it sat as crypto-witness-infeasible (with a stale 872,367-byte size; the fold-OFF golden is 874,974 bytes): the witness is synthesisable and the script runs in seconds.",
+  "constructorArgs": {
+    "pubKey": "fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af07b158f244cd0de2134ac7c1d371cffbfae4db40801a2572e531c573cda9b5b4"
+  },
+  "spends": [
+    {
+      "method": "verify",
+      "args": [
+        "f01d6b9018ab421dd410404cb869072065522bf85734008f105cf385a023a80f0eba29d0f0c5408ed681984dc525982abefccd9f7ff01dd26da4999cf3f6a295",
+        "43386750954642185652236842325076917800976361289031517044620806235588575288301n"
+      ],
+      "expect": "accept",
+      "note": "Honest proof: s*G == R + e*P."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "f01d6b9018ab421dd410404cb869072065522bf85734008f105cf385a023a80f0eba29d0f0c5408ed681984dc525982abefccd9f7ff01dd26da4999cf3f6a295",
+        "43386750954642185652236842325076917800976361289031517044620806235588575288302n"
+      ],
+      "expect": "reject",
+      "note": "Near-miss: s + 1 with the honest R; s*G != R + e*P."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "89b6bd7a7c385383ff466db721729e2f4ab4c650bb72e2dedfafd6ff61277a55d41d649f1e83a1cccf4cb4fd7a0ab817100f56604e2ab5e065807f8df09001e7",
+        "43386750954642185652236842325076917800976361289031517044620806235588575288301n"
+      ],
+      "expect": "reject",
+      "note": "Near-miss: the honest s against the commitment of nonce r + 1; the challenge e changes with R and the equation fails."
+    }
+  ]
+}
