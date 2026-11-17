@@ -133,25 +133,34 @@ const Rules = struct {
     a: Allocator,
     methods: []const types.ANFMethod,
     implicit_tx: bool,
-    memo: std.StringHashMapUnmanaged(StringSet) = .empty,
+    /// Keyed by method index, never by name.
+    memo: std.AutoHashMapUnmanaged(usize, StringSet) = .empty,
 
-    fn find(self: *const Rules, name: []const u8) ?types.ANFMethod {
-        for (self.methods) |m| if (eql(m.name, name)) return m;
+    /// The method a `method_call` inlines, resolved exactly as stack lowering
+    /// does (passes/stack_lower.zig findPrivateMethod: the FIRST non-public,
+    /// non-constructor method of that name). The loader refuses duplicate
+    /// names first; this never relies on that alone.
+    fn findPrivate(self: *const Rules, name: []const u8) ?usize {
+        for (self.methods, 0..) |m, i| {
+            if (m.is_public or eql(m.name, "constructor")) continue;
+            if (eql(m.name, name)) return i;
+        }
         return null;
     }
 
-    fn mustChecked(self: *Rules, m: types.ANFMethod, stack: *StringSet) Allocator.Error!StringSet {
-        if (self.memo.get(m.name)) |r| return r;
-        if (stack.contains(m.name)) return .empty;
-        try stack.put(self.a, m.name, {});
-        defer _ = stack.remove(m.name);
+    fn mustChecked(self: *Rules, idx: usize, stack: *std.AutoHashMapUnmanaged(usize, void)) Allocator.Error!StringSet {
+        if (self.memo.get(idx)) |r| return r;
+        if (stack.contains(idx)) return .empty;
+        try stack.put(self.a, idx, {});
+        defer _ = stack.remove(idx);
+        const m = self.methods[idx];
         const mv = try View.init(self.a, m, self.implicit_tx);
         const result = try self.walk(&mv, m.body, .empty, stack);
-        try self.memo.put(self.a, m.name, result);
+        try self.memo.put(self.a, idx, result);
         return result;
     }
 
-    fn walk(self: *Rules, mv: *const View, bs: []const types.ANFBinding, done_in: StringSet, stack: *StringSet) Allocator.Error!StringSet {
+    fn walk(self: *Rules, mv: *const View, bs: []const types.ANFBinding, done_in: StringSet, stack: *std.AutoHashMapUnmanaged(usize, void)) Allocator.Error!StringSet {
         var done = try done_in.clone(self.a);
         for (bs) |b| switch (b.value) {
             .assert => |as| {
@@ -170,9 +179,9 @@ const Rules = struct {
                 done = next;
             },
             .method_call => |mc| {
-                const target = self.find(mc.method) orelse continue;
-                if (target.is_public) continue;
-                const checked = try self.mustChecked(target, stack);
+                const ti = self.findPrivate(mc.method) orelse continue;
+                const target = self.methods[ti];
+                const checked = try self.mustChecked(ti, stack);
                 for (target.params, 0..) |p, i| {
                     if (!checked.contains(p.name) or i >= mc.args.len) continue;
                     if (mv.resolve(mc.args[i])) |o| try done.put(self.a, o, {});
@@ -194,8 +203,7 @@ const Rules = struct {
                 }
             },
             .method_call => |mc| {
-                const target = self.find(mc.method) orelse continue;
-                if (target.is_public) continue;
+                const target = self.methods[self.findPrivate(mc.method) orelse continue];
                 for (target.params, 0..) |p, i| {
                     if (!eql(p.type_name, SHP)) continue;
                     const arg: ?[]const u8 = if (i < mc.args.len) mc.args[i] else null;
@@ -237,16 +245,30 @@ pub fn check(allocator: Allocator, properties: []const types.ANFProperty, method
     var declared = false;
     for (properties) |p| declared = declared or eql(p.name, "txPreimage");
     var rules: Rules = .{ .a = a, .methods = methods, .implicit_tx = publics > 0 and all_have_tx and !declared };
-    for (methods) |m| {
+    for (methods, 0..) |m, mi| {
         if (eql(m.name, "constructor")) continue;
         const mv = try View.init(a, m, rules.implicit_tx);
         if (rules.visit(&mv, m.body)) return error.PreimageRuleViolation;
         if (!m.is_public) continue;
-        var stack: StringSet = .empty;
-        const done = try rules.mustChecked(m, &stack);
+        var stack: std.AutoHashMapUnmanaged(usize, void) = .empty;
+        const done = try rules.mustChecked(mi, &stack);
         for (m.params) |p| {
             if (eql(p.type_name, SHP) and !done.contains(p.name)) {
                 required_fields.setDiag("IR validation: " ++ typecheck.PREIMAGE_NOT_CHECKED_FMT, .{ m.name, p.name });
+                return error.PreimageRuleViolation;
+            }
+        }
+    }
+}
+
+/// GK-BUG-015's shared text on the IR path: a repeated method name, refused
+/// before anything looks a method up by name (the source validator refuses
+/// it; --ir did not, so two bodies could share a name).
+pub fn checkUniqueMethodNames(methods: []const types.ANFMethod) error{PreimageRuleViolation}!void {
+    for (methods, 0..) |m, i| {
+        for (methods[0..i]) |prev| {
+            if (eql(prev.name, m.name)) {
+                required_fields.setDiag("IR validation: method '{s}' is already declared in this contract and cannot be re-declared", .{m.name});
                 return error.PreimageRuleViolation;
             }
         }

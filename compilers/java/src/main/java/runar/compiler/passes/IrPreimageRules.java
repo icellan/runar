@@ -142,23 +142,26 @@ public final class IrPreimageRules {
         }
     }
 
-    private final Map<String, AnfMethod> methods = new HashMap<>();
-    private final Map<String, Set<String>> memo = new HashMap<>();
+    /** A method_call target, resolved as {@link StackLower#privateMethodMap} does. */
+    private Map<String, AnfMethod> privates = new HashMap<>();
+    /** Keyed by method identity, never by name. */
+    private final Map<AnfMethod, Set<String>> memo = new java.util.IdentityHashMap<>();
     private boolean implicitTx;
 
-    private Set<String> mustChecked(AnfMethod m, Set<String> stack) {
-        Set<String> cached = memo.get(m.name());
+    private Set<String> mustChecked(AnfMethod m, Set<AnfMethod> stack) {
+        Set<String> cached = memo.get(m);
         if (cached != null) return cached;
-        if (stack.contains(m.name())) return new HashSet<>();
+        if (stack.contains(m)) return new HashSet<>();
         View mv = new View(m, implicitTx);
-        Set<String> inner = new HashSet<>(stack);
-        inner.add(m.name());
+        Set<AnfMethod> inner = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        inner.addAll(stack);
+        inner.add(m);
         Set<String> result = walk(mv, m.body(), new HashSet<>(), inner);
-        memo.put(m.name(), result);
+        memo.put(m, result);
         return result;
     }
 
-    private Set<String> walk(View mv, List<AnfBinding> bs, Set<String> doneIn, Set<String> inner) {
+    private Set<String> walk(View mv, List<AnfBinding> bs, Set<String> doneIn, Set<AnfMethod> inner) {
         Set<String> done = new HashSet<>(doneIn);
         for (AnfBinding b : orEmpty(bs)) {
             AnfValue v = b.value();
@@ -171,8 +174,8 @@ public final class IrPreimageRules {
                 t.retainAll(e);
                 done = t;
             } else if (v instanceof MethodCall mc) {
-                AnfMethod target = methods.get(mc.method());
-                if (target != null && !target.isPublic()) {
+                AnfMethod target = privates.get(mc.method());
+                if (target != null) {
                     Set<String> checked = mustChecked(target, inner);
                     List<String> args = mc.args() == null ? List.of() : mc.args();
                     for (int i = 0; i < target.params().size() && i < args.size(); i++) {
@@ -195,8 +198,8 @@ public final class IrPreimageRules {
                     errors.add(ExtractorPreimage.message(c.func()));
                 }
             } else if (v instanceof MethodCall mc) {
-                AnfMethod target = methods.get(mc.method());
-                if (target != null && !target.isPublic()) {
+                AnfMethod target = privates.get(mc.method());
+                if (target != null) {
                     List<String> args = mc.args() == null ? List.of() : mc.args();
                     for (int i = 0; i < target.params().size(); i++) {
                         if (!SHP.equals(target.params().get(i).type())) continue;
@@ -224,8 +227,13 @@ public final class IrPreimageRules {
         IrPreimageRules r = new IrPreimageRules();
         int publics = 0;
         boolean allHaveTx = true;
+        // As stack lowering inlines a method_call: the LAST non-public,
+        // non-constructor method of that name. The loader refuses duplicate
+        // names first; this never relies on that alone.
         for (AnfMethod m : methodList) {
-            r.methods.put(m.name(), m);
+            if (!m.isPublic() && !"constructor".equals(m.name())) r.privates.put(m.name(), m);
+        }
+        for (AnfMethod m : methodList) {
             if (!m.isPublic() || "constructor".equals(m.name())) continue;
             publics++;
             boolean has = false;
@@ -244,7 +252,7 @@ public final class IrPreimageRules {
             View mv = new View(m, r.implicitTx);
             r.visit(mv, m.body(), errors);
             if (m.isPublic()) {
-                Set<String> done = r.mustChecked(m, new HashSet<>());
+                Set<String> done = r.mustChecked(m, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
                 for (AnfParam p : m.params()) {
                     if (SHP.equals(p.type()) && !done.contains(p.name())) {
                         errors.add(PreimageChecked.message(m.name(), p.name()));
@@ -253,6 +261,21 @@ public final class IrPreimageRules {
             }
         }
         return errors;
+    }
+
+    /**
+     * GK-BUG-015's shared text on the IR path: a repeated method name, refused
+     * before anything looks a method up by name (the source validator refuses
+     * it; {@code --ir} did not, so two bodies could share a name).
+     */
+    public static void checkUniqueMethodNames(List<AnfMethod> methods) {
+        Set<String> seen = new HashSet<>();
+        for (AnfMethod m : methods) {
+            if (!seen.add(m.name())) {
+                throw new RuntimeException("IR validation: method '" + m.name()
+                    + "' is already declared in this contract and cannot be re-declared");
+            }
+        }
     }
 
     public static void check(List<AnfProperty> props, List<AnfMethod> methods) {

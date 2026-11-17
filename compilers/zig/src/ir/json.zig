@@ -489,6 +489,10 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         if (!std.mem.eql(u8, m.name, "constructor")) try checkNoSuperCall(m.body);
     }
 
+    // D15 / GK-BUG-015: a repeated method name, before anything looks a
+    // method up by name.
+    preimage_rules.checkUniqueMethodNames(method_list.items) catch return ParseError.PreimageRuleViolation;
+
     // N-265: a cycle or an acyclic chain past MAX_CALL_DEPTH in the
     // method_call graph. Checked first, same order as Go's F-004
     // checkIRFrontendRules (recursion before parentClass).

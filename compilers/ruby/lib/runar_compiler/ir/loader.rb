@@ -110,6 +110,10 @@ module RunarCompiler
         raise ArgumentError, "decoding constants: #{e.message}"
       end
 
+      # D15 / GK-BUG-015: a repeated method name, before anything looks a
+      # method up by name.
+      PreimageRules.assert_unique_method_names!(program)
+
       errors = validate_ir(program)
       unless errors.empty?
         raise ArgumentError, "IR validation: #{errors[0]}"

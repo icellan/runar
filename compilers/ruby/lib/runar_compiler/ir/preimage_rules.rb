@@ -108,20 +108,24 @@ module RunarCompiler
       def self.errors(program)
         errors = (program.properties || []).select { |p| p.type == SHP }
                                            .map { |p| Frontend.preimage_property_message(p.name) }
-        methods = {}
-        program.methods.each { |m| methods[m.name] = m }
+        # A method_call resolves exactly as stack lowering inlines it: to the
+        # LAST non-public, non-constructor method of that name
+        # (codegen/stack.rb). The loader refuses duplicate names first; this
+        # never relies on that alone.
+        privates = {}
+        program.methods.each { |m| privates[m.name] = m if !m.is_public && m.name != "constructor" }
         publics = program.methods.select { |m| m.is_public && m.name != "constructor" }
         implicit_tx = !publics.empty? &&
                       publics.all? { |m| (m.params || []).any? { |p| p.name == "txPreimage" && p.type == SHP } } &&
                       (program.properties || []).none? { |p| p.name == "txPreimage" }
-        memo = {}
+        memo = {}.compare_by_identity # keyed by method identity, never by name
         must_checked = nil
         must_checked = lambda do |m, stack|
-          return memo[m.name] if memo.key?(m.name)
-          return Set.new if stack.include?(m.name)
+          return memo[m] if memo.key?(m)
+          return Set.new if stack.any? { |s| s.equal?(m) }
 
           mv = View.new(m, implicit_tx)
-          inner = stack | [m.name]
+          inner = stack + [m]
           walk = nil
           walk = lambda do |bindings, done_in|
             done = done_in.dup
@@ -134,8 +138,8 @@ module RunarCompiler
               when "if"
                 done = walk.call(v.then, done) & walk.call(v.else_, done)
               when "method_call"
-                target = methods[v.method]
-                next if target.nil? || target.is_public
+                target = privates[v.method]
+                next if target.nil?
 
                 checked = must_checked.call(target, inner)
                 args = v.args || []
@@ -149,7 +153,7 @@ module RunarCompiler
             end
             done
           end
-          memo[m.name] = walk.call(m.body, Set.new)
+          memo[m] = walk.call(m.body, Set.new)
         end
 
         program.methods.each do |m|
@@ -167,8 +171,8 @@ module RunarCompiler
                   errors << Frontend.unchecked_preimage_arg_message(v.func)
                 end
               when "method_call"
-                target = methods[v.method]
-                if !target.nil? && !target.is_public &&
+                target = privates[v.method]
+                if !target.nil? &&
                    (target.params || []).each_with_index.any? { |p, i| p.type == SHP && mv.resolve(args[i]).nil? }
                   errors << Frontend.unchecked_preimage_arg_message(target.name)
                 end
@@ -189,6 +193,21 @@ module RunarCompiler
           end
         end
         errors
+      end
+
+      # GK-BUG-015's shared text on the IR path: a repeated method name,
+      # refused before anything looks a method up by name (the source
+      # validator refuses it; --ir did not, so two bodies could share a name).
+      def self.assert_unique_method_names!(program)
+        seen = Set.new
+        program.methods.each do |m|
+          if seen.include?(m.name)
+            raise ArgumentError,
+                  "IR validation: method '#{m.name}' is already declared in this contract and cannot be re-declared"
+          end
+
+          seen << m.name
+        end
       end
 
       def self.assert!(program)

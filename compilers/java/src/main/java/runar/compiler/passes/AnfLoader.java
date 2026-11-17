@@ -217,6 +217,9 @@ public final class AnfLoader {
                 throw new RuntimeException(err);
             }
         }
+        // D15 / GK-BUG-015: a repeated method name, before anything looks a
+        // method up by name.
+        IrPreimageRules.checkUniqueMethodNames(methods);
         // N-265: --ir never runs frontend's checkNoRecursion, which enforces
         // both the call-graph cycle rule and N-180's MAX_CALL_DEPTH bound.
         // Stack lowering (StackLower's method_call inlining) inlines every

@@ -102,22 +102,25 @@ class _View:
 
 def preimage_rule_errors(program: ANFProgram) -> list[str]:
     errors = [preimage_property_message(p.name) for p in program.properties if p.type == _SHP]
-    methods = {m.name: m for m in program.methods}
+    # A method_call resolves exactly as stack lowering inlines it: to the LAST
+    # non-public, non-constructor method of that name (codegen/stack.py). The
+    # loader refuses duplicate names first; this never relies on that alone.
+    privates = {m.name: m for m in program.methods if not m.is_public and m.name != "constructor"}
     publics = [m for m in program.methods if m.is_public and m.name != "constructor"]
     implicit_tx = (
         bool(publics)
         and all(any(p.name == "txPreimage" and p.type == _SHP for p in m.params) for m in publics)
         and not any(p.name == "txPreimage" for p in program.properties)
     )
-    memo: dict[str, set[str]] = {}
+    memo: dict[int, set[str]] = {}  # keyed by method identity, never by name
 
-    def must_checked(m: ANFMethod, stack: frozenset[str]) -> set[str]:
-        if m.name in memo:
-            return memo[m.name]
-        if m.name in stack:
+    def must_checked(m: ANFMethod, stack: frozenset[int]) -> set[str]:
+        if id(m) in memo:
+            return memo[id(m)]
+        if id(m) in stack:
             return set()
         mv = _View(m, implicit_tx)
-        inner = stack | {m.name}
+        inner = stack | {id(m)}
 
         def walk(bs: list[ANFBinding] | None, done_in: set[str]) -> set[str]:
             done = set(done_in)
@@ -130,8 +133,8 @@ def preimage_rule_errors(program: ANFProgram) -> list[str]:
                 elif v.kind == "if":
                     done = walk(v.then, done) & walk(v.else_, done)
                 elif v.kind == "method_call":
-                    target = methods.get(v.method or "")
-                    if target is not None and not target.is_public:
+                    target = privates.get(v.method or "")
+                    if target is not None:
                         checked = must_checked(target, inner)
                         args = v.args or []
                         for i, p in enumerate(target.params):
@@ -142,7 +145,7 @@ def preimage_rule_errors(program: ANFProgram) -> list[str]:
             return done
 
         result = walk(m.body, set())
-        memo[m.name] = result
+        memo[id(m)] = result
         return result
 
     for m in program.methods:
@@ -158,8 +161,8 @@ def preimage_rule_errors(program: ANFProgram) -> list[str]:
                     if mv.resolve(args[0] if args else None) is None:
                         errors.append(unchecked_preimage_arg_message(v.func))
                 elif v.kind == "method_call":
-                    target = methods.get(v.method or "")
-                    if target is not None and not target.is_public and any(
+                    target = privates.get(v.method or "")
+                    if target is not None and any(
                         p.type == _SHP and mv.resolve(args[i] if i < len(args) else None) is None
                         for i, p in enumerate(target.params)
                     ):
@@ -184,3 +187,16 @@ def assert_preimage_rules(program: ANFProgram) -> None:
     errors = preimage_rule_errors(program)
     if errors:
         raise ValueError("IR validation: " + "; ".join(errors))
+
+
+def assert_unique_method_names(program: ANFProgram) -> None:
+    """GK-BUG-015's shared text on the IR path: a repeated method name, refused
+    before anything looks a method up by name (the source validator refuses
+    it; ``--ir`` did not, so two bodies could share a name)."""
+    seen: set[str] = set()
+    for m in program.methods:
+        if m.name in seen:
+            raise ValueError(
+                f"IR validation: method '{m.name}' is already declared in this contract and cannot be re-declared"
+            )
+        seen.add(m.name)

@@ -45,6 +45,10 @@ const D14 = (fn: string): string =>
   'StatefulSmartContract; any other value is not bound to the spending transaction, so every ' +
   'field an extractor reads from it is unverified';
 
+/** GK-BUG-015's shared text (duplicate-method-cases.json), now also on the IR path. */
+const DUP = (name: string): string =>
+  `method '${name}' is already declared in this contract and cannot be re-declared`;
+
 type Binding = { name: string; value: Record<string, unknown> };
 type Method = { name: string; params: Array<{ name: string; type: string }>; body: Binding[]; isPublic: boolean };
 type Ir = { properties: Array<Record<string, unknown>>; methods: Method[]; [k: string]: unknown };
@@ -110,7 +114,38 @@ const lowered = (name: string): Ir => {
 };
 const DIRECT = irOf(acceptSrc('direct').src, acceptSrc('direct').file);
 
+const HELPER = irOf(acceptSrc('helper').src, acceptSrc('helper').file);
+/** A second private `check` that asserts nothing, placed before or after the real one. */
+const withUncheckedTwin = (before: boolean): Ir =>
+  mutate(HELPER, (ir) => {
+    const real = method(ir, 'check');
+    const twin: Method = {
+      ...clone(real),
+      body: [
+        { name: 'u0', value: { kind: 'load_const', value: true } },
+        { name: 'u1', value: { kind: 'assert', value: 'u0' } },
+      ],
+    };
+    const at = ir.methods.indexOf(real);
+    ir.methods.splice(before ? at : at + 1, 0, twin);
+  });
+
 const CASES: Array<{ name: string; ir: Ir; error: string }> = [
+  // A duplicated method name lets a name-keyed lookup or memo answer for the
+  // wrong body (the checked twin vouching for the one stack lowering inlines).
+  { name: 'dup-helper-unchecked-twin-after', ir: withUncheckedTwin(false), error: DUP('check') },
+  { name: 'dup-helper-unchecked-twin-before', ir: withUncheckedTwin(true), error: DUP('check') },
+  {
+    name: 'dup-public-method',
+    ir: mutate(DIRECT, (ir) => {
+      const spend = method(ir, 'spend');
+      ir.methods.push({ ...clone(spend), params: [], body: [
+        { name: 'u0', value: { kind: 'load_const', value: true } },
+        { name: 'u1', value: { kind: 'assert', value: 'u0' } },
+      ] });
+    }),
+    error: DUP('spend'),
+  },
   { name: 'd9-readonly-property', ir: lowered('readonly-property-checked'), error: D9('pre') },
   { name: 'd9-mutable-property', ir: lowered('mutable-property-only-state'), error: D9('pre') },
   { name: 'gk010-extract-only', ir: lowered('extract-only'), error: GK010('spend', 'txPreimage') },

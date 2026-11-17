@@ -60,7 +60,12 @@ export function irPreimageRuleErrors(program: ANFProgram): string[] {
   for (const p of program.properties) {
     if (p.type === SHP) errors.push(preimagePropertyMessage(p.name));
   }
-  const methods = new Map(program.methods.map((m) => [m.name, m]));
+  // A method_call resolves exactly as stack lowering inlines it: to the LAST
+  // non-public, non-constructor method of that name (05-stack-lower.ts
+  // lowerToStack). The loaders refuse duplicate names first
+  // (assertIrUniqueMethodNames); this never relies on that alone.
+  const privates = new Map<string, ANFMethod>();
+  for (const m of program.methods) if (m.name !== 'constructor' && !m.isPublic) privates.set(m.name, m);
   const publics = program.methods.filter((m) => m.isPublic && m.name !== 'constructor');
   const implicitTxPreimage =
     publics.length > 0 &&
@@ -127,13 +132,14 @@ export function irPreimageRuleErrors(program: ANFProgram): string[] {
     return new Set();
   };
 
-  const memo = new Map<string, Set<string>>();
-  const mustChecked = (m: ANFMethod, stack: ReadonlySet<string>): Set<string> => {
-    const cached = memo.get(m.name);
+  // Keyed by method identity, never by name.
+  const memo = new Map<ANFMethod, Set<string>>();
+  const mustChecked = (m: ANFMethod, stack: ReadonlySet<ANFMethod>): Set<string> => {
+    const cached = memo.get(m);
     if (cached) return cached;
-    if (stack.has(m.name)) return new Set();
+    if (stack.has(m)) return new Set();
     const mv = view(m);
-    const inner = new Set([...stack, m.name]);
+    const inner = new Set([...stack, m]);
     const walk = (b: readonly ANFBinding[], doneIn: Set<string>): Set<string> => {
       let done = new Set(doneIn);
       for (const x of b) {
@@ -146,8 +152,8 @@ export function irPreimageRuleErrors(program: ANFProgram): string[] {
           const e = walk(v.else ?? [], done);
           done = new Set([...t].filter((n) => e.has(n)));
         } else if (v.kind === 'method_call') {
-          const target = methods.get(v.method);
-          if (target && !target.isPublic) {
+          const target = privates.get(v.method);
+          if (target) {
             const checked = mustChecked(target, inner);
             target.params.forEach((p, i) => {
               if (!checked.has(p.name)) return;
@@ -160,7 +166,7 @@ export function irPreimageRuleErrors(program: ANFProgram): string[] {
       return done;
     };
     const result = walk(m.body, new Set());
-    memo.set(m.name, result);
+    memo.set(m, result);
     return result;
   };
 
@@ -173,8 +179,8 @@ export function irPreimageRuleErrors(program: ANFProgram): string[] {
         if (v.kind === 'call' && PREIMAGE_EXTRACTORS.has(v.func)) {
           if (mv.resolve(v.args[0]) === undefined) errors.push(uncheckedPreimageArgMessage(v.func));
         } else if (v.kind === 'method_call') {
-          const target = methods.get(v.method);
-          if (target && !target.isPublic) {
+          const target = privates.get(v.method);
+          if (target) {
             const bad = target.params.some((p, i) => p.type === SHP && mv.resolve(v.args[i]) === undefined);
             if (bad) errors.push(uncheckedPreimageArgMessage(target.name));
           }
@@ -193,6 +199,24 @@ export function irPreimageRuleErrors(program: ANFProgram): string[] {
     }
   }
   return errors;
+}
+
+/** GK-BUG-015's shared diagnostic (02-validate), on the IR path. */
+export function duplicateMethodMessage(name: string): string {
+  return `method '${name}' is already declared in this contract and cannot be re-declared`;
+}
+
+/**
+ * The source path refuses a repeated method name (GK-BUG-015); `--ir` did
+ * not, so two bodies could share a name and a name-keyed lookup answer for
+ * the wrong one. Refused on the IR path with the same text.
+ */
+export function assertIrUniqueMethodNames(program: ANFProgram): void {
+  const seen = new Set<string>();
+  for (const m of program.methods) {
+    if (seen.has(m.name)) throw new Error(`IR validation: ${duplicateMethodMessage(m.name)}`);
+    seen.add(m.name);
+  }
 }
 
 /** Throws the first D9 / GK-GAP-010 / D14 violation on the IR path. */

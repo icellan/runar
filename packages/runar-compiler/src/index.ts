@@ -122,7 +122,7 @@ import { validate } from './passes/02-validate.js';
 import { typecheck, isBigintFamilyType, isByteStringFamilyType } from './passes/03-typecheck.js';
 import { expandFixedArrays } from './passes/03b-expand-fixed-arrays.js';
 import { lowerToANF } from './passes/04-anf-lower.js';
-import { assertIrPreimageRules } from './passes/ir-preimage-rules.js';
+import { assertIrPreimageRules, assertIrUniqueMethodNames } from './passes/ir-preimage-rules.js';
 import { lowerToStack, bakedPropPushOrigin } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
 import { optimizeStackIR } from './optimizer/peephole.js';
@@ -648,6 +648,10 @@ export function compileFromANF(
   // first call's baked values. structuredClone handles the bigint
   // `initialValue`s ANF properties carry (JSON.stringify would throw).
   const anf: ANFProgram = structuredClone(program);
+
+  // D15 / GK-BUG-015: a repeated method name is refused before anything looks
+  // a method up by name (the source path's validator already refuses it).
+  assertIrUniqueMethodNames(anf);
 
   // N-071: IR input skips 02-validate, whose endsWithAssert rule is what makes
   // a public method's script a covenant. Stack lowering leaves the method's

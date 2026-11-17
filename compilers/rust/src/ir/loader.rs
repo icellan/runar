@@ -296,6 +296,10 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
     // types and binding names are refused by assert_required_ir_fields
     // (required_fields.rs) with one shared diagnostic, before this runs.
 
+    // D15 / GK-BUG-015: a repeated method name, before anything looks a
+    // method up by name.
+    super::preimage_rules::assert_unique_method_names(program)?;
+
     // R-126 / CL-BUG-164: an add_output must name exactly one state value per
     // MUTABLE property. Counted once, up front.
     let mutable_count = program.properties.iter().filter(|p| !p.readonly).count();

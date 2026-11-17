@@ -186,9 +186,15 @@ func AssertPreimageRules(program *ANFProgram) error {
 			errs = append(errs, irPreimagePropertyMessage(p.Name))
 		}
 	}
-	methods := map[string]*ANFMethod{}
+	// A method_call resolves exactly as stack lowering inlines it: to the LAST
+	// non-public, non-constructor method of that name (codegen/stack.go). The
+	// loader refuses duplicate names first; this never relies on that alone.
+	privates := map[string]*ANFMethod{}
 	for i := range program.Methods {
-		methods[program.Methods[i].Name] = &program.Methods[i]
+		m := &program.Methods[i]
+		if !m.IsPublic && m.Name != "constructor" {
+			privates[m.Name] = m
+		}
 	}
 	implicitTx := false
 	publics := 0
@@ -214,17 +220,18 @@ func AssertPreimageRules(program *ANFProgram) error {
 		}
 	}
 
-	memo := map[string]map[string]bool{}
-	var mustChecked func(m *ANFMethod, stack map[string]bool) map[string]bool
-	mustChecked = func(m *ANFMethod, stack map[string]bool) map[string]bool {
-		if r, ok := memo[m.Name]; ok {
+	// Keyed by method identity, never by name.
+	memo := map[*ANFMethod]map[string]bool{}
+	var mustChecked func(m *ANFMethod, stack map[*ANFMethod]bool) map[string]bool
+	mustChecked = func(m *ANFMethod, stack map[*ANFMethod]bool) map[string]bool {
+		if r, ok := memo[m]; ok {
 			return r
 		}
-		if stack[m.Name] {
+		if stack[m] {
 			return map[string]bool{}
 		}
 		mv := newIRMethodView(m, implicitTx)
-		inner := map[string]bool{m.Name: true}
+		inner := map[*ANFMethod]bool{m: true}
 		for k := range stack {
 			inner[k] = true
 		}
@@ -253,7 +260,7 @@ func AssertPreimageRules(program *ANFProgram) error {
 						}
 					}
 				case "method_call":
-					if target, ok := methods[v.Method]; ok && !target.IsPublic {
+					if target, ok := privates[v.Method]; ok {
 						checked := mustChecked(target, inner)
 						for pi, p := range target.Params {
 							if !checked[p.Name] || pi >= len(v.Args) {
@@ -269,7 +276,7 @@ func AssertPreimageRules(program *ANFProgram) error {
 			return done
 		}
 		result := walk(m.Body, map[string]bool{})
-		memo[m.Name] = result
+		memo[m] = result
 		return result
 	}
 
@@ -295,7 +302,7 @@ func AssertPreimageRules(program *ANFProgram) error {
 						}
 					}
 				case "method_call":
-					if target, ok := methods[v.Method]; ok && !target.IsPublic {
+					if target, ok := privates[v.Method]; ok {
 						for pi, p := range target.Params {
 							if p.Type != irSHP {
 								continue
@@ -320,7 +327,7 @@ func AssertPreimageRules(program *ANFProgram) error {
 		}
 		visit(m.Body)
 		if m.IsPublic {
-			done := mustChecked(m, map[string]bool{})
+			done := mustChecked(m, map[*ANFMethod]bool{})
 			for _, p := range m.Params {
 				if p.Type == irSHP && !done[p.Name] {
 					errs = append(errs, irPreimageNotCheckedMessage(m.Name, p.Name))
@@ -330,6 +337,20 @@ func AssertPreimageRules(program *ANFProgram) error {
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("IR validation: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// AssertUniqueMethodNames refuses a repeated method name with GK-BUG-015's
+// shared text: the source validator refuses it, --ir did not, so two bodies
+// could share a name and a name-keyed lookup answer for the wrong one.
+func AssertUniqueMethodNames(program *ANFProgram) error {
+	seen := map[string]bool{}
+	for _, m := range program.Methods {
+		if seen[m.Name] {
+			return fmt.Errorf("IR validation: method '%s' is already declared in this contract and cannot be re-declared", m.Name)
+		}
+		seen[m.Name] = true
 	}
 	return nil
 }

@@ -134,24 +134,26 @@ impl<'a> View<'a> {
 }
 
 struct Rules<'a> {
-    methods: HashMap<&'a str, &'a ANFMethod>,
+    privates: HashMap<&'a str, &'a ANFMethod>,
     implicit_tx: bool,
-    memo: HashMap<String, HashSet<String>>,
+    /// Keyed by method identity (address), never by name.
+    memo: HashMap<*const ANFMethod, HashSet<String>>,
 }
 
 impl<'a> Rules<'a> {
-    fn must_checked(&mut self, m: &'a ANFMethod, stack: &HashSet<String>) -> HashSet<String> {
-        if let Some(r) = self.memo.get(&m.name) {
+    fn must_checked(&mut self, m: &'a ANFMethod, stack: &HashSet<*const ANFMethod>) -> HashSet<String> {
+        let key = m as *const ANFMethod;
+        if let Some(r) = self.memo.get(&key) {
             return r.clone();
         }
-        if stack.contains(&m.name) {
+        if stack.contains(&key) {
             return HashSet::new();
         }
         let mv = View::new(m, self.implicit_tx);
         let mut inner = stack.clone();
-        inner.insert(m.name.clone());
+        inner.insert(key);
         let result = self.walk(&mv, &m.body, HashSet::new(), &inner);
-        self.memo.insert(m.name.clone(), result.clone());
+        self.memo.insert(key, result.clone());
         result
     }
 
@@ -160,7 +162,7 @@ impl<'a> Rules<'a> {
         mv: &View<'a>,
         bindings: &'a [ANFBinding],
         done_in: HashSet<String>,
-        inner: &HashSet<String>,
+        inner: &HashSet<*const ANFMethod>,
     ) -> HashSet<String> {
         let mut done = done_in;
         for b in bindings {
@@ -176,14 +178,12 @@ impl<'a> Rules<'a> {
                     done = t.intersection(&e).cloned().collect();
                 }
                 ANFValue::MethodCall { method, args, .. } => {
-                    if let Some(target) = self.methods.get(method.as_str()).copied() {
-                        if !target.is_public {
-                            let checked = self.must_checked(target, inner);
-                            for (i, p) in target.params.iter().enumerate() {
-                                if checked.contains(&p.name) {
-                                    if let Some(o) = mv.resolve(args.get(i).map(|s| s.as_str())) {
-                                        done.insert(o);
-                                    }
+                    if let Some(target) = self.privates.get(method.as_str()).copied() {
+                        let checked = self.must_checked(target, inner);
+                        for (i, p) in target.params.iter().enumerate() {
+                            if checked.contains(&p.name) {
+                                if let Some(o) = mv.resolve(args.get(i).map(|s| s.as_str())) {
+                                    done.insert(o);
                                 }
                             }
                         }
@@ -198,7 +198,7 @@ impl<'a> Rules<'a> {
 
 fn visit(
     mv: &View<'_>,
-    methods: &HashMap<&str, &ANFMethod>,
+    privates: &HashMap<&str, &ANFMethod>,
     bindings: &[ANFBinding],
     errors: &mut Vec<String>,
 ) {
@@ -210,9 +210,8 @@ fn visit(
                 }
             }
             ANFValue::MethodCall { method, args, .. } => {
-                if let Some(target) = methods.get(method.as_str()) {
-                    if !target.is_public
-                        && target.params.iter().enumerate().any(|(i, p)| {
+                if let Some(target) = privates.get(method.as_str()) {
+                    if target.params.iter().enumerate().any(|(i, p)| {
                             p.param_type == SHP && mv.resolve(args.get(i).map(|s| s.as_str())).is_none()
                         })
                     {
@@ -221,10 +220,10 @@ fn visit(
                 }
             }
             ANFValue::If { then, else_branch, .. } => {
-                visit(mv, methods, then, errors);
-                visit(mv, methods, else_branch, errors);
+                visit(mv, privates, then, errors);
+                visit(mv, privates, else_branch, errors);
             }
-            ANFValue::Loop { body, .. } => visit(mv, methods, body, errors),
+            ANFValue::Loop { body, .. } => visit(mv, privates, body, errors),
             _ => {}
         }
     }
@@ -237,19 +236,27 @@ pub fn preimage_rule_errors(program: &ANFProgram) -> Vec<String> {
         .filter(|p| p.prop_type == SHP)
         .map(|p| preimage_property_message(&p.name))
         .collect();
-    let methods: HashMap<&str, &ANFMethod> = program.methods.iter().map(|m| (m.name.as_str(), m)).collect();
+    // A method_call resolves exactly as stack lowering inlines it: to the LAST
+    // non-public, non-constructor method of that name (codegen/stack.rs). The
+    // loader refuses duplicate names first; this never relies on that alone.
+    let privates: HashMap<&str, &ANFMethod> = program
+        .methods
+        .iter()
+        .filter(|m| !m.is_public && m.name != "constructor")
+        .map(|m| (m.name.as_str(), m))
+        .collect();
     let publics: Vec<&ANFMethod> =
         program.methods.iter().filter(|m| m.is_public && m.name != "constructor").collect();
     let implicit_tx = !publics.is_empty()
         && publics.iter().all(|m| m.params.iter().any(|p| p.name == "txPreimage" && p.param_type == SHP))
         && !program.properties.iter().any(|p| p.name == "txPreimage");
-    let mut rules = Rules { methods: methods.clone(), implicit_tx, memo: HashMap::new() };
+    let mut rules = Rules { privates: privates.clone(), implicit_tx, memo: HashMap::new() };
     for m in &program.methods {
         if m.name == "constructor" {
             continue;
         }
         let mv = View::new(m, implicit_tx);
-        visit(&mv, &methods, &m.body, &mut errors);
+        visit(&mv, &privates, &m.body, &mut errors);
         if m.is_public {
             let done = rules.must_checked(m, &HashSet::new());
             for p in &m.params {
@@ -270,4 +277,20 @@ pub fn assert_preimage_rules(program: &ANFProgram) -> Result<(), String> {
     } else {
         Err(format!("IR validation: {}", errors.join("; ")))
     }
+}
+
+/// GK-BUG-015's shared text on the IR path: a repeated method name, refused
+/// before anything looks a method up by name (the source validator refuses
+/// it; `--ir` did not, so two bodies could share a name).
+pub fn assert_unique_method_names(program: &ANFProgram) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for m in &program.methods {
+        if !seen.insert(m.name.as_str()) {
+            return Err(format!(
+                "IR validation: method '{}' is already declared in this contract and cannot be re-declared",
+                m.name
+            ));
+        }
+    }
+    Ok(())
 }
