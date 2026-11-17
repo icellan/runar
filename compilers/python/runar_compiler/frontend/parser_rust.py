@@ -34,6 +34,15 @@ from runar_compiler.frontend.sighash_directive import lost_directive_message, re
 # Token types
 # ---------------------------------------------------------------------------
 
+# D10 -- the diagnostic every tier shares. A `tx_preimage` field is the
+# implicit preimage of a stateful contract; in a contract that resolves to
+# stateless nothing checks it against the spending transaction.
+STATELESS_TX_PREIMAGE_MESSAGE = (
+    "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, "
+    "so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a "
+    "method parameter and assert!(check_preimage(&preimage))"
+)
+
 TOK_EOF = 0
 TOK_IDENT = 1
 TOK_NUMBER = 2
@@ -684,6 +693,8 @@ class _RustParser:
         # N-490: the synthesized constructor is anchored at the contract's
         # `struct` keyword, not a fake 1:0.
         ctor_loc = SourceLocation(file=self.file_name, line=1, column=0)
+        # D10: where a `tx_preimage` field was declared, if one was.
+        tx_preimage_loc: SourceLocation | None = None
 
         while not self.check(TOK_EOF):
             # Attribute: #[...]
@@ -744,8 +755,12 @@ class _RustParser:
                             field_type = self.parse_rust_type()
                             self.match_tok(TOK_COMMA)
 
-                            # Skip txPreimage — implicit stateful param, not a contract property
+                            # Skip txPreimage — implicit stateful param, not a contract property.
+                            # D10: remember where it was declared; a contract that resolves
+                            # to stateless is refused below.
                             camel_name = self.declare(field_name)
+                            if camel_name == "txPreimage":
+                                tx_preimage_loc = field_loc
                             if camel_name != "txPreimage":
                                 properties.append(PropertyNode(
                                     name=camel_name,
@@ -781,6 +796,13 @@ class _RustParser:
         # not be silently overridden by this structural inference (F-204).
         if parent_class != "UnsafeSmartContract" and any(not p.readonly for p in properties):
             parent_class = "StatefulSmartContract"
+
+        # D10: tx_preimage is the implicit preimage of a STATEFUL contract,
+        # checked at every public method's entry. A contract that resolves to
+        # stateless never checks it.
+        if tx_preimage_loc is not None and parent_class != "StatefulSmartContract":
+            self.errors.append(Diagnostic(
+                message=STATELESS_TX_PREIMAGE_MESSAGE, severity=Severity.ERROR, loc=tx_preimage_loc))
 
         if not contract_name:
             self.add_error("no Rúnar contract struct found in Rust source")

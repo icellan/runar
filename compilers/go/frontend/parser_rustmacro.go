@@ -523,6 +523,8 @@ func (p *rustMacroParser) parse() *ContractNode {
 	// N-490: the synthesized constructor is anchored at the contract's
 	// `struct` keyword, not a fake 1:1.
 	var ctorLoc SourceLocation
+	// D10: where a `tx_preimage` field was declared, if one was.
+	var txPreimageLoc *SourceLocation
 
 	for p.current().kind != rustTokEOF {
 		if p.current().kind == rustTokHashBracket {
@@ -576,8 +578,14 @@ func (p *rustMacroParser) parse() *ContractNode {
 						fieldType := p.parseRustType()
 						p.match(rustTokComma)
 
-						// Skip txPreimage — implicit stateful param, not a contract property
+						// Skip txPreimage — implicit stateful param, not a contract property.
+						// D10: remember where it was declared; a contract that resolves
+						// to stateless is refused below.
 						camelName := p.idents.declare(fieldName, rustSnakeToCamel(fieldName))
+						if camelName == "txPreimage" {
+							fieldLoc := loc
+							txPreimageLoc = &fieldLoc
+						}
 						if camelName != "txPreimage" {
 							properties = append(properties, PropertyNode{
 								Name:           camelName,
@@ -631,6 +639,13 @@ func (p *rustMacroParser) parse() *ContractNode {
 		} else {
 			parentClass = "StatefulSmartContract"
 		}
+	}
+
+	// D10: tx_preimage is the implicit preimage of a STATEFUL contract,
+	// checked at every public method's entry. A contract that resolves to
+	// stateless never checks it.
+	if txPreimageLoc != nil && parentClass != "StatefulSmartContract" {
+		p.errors = append(p.errors, Diagnostic{Message: StatelessTxPreimageMessage, Severity: SeverityError, Loc: txPreimageLoc})
 	}
 
 	// Extract init() as property initializers
@@ -1651,6 +1666,13 @@ func (p *rustMacroParser) parseRustArrayLiteral() Expression {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// StatelessTxPreimageMessage is the D10 diagnostic every tier shares: a
+// `tx_preimage` field is the implicit preimage of a stateful contract, and in
+// a contract that resolves to stateless nothing checks it.
+const StatelessTxPreimageMessage = "a stateless contract cannot declare tx_preimage: nothing checks it against " +
+	"the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], " +
+	"or take the preimage as a method parameter and assert!(check_preimage(&preimage))"
 
 // rustSnakeToCamel converts snake_case to camelCase.
 // e.g. pub_key_hash → pubKeyHash, check_sig → checkSig, count → count.

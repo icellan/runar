@@ -401,6 +401,19 @@ preimage reaches an extractor through them:
   extractor reads from `this.p` is unverified. Take the preimage as a method
   parameter and `assert(checkPreimage(p))` instead. The implicit `txPreimage`
   of a `StatefulSmartContract` is not a declared property and is unaffected.
+- **A Rust-DSL `tx_preimage` field in a contract that resolves to stateless**
+  (`#[runar::contract]` with no other mutable field, or
+  `#[runar::unsafe_contract]`) is refused by the parser:
+
+  ```
+  a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a method parameter and assert!(check_preimage(&preimage))
+  ```
+
+  In the Rust DSL a `tx_preimage` field is the spelling of the implicit
+  `txPreimage` of a stateful contract, checked at every public method's
+  entry. The field itself never makes a contract stateful; a stateful
+  contract (`#[runar::stateful_contract]`, or `#[runar::contract]` with
+  another mutable field) keeps it as the implicit, auto-checked preimage.
 - **A `FixedArray<SigHashPreimage, N>` method parameter** is refused by the
   validator like every `FixedArray` method parameter (each tier words that
   diagnostic itself).

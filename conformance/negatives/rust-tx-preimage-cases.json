@@ -1,0 +1,52 @@
+{
+  "_comment": "D10: a Rust-DSL contract that is STATELESS once its parent class is resolved (#[runar::contract] with no mutable field other than tx_preimage, or #[runar::unsafe_contract]) and declares a tx_preimage field is refused by every tier's Rust-DSL parser with the shared diagnostic: the field is the implicit preimage of StatefulSmartContract, which a stateless contract never checks, so every extractor read of it is unverified. The tx_preimage field itself never makes a contract stateful. A stateful contract (#[runar::stateful_contract], or #[runar::contract] with another mutable field) keeps its tx_preimage field as the implicit, auto-checked txPreimage and must compile to the same bytes in every tier (accept cases; the examples/rust and state-array-set contracts are pinned byte-identical by the conformance suite).",
+  "refuse": [
+    {
+      "name": "contract-only-tx-preimage",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::contract]\npub struct TxPre {\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPre {\n    pub fn spend(&self, x: Bigint) {\n        assert!(extract_amount(&self.tx_preimage) >= x);\n    }\n}\n",
+      "error": "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a method parameter and assert!(check_preimage(&preimage))"
+    },
+    {
+      "name": "contract-readonly-fields-and-tx-preimage",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::contract]\npub struct TxPreRo {\n    #[readonly]\n    pub min: Bigint,\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPreRo {\n    pub fn spend(&self, x: Bigint) {\n        assert!(extract_amount(&self.tx_preimage) >= self.min + x);\n    }\n}\n",
+      "error": "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a method parameter and assert!(check_preimage(&preimage))"
+    },
+    {
+      "name": "contract-readonly-tx-preimage",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::contract]\npub struct TxPreRoField {\n    #[readonly]\n    pub min: Bigint,\n    #[readonly]\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPreRoField {\n    pub fn spend(&self, x: Bigint) {\n        assert!(extract_amount(&self.tx_preimage) >= self.min + x);\n    }\n}\n",
+      "error": "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a method parameter and assert!(check_preimage(&preimage))"
+    },
+    {
+      "name": "contract-tx-preimage-unread",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::contract]\npub struct TxPreUnread {\n    #[readonly]\n    pub min: Bigint,\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPreUnread {\n    pub fn spend(&self, x: Bigint) {\n        assert!(x >= self.min);\n    }\n}\n",
+      "error": "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a method parameter and assert!(check_preimage(&preimage))"
+    },
+    {
+      "name": "unsafe-contract-tx-preimage",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::unsafe_contract]\npub struct TxPreUnsafe {\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPreUnsafe {\n    pub fn spend(&self, x: Bigint) {\n        assert!(extract_amount(&self.tx_preimage) >= x);\n    }\n}\n",
+      "error": "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a method parameter and assert!(check_preimage(&preimage))"
+    }
+  ],
+  "accept": [
+    {
+      "name": "stateful-contract-tx-preimage",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::stateful_contract]\npub struct TxPreStateful {\n    pub count: Bigint,\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPreStateful {\n    pub fn bump(&mut self, x: Bigint) {\n        assert!(extract_amount(&self.tx_preimage) >= x);\n        self.count = self.count + 1;\n    }\n}\n"
+    },
+    {
+      "name": "stateful-contract-readonly-only-tx-preimage",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::stateful_contract]\npub struct TxPreStatefulRo {\n    #[readonly]\n    pub min: Bigint,\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPreStatefulRo {\n    pub fn spend(&mut self, x: Bigint) {\n        assert!(extract_amount(&self.tx_preimage) >= self.min + x);\n    }\n}\n"
+    },
+    {
+      "name": "contract-inferred-stateful-tx-preimage",
+      "file": "TxPre.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::contract]\npub struct TxPreInferred {\n    #[readonly]\n    pub min: Bigint,\n    pub count: Bigint,\n    pub tx_preimage: SigHashPreimage,\n}\n\nimpl TxPreInferred {\n    pub fn bump(&mut self, x: Bigint) {\n        assert!(extract_amount(&self.tx_preimage) >= self.min + x);\n        self.count = self.count + 1;\n    }\n}\n"
+    }
+  ]
+}

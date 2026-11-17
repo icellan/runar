@@ -32,6 +32,11 @@ const identifier_collision = @import("identifier_collision.zig");
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+
+/// D10 — the diagnostic every tier shares. A `tx_preimage` field is the
+/// implicit preimage of a stateful contract; in a contract that resolves to
+/// stateless nothing checks it against the spending transaction.
+pub const STATELESS_TX_PREIMAGE_MESSAGE = "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a method parameter and assert!(check_preimage(&preimage))";
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -683,6 +688,8 @@ const Parser = struct {
         // N-490: the synthesized constructor is anchored at the contract's
         // `struct` keyword, not a fake 1:0.
         var ctor_loc: types.SourceLocation = .{ .file = self.file_name, .line = 1, .column = 1 };
+        // D10: where a `tx_preimage` field was declared, if one was.
+        var tx_preimage_loc: ?types.SourceLocation = null;
 
         while (self.current.kind != .eof) {
             if (self.current.kind == .hash_bracket) {
@@ -737,8 +744,13 @@ const Parser = struct {
                             const field_type = self.parseRustType();
                             _ = self.match(.comma);
 
-                            // Skip txPreimage — implicit stateful param
+                            // Skip txPreimage — implicit stateful param. D10:
+                            // remember where it was declared; a contract that
+                            // resolves to stateless is refused below.
                             const camel_name = self.declare(field_name_tok.text);
+                            if (std.mem.eql(u8, camel_name, "txPreimage")) {
+                                tx_preimage_loc = self.tokenSourceLoc(field_name_tok);
+                            }
                             if (!std.mem.eql(u8, camel_name, "txPreimage")) {
                                 const type_info = types.typeNodeToRunarType(field_type);
                                 // Capture FixedArray shape so expand_fixed_arrays.zig
@@ -806,6 +818,13 @@ const Parser = struct {
                 }
             }
             parent_class = if (all_readonly) .smart_contract else .stateful_smart_contract;
+        }
+
+        // D10: tx_preimage is the implicit preimage of a STATEFUL contract,
+        // checked at every public method's entry. A contract that resolves to
+        // stateless never checks it.
+        if (tx_preimage_loc) |loc| {
+            if (parent_class.? != .stateful_smart_contract) self.addErrorAtLoc(loc, STATELESS_TX_PREIMAGE_MESSAGE);
         }
 
         // Extract init() method as property initializers

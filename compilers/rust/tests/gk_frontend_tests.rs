@@ -113,3 +113,33 @@ fn gk005_extension_dispatch() {
     }
 }
 
+/// D10: a Rust-DSL contract that resolves to stateless and declares a
+/// tx_preimage field is refused by the parser with the shared diagnostic; a
+/// stateful one keeps tx_preimage as the implicit, auto-checked txPreimage.
+#[test]
+fn d10_stateless_rust_tx_preimage_is_refused() {
+    let c = corpus("rust-tx-preimage-cases.json");
+    assert!(c["refuse"].as_array().unwrap().len() >= 5);
+    for case in c["refuse"].as_array().unwrap() {
+        let parsed = parse_source(s(case, "src"), Some(s(case, "file")));
+        let msgs: Vec<String> = parsed.errors.iter().map(|e| e.message.clone()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains(s(case, "error"))),
+            "{}: parse errors {msgs:?}",
+            s(case, "name")
+        );
+        let err = compile_from_source_str(s(case, "src"), Some(s(case, "file")))
+            .err()
+            .unwrap_or_else(|| panic!("{} accepted", s(case, "name")));
+        assert!(err.contains(s(case, "error")), "{}: {err}", s(case, "name"));
+    }
+    for case in c["accept"].as_array().unwrap() {
+        let parsed = parse_source(s(case, "src"), Some(s(case, "file")));
+        assert!(parsed.errors.is_empty(), "{}: {:?}", s(case, "name"), parsed.errors);
+        let contract = parsed.contract.expect("contract");
+        assert_eq!(contract.parent_class, "StatefulSmartContract", "{}", s(case, "name"));
+        assert!(contract.properties.iter().all(|p| p.name != "txPreimage"), "{}", s(case, "name"));
+        compile_from_source_str(s(case, "src"), Some(s(case, "file")))
+            .unwrap_or_else(|e| panic!("{} refused: {e}", s(case, "name")));
+    }
+}

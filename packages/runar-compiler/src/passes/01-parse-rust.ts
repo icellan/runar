@@ -41,6 +41,16 @@ import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
+/**
+ * D10 — the diagnostic every tier shares. A `tx_preimage` field is the
+ * implicit preimage of a stateful contract; in a contract that resolves to
+ * stateless nothing checks it against the spending transaction.
+ */
+export const STATELESS_TX_PREIMAGE_MESSAGE =
+  'a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, ' +
+  'so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a ' +
+  'method parameter and assert!(check_preimage(&preimage))';
+
 // ---------------------------------------------------------------------------
 // Lexer
 // ---------------------------------------------------------------------------
@@ -413,6 +423,12 @@ class RustParser extends ParserCore<RustToken> {
                 parentClass = 'UnsafeSmartContract';
               }
               properties.push(...result.properties);
+              // D10: tx_preimage is the implicit preimage of a STATEFUL
+              // contract, checked at every public method's entry. A contract
+              // that resolves to stateless never checks it.
+              if (result.txPreimageLoc && parentClass !== 'StatefulSmartContract') {
+                this.errors.push(makeDiagnostic(STATELESS_TX_PREIMAGE_MESSAGE, 'error', result.txPreimageLoc));
+              }
             }
           }
           continue;
@@ -608,6 +624,8 @@ class RustParser extends ParserCore<RustToken> {
     properties: PropertyNode[];
     /** N-490: the `struct` keyword, where the synthesized constructor is anchored. */
     structLoc: SourceLocation;
+    /** D10: where a `tx_preimage` field was declared, if one was. */
+    txPreimageLoc: SourceLocation | null;
   } | null {
     const structToken = this.expect('struct');
     const structLoc: SourceLocation = { file: this.file, line: structToken.line, column: structToken.column };
@@ -617,6 +635,7 @@ class RustParser extends ParserCore<RustToken> {
 
     const properties: PropertyNode[] = [];
     let hasMutableField = false;
+    let txPreimageLoc: SourceLocation | null = null;
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       const propLoc = this.loc();
@@ -648,15 +667,18 @@ class RustParser extends ParserCore<RustToken> {
       this.expect(':');
       const propType = this.parseRustType();
 
-      if (!readonly) hasMutableField = true;
-
       // Skip txPreimage — it's an implicit property injected by the compiler
       // for StatefulSmartContract. Rust contracts must declare all struct fields
-      // explicitly, but txPreimage should not appear in the parsed AST.
+      // explicitly, but txPreimage should not appear in the parsed AST. D10:
+      // it does not make the contract stateful either; parse() refuses it if
+      // the contract resolves to stateless.
       if (fieldName === 'txPreimage') {
+        txPreimageLoc = propLoc;
         this.match(',');
         continue;
       }
+
+      if (!readonly) hasMutableField = true;
 
       properties.push({
         kind: 'property',
@@ -674,7 +696,7 @@ class RustParser extends ParserCore<RustToken> {
 
     const parentClass = hasMutableField ? 'StatefulSmartContract' : 'SmartContract';
 
-    return { name, parentClass, properties, structLoc };
+    return { name, parentClass, properties, structLoc, txPreimageLoc };
   }
 
   // -----------------------------------------------------------------------

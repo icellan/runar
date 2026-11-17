@@ -141,3 +141,35 @@ test "GK-GAP-005/006: extension dispatch" {
     try std.testing.expect(n.contract != null);
 }
 
+test "D10: a stateless Rust-DSL contract cannot declare tx_preimage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try corpus(a, "rust-tx-preimage-cases.json");
+    try std.testing.expect(c.object.get("refuse").?.array.items.len >= 5);
+    for (c.object.get("refuse").?.array.items) |case| {
+        const parsed = compiler_api.parseSource(a, str(case, "src"), str(case, "file"));
+        if (!contains(parsed.errors, str(case, "error"))) {
+            std.debug.print("{s}: parser did not refuse ({d} errors)\n", .{ str(case, "name"), parsed.errors.len });
+            return error.TestExpectedRefusal;
+        }
+    }
+    for (c.object.get("accept").?.array.items) |case| {
+        const parsed = compiler_api.parseSource(a, str(case, "src"), str(case, "file"));
+        if (parsed.errors.len != 0) {
+            std.debug.print("{s}: refused: {s}\n", .{ str(case, "name"), parsed.errors[0] });
+            return error.TestUnexpectedRefusal;
+        }
+        const contract = parsed.contract.?;
+        try std.testing.expectEqual(@import("../ir/types.zig").ParentClass.stateful_smart_contract, contract.parent_class);
+        for (contract.properties) |p| try std.testing.expect(!std.mem.eql(u8, p.name, "txPreimage"));
+        const errs = try frontendErrors(a, str(case, "src"), str(case, "file"));
+        if (errs.len != 0) {
+            std.debug.print("{s}: refused: {s}\n", .{ str(case, "name"), errs[0] });
+            return error.TestUnexpectedRefusal;
+        }
+        const hex = try compiler_api.compileSourceToHex(std.testing.allocator, str(case, "src"), str(case, "file"));
+        defer std.testing.allocator.free(hex);
+        try std.testing.expect(hex.len > 0);
+    }
+}

@@ -175,3 +175,46 @@ func TestGK005ExtensionDispatch(t *testing.T) {
 	}
 }
 
+// D10 — a Rust-DSL contract that resolves to stateless and declares a
+// tx_preimage field is refused by the parser with the shared diagnostic; a
+// stateful one keeps tx_preimage as the implicit, auto-checked txPreimage.
+func TestD10StatelessRustTxPreimageIsRefused(t *testing.T) {
+	var corpus struct {
+		Refuse []struct{ Name, File, Src, Error string }
+		Accept []struct{ Name, File, Src string }
+	}
+	gkCorpus(t, "rust-tx-preimage-cases.json", &corpus)
+	if len(corpus.Refuse) < 5 || len(corpus.Accept) < 3 {
+		t.Fatalf("corpus too small: %d refuse, %d accept", len(corpus.Refuse), len(corpus.Accept))
+	}
+	for _, c := range corpus.Refuse {
+		t.Run("refuse/"+c.Name, func(t *testing.T) {
+			parsed := ParseSource([]byte(c.Src), c.File)
+			if errs := parsed.ErrorStrings(); !gkContains(errs, c.Error) {
+				t.Fatalf("want parse error %q, got %v", c.Error, errs)
+			}
+		})
+	}
+	for _, c := range corpus.Accept {
+		t.Run("accept/"+c.Name, func(t *testing.T) {
+			parsed := ParseSource([]byte(c.Src), c.File)
+			if parsed.Contract == nil || len(parsed.Errors) > 0 {
+				t.Fatalf("parse: %v", parsed.ErrorStrings())
+			}
+			if parsed.Contract.ParentClass != "StatefulSmartContract" {
+				t.Fatalf("parentClass = %q, want StatefulSmartContract", parsed.Contract.ParentClass)
+			}
+			for _, p := range parsed.Contract.Properties {
+				if p.Name == "txPreimage" {
+					t.Fatal("txPreimage surfaced as a declared property")
+				}
+			}
+			if v := Validate(parsed.Contract); len(v.Errors) > 0 {
+				t.Fatalf("validate: %v", v.ErrorStrings())
+			}
+			if tc := TypeCheck(parsed.Contract); len(tc.Errors) > 0 {
+				t.Fatalf("typecheck: %v", tc.ErrorStrings())
+			}
+		})
+	}
+}

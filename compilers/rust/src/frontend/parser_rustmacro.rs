@@ -16,6 +16,13 @@ use super::identifier_collision::DeclaredIdents;
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
+/// D10 — the diagnostic every tier shares. A `tx_preimage` field is the
+/// implicit preimage of a stateful contract; in a contract that resolves to
+/// stateless nothing checks it against the spending transaction.
+pub const STATELESS_TX_PREIMAGE_MESSAGE: &str = "a stateless contract cannot declare tx_preimage: nothing checks it \
+against the spending transaction, so every field read from it is unverified; use #[runar::stateful_contract], or \
+take the preimage as a method parameter and assert!(check_preimage(&preimage))";
+
 // ---------------------------------------------------------------------------
 // Token types
 // ---------------------------------------------------------------------------
@@ -365,6 +372,8 @@ impl RustDslParser {
         // N-490: the synthesized constructor is anchored at the contract's
         // `struct` keyword, not a fake 1:1.
         let mut ctor_loc = SourceLocation { file: self.file.clone(), line: 1, column: 1 };
+        // D10: where a `tx_preimage` field was declared, if one was.
+        let mut tx_preimage_loc: Option<SourceLocation> = None;
 
         while !matches!(self.current().typ, TokenType::Eof) {
             // Attribute: #[...]
@@ -426,8 +435,13 @@ impl RustDslParser {
                                 // Check later if any field is mutable
                             }
 
-                            // Skip txPreimage — it's an implicit stateful param, not a contract property
+                            // Skip txPreimage — it's an implicit stateful param, not a contract property.
+                            // D10: remember where it was declared; a contract that resolves to
+                            // stateless is refused below.
                             let camel_name = self.idents.declare(&field_name, snake_to_camel(&field_name));
+                            if camel_name == "txPreimage" {
+                                tx_preimage_loc = Some(loc.clone());
+                            }
                             if camel_name != "txPreimage" {
                                 properties.push(PropertyNode {
                                     name: camel_name,
@@ -470,6 +484,15 @@ impl RustDslParser {
         // not be silently overridden by this structural inference (F-204).
         if parent_class != "UnsafeSmartContract" && properties.iter().any(|p| !p.readonly) {
             parent_class = "StatefulSmartContract".to_string();
+        }
+
+        // D10: tx_preimage is the implicit preimage of a STATEFUL contract,
+        // checked at every public method's entry. A contract that resolves to
+        // stateless never checks it.
+        if let Some(loc) = tx_preimage_loc {
+            if parent_class != "StatefulSmartContract" {
+                self.errors.push(Diagnostic::error(STATELESS_TX_PREIMAGE_MESSAGE, Some(loc)));
+            }
         }
 
         if self.nest.exceeded() {

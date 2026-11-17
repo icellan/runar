@@ -191,6 +191,49 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
     }
   });
 
+  describe('D10: a stateless Rust-DSL contract cannot declare tx_preimage', () => {
+    const D10 =
+      'a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, ' +
+      'so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a ' +
+      'method parameter and assert!(check_preimage(&preimage))';
+    const data = corpus<{
+      refuse: Array<{ name: string; file: string; src: string; error: string }>;
+      accept: Array<{ name: string; file: string; src: string }>;
+    }>('rust-tx-preimage-cases.json');
+    it('the corpus pins the shared diagnostic', () => {
+      expect(data.refuse.length).toBeGreaterThanOrEqual(5);
+      for (const c of data.refuse) expect(c.error, c.name).toBe(D10);
+    });
+    for (const c of data.refuse) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${c.name}`, () => {
+          const { status, out, diag } = run(tier, writeFile(c.file, c.src));
+          expect(status, `${tier.id} accepted ${c.name} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(D10);
+        });
+      }
+    }
+    for (const c of data.accept) {
+      it(`every tier compiles ${c.name} to the same bytes`, () => {
+        const input = writeFile(c.file, c.src);
+        const hexes = TIERS.map((t) => compileHex(t, input));
+        expect(new Set(hexes).size, TIERS.map((t, i) => `${t.id}: ${hexes[i]!.length}`).join(', ')).toBe(1);
+      });
+    }
+    const fixture = 'N532-rs-stateless-tx-preimage.runar.rs';
+    const header = readFileSync(join(__dirname, fixture), 'utf8');
+    it(`${fixture} documents the pinned diagnostic`, () => {
+      expect(header.replace(/\n(\/\/|#) +/g, ' ')).toContain(D10);
+    });
+    for (const tier of TIERS) {
+      it(`${tier.id} refuses ${fixture} with the pinned diagnostic`, () => {
+        const { status, out, diag } = run(tier, writeFile(fixture, header));
+        expect(status, `${tier.id} accepted ${fixture} (emitted "${out}")`).not.toBe(0);
+        expect(diag).toContain(D10);
+      });
+    }
+  });
+
   describe('GK-GAP-013: malformed intent intrinsics are still refused', () => {
     const { cases } = corpus<{ cases: Array<{ name: string; src: string }> }>('intent-shape-cases.json');
     for (const c of cases) {

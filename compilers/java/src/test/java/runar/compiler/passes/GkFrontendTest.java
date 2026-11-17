@@ -111,6 +111,31 @@ class GkFrontendTest {
         }
     }
 
+    /** D10: a stateless Rust-DSL contract cannot declare tx_preimage. */
+    @Test
+    void d10StatelessRustTxPreimageIsRefused() throws Exception {
+        Map<String, Object> corpus = corpus("rust-tx-preimage-cases.json");
+        assertTrue(list(corpus, "refuse").size() >= 5);
+        for (Map<String, Object> c : list(corpus, "refuse")) {
+            String name = (String) c.get("name");
+            String want = (String) c.get("error");
+            ParserDispatch.ParseException e = assertThrows(ParserDispatch.ParseException.class,
+                () -> ParserDispatch.parse((String) c.get("src"), (String) c.get("file")), name);
+            assertTrue(e.getMessage().contains(want), name + ": " + e.getMessage());
+            Result r = cli((String) c.get("file"), (String) c.get("src"));
+            assertNotEquals(0, r.exit(), name + " accepted");
+            assertTrue((r.stderr() + r.stdout()).contains(want), name + ": " + r.stderr());
+        }
+        for (Map<String, Object> c : list(corpus, "accept")) {
+            String name = (String) c.get("name");
+            ContractNode contract = ParserDispatch.parse((String) c.get("src"), (String) c.get("file"));
+            assertEquals(runar.compiler.ir.ast.ParentClass.STATEFUL_SMART_CONTRACT, contract.parentClass(), name);
+            assertTrue(contract.properties().stream().noneMatch(p -> p.name().equals("txPreimage")), name);
+            Result r = cli((String) c.get("file"), (String) c.get("src"));
+            assertEquals(0, r.exit(), name + ": " + r.stderr());
+        }
+    }
+
     @Test
     void gk005ExtensionDispatch() throws Exception {
         String ts = Files.readString(repo().resolve("examples/ts/p2pkh/P2PKH.runar.ts"));

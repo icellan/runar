@@ -82,6 +82,17 @@ public final class RustParser {
     // -----------------------------------------------------------------
 
     /** Parse Rust DSL source into a Rúnar contract AST. */
+    /**
+     * D10 — the diagnostic every tier shares. A {@code tx_preimage} field is
+     * the implicit preimage of a stateful contract; in a contract that
+     * resolves to stateless nothing checks it against the spending
+     * transaction.
+     */
+    public static final String STATELESS_TX_PREIMAGE_MESSAGE =
+        "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, "
+            + "so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage "
+            + "as a method parameter and assert!(check_preimage(&preimage))";
+
     public static ContractNode parse(String source, String filename) throws ParseException {
         // DoS-bound size guard, enforced at every exported parser entry, not
         // just ParserDispatch.parse. N-136.
@@ -838,6 +849,8 @@ public final class RustParser {
         // N-490: the synthesized constructor is anchored at the contract's
         // `struct` keyword, not a fake 1:0.
         SourceLocation ctorLoc = new SourceLocation(s.filename, 1, 0);
+        // D10: where a `tx_preimage` field was declared, if one was.
+        SourceLocation txPreimageLoc = null;
 
         while (!s.check(TOK_EOF)) {
             if (s.check(TOK_HASH_BRACKET)) {
@@ -895,7 +908,12 @@ public final class RustParser {
                             s.matchTok(TOK_COMMA);
 
                             String camelName = s.idents.declare(fieldName, snakeToCamel(fieldName));
-                            // Skip txPreimage — implicit stateful param
+                            // Skip txPreimage — implicit stateful param. D10:
+                            // remember where it was declared; a contract that
+                            // resolves to stateless is refused below.
+                            if (camelName.equals("txPreimage")) {
+                                txPreimageLoc = fieldLoc;
+                            }
                             if (!camelName.equals("txPreimage")) {
                                 properties.add(new PropertyNode(
                                     camelName,
@@ -938,6 +956,14 @@ public final class RustParser {
         }
         if (anyMutable && parentClass != ParentClass.UNSAFE_SMART_CONTRACT) {
             parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+        }
+
+        // D10: tx_preimage is the implicit preimage of a STATEFUL contract,
+        // checked at every public method's entry. A contract that resolves to
+        // stateless never checks it.
+        if (txPreimageLoc != null && parentClass != ParentClass.STATEFUL_SMART_CONTRACT) {
+            s.addError(LexDiag.at(s.filename, txPreimageLoc.line(), txPreimageLoc.column(),
+                STATELESS_TX_PREIMAGE_MESSAGE));
         }
 
         if (contractName.isEmpty()) {

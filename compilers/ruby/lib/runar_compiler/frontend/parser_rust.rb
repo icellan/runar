@@ -30,6 +30,14 @@ require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
+    # D10 -- the diagnostic every tier shares. A `tx_preimage` field is the
+    # implicit preimage of a stateful contract; in a contract that resolves to
+    # stateless nothing checks it against the spending transaction.
+    STATELESS_TX_PREIMAGE_MESSAGE =
+      "a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, " \
+      "so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a " \
+      "method parameter and assert!(check_preimage(&preimage))"
+
     # -----------------------------------------------------------------------
     # Namespaced token constants for the Rust parser
     # -----------------------------------------------------------------------
@@ -623,6 +631,13 @@ module RunarCompiler
                   # only kicks in for the plain `#[runar::contract]`.
                   parent_class = "StatefulSmartContract" if attr == "runar::stateful_contract"
                   parent_class = "UnsafeSmartContract" if attr == "runar::unsafe_contract"
+                  # D10: tx_preimage is the implicit preimage of a STATEFUL
+                  # contract, checked at every public method's entry. A
+                  # contract that resolves to stateless never checks it.
+                  if result[:tx_preimage_loc] && parent_class != "StatefulSmartContract"
+                    @errors << Diagnostic.new(message: STATELESS_TX_PREIMAGE_MESSAGE,
+                                              severity: Severity::ERROR, loc: result[:tx_preimage_loc])
+                  end
                 end
               end
               next
@@ -801,6 +816,7 @@ module RunarCompiler
 
         properties = []
         has_mutable_field = false
+        tx_preimage_loc = nil
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
           prop_loc = loc
@@ -834,13 +850,16 @@ module RunarCompiler
           expect(TOK_COLON)
           prop_type = parse_rust_type
 
-          has_mutable_field = true unless is_readonly
-
-          # Skip txPreimage (implicit in stateful contracts)
+          # Skip txPreimage (implicit in stateful contracts). D10: it does not
+          # make the contract stateful either; parse refuses it if the
+          # contract resolves to stateless.
           if field_name == "txPreimage"
+            tx_preimage_loc = prop_loc
             match_tok(TOK_COMMA)
             next
           end
+
+          has_mutable_field = true unless is_readonly
 
           properties << PropertyNode.new(
             name: field_name,
@@ -856,7 +875,8 @@ module RunarCompiler
 
         parent_class = has_mutable_field ? "StatefulSmartContract" : "SmartContract"
 
-        { name: name, parent_class: parent_class, properties: properties, struct_loc: struct_loc }
+        { name: name, parent_class: parent_class, properties: properties, struct_loc: struct_loc,
+          tx_preimage_loc: tx_preimage_loc }
       end
 
       # -- Type parsing ------------------------------------------------------
