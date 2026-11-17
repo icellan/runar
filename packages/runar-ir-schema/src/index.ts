@@ -2,7 +2,8 @@
  * runar-ir-schema — type definitions, JSON schemas, and validators for every
  * intermediate representation in the Rúnar compiler pipeline.
  *
- * Re-exports everything so consumers can `import { ANFProgram, validateANF } from 'runar-ir-schema'`.
+ * Re-exports everything so consumers can `import { ANFProgram, canonicalJsonStringify } from 'runar-ir-schema'`.
+ * The Node-only JSON Schema validators live in the `runar-ir-schema/validators` subpath.
  */
 
 // Rúnar AST (Pass 1 output)
@@ -131,19 +132,10 @@ export type { StateFieldEncoding } from './state-layout.js';
 export { ABI_VALUE_ENCODINGS, abiValueEncoding } from './abi-type-encoding.js';
 export type { AbiValueEncoding } from './abi-type-encoding.js';
 
-// Validators
-export {
-  validateANF,
-  validateArtifact,
-  assertValidANF,
-  assertValidArtifact,
-} from './validators.js';
-export type {
-  ValidationResult,
-  ValidationSuccess,
-  ValidationFailure,
-  ValidationError,
-} from './validators.js';
+// Validators (validateANF / validateArtifact / assertValid*) are NOT re-exported
+// here: they load Node-only modules (node:fs, node:path, node:url) at module
+// load, which breaks browser bundling of every consumer of this root entry.
+// Import them from 'runar-ir-schema/validators' instead.
 
 // Canonical JSON
 export {

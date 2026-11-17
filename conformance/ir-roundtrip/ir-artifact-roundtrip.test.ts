@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compile, loadANFFromJSON } from '../../packages/runar-compiler/src/index.js';
-import { validateANF } from '../../packages/runar-ir-schema/src/index.js';
+import { validateANF } from '../../packages/runar-ir-schema/src/validators.js';
 import type { RunarArtifact } from '../../packages/runar-ir-schema/src/index.js';
 import { RunarContract } from '../../packages/runar-sdk/src/contract.js';
 import { MockProvider } from '../../packages/runar-sdk/src/providers/mock.js';

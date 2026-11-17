@@ -20,7 +20,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
-import { validateANF, validateArtifact, canonicalJsonStringify } from 'runar-ir-schema';
+import { canonicalJsonStringify } from 'runar-ir-schema';
+import { validateANF, validateArtifact } from 'runar-ir-schema/validators';
 import { compile } from '../index.js';
 
 const __filename = fileURLToPath(import.meta.url);

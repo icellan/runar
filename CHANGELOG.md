@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Packaging: `runar-testing` runtime dependency, `runar-ir-schema` validators subpath
+
+- **`runar-testing`** (#188): `fast-check` moved from `devDependencies` to `dependencies`. The
+  root entry re-exports the fuzzer, which imports it eagerly, so `import 'runar-testing'`
+  threw `Cannot find module 'fast-check'` after a plain install. The duplicate `runar-sdk`
+  devDependency was removed.
+- **`runar-ir-schema`** (#181) — **breaking:** `validateANF`, `validateArtifact`,
+  `assertValidANF` and `assertValidArtifact` (and their `Validation*` types) are no longer
+  exported from the package root; import them from `runar-ir-schema/validators`. They load
+  `node:fs` / `node:path` / `node:url` at module load, which made `runar-sdk` impossible to
+  bundle for the browser. The package now has an `exports` map (`"."`, `"./validators"`) and
+  `"sideEffects": false`; deep `runar-ir-schema/dist/...` imports are no longer resolvable.
+
 ### Off-chain ScriptVM: which SDKs ship one
 
 Rúnar does not ship seven ScriptVMs, and it never claimed to — but the fact
