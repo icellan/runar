@@ -25,7 +25,7 @@ from runar.sdk.calling import (
 from runar.sdk.script_utils import is_hex_bytes, restore_constructor_args
 from runar.sdk.state import (
     serialize_state, extract_state_from_script, find_last_op_return,
-    encode_push_data, check_fixed_width_value,
+    encode_push_data, check_fixed_width_value, encode_change_pkh,
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
 from runar.sdk.oppushtx import compute_op_push_tx_preimage
@@ -1338,7 +1338,7 @@ class RunarContract:
                 # Append change params (PKH + amount) for methods that need them
                 change_hex = ''
                 if method_needs_change and change_pkh_hex:
-                    change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(tx_change_amount)
+                    change_hex = encode_change_pkh(change_pkh_hex) + _encode_script_number(tx_change_amount)
                 new_amount_hex = ''
                 if method_needs_new_amount:
                     new_amount_hex = _encode_script_number(new_satoshis)
@@ -1637,7 +1637,7 @@ class RunarContract:
                 args_hex += _encode_arg(arg)
             change_hex = ''
             if prepared.method_needs_change and prepared.change_pkh_hex:
-                change_hex = encode_push_data(prepared.change_pkh_hex) + _encode_script_number(prepared.change_amount)
+                change_hex = encode_change_pkh(prepared.change_pkh_hex) + _encode_script_number(prepared.change_amount)
             new_amount_hex = ''
             if prepared.method_needs_new_amount:
                 new_amount_hex = _encode_script_number(prepared.new_amount)
@@ -2056,7 +2056,7 @@ class RunarContract:
                 # Terminal: 0 change
                 change_hex = ''
                 if method_needs_change and change_pkh_hex:
-                    change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(0)
+                    change_hex = encode_change_pkh(change_pkh_hex) + _encode_script_number(0)
                 unlock = (
                     self._build_stateful_prefix('', False) +
                     args_hex +

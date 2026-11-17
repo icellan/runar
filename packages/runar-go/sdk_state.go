@@ -691,6 +691,17 @@ func checkFixedWidthValue(value interface{}, fieldType string, what string) erro
 	return nil
 }
 
+// encodeChangePKH (#213, defence in depth) push-encodes the compiler-injected
+// `_changePKH` arg of a stateful method, refusing anything that is not exactly
+// 20 bytes of hex. Every change-PKH push site goes through it. The covenant
+// gates the width on chain; this is the off-chain refusal.
+func encodeChangePKH(changePKHHex string) (string, error) {
+	if err := checkFixedWidthValue(changePKHHex, "Ripemd160", "changePKH"); err != nil {
+		return "", err
+	}
+	return EncodePushData(changePKHHex), nil
+}
+
 // decodeStateValue reads one state field. Fixed-width types consume exactly
 // their declared width and REFUSE a blob that cannot supply it; everything
 // else falls through to the strict <len><data> push-data reader.

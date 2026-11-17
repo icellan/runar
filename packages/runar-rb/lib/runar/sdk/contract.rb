@@ -1441,7 +1441,7 @@ module Runar
             args_hex   = resolved_args.map { |a| encode_arg(a) }.join
             change_hex = ''
             if method_needs_change && !change_pkh_hex.empty?
-              change_hex = State.encode_push_data(change_pkh_hex) + State.encode_script_int(0)
+              change_hex = State.encode_change_pkh(change_pkh_hex) + State.encode_script_int(0)
             end
             unlock = build_stateful_prefix('', method_uses_code_part) +
                      args_hex +
@@ -2152,7 +2152,7 @@ module Runar
 
           change_hex = ''
           if prepared.method_needs_change && !prepared.change_pkh_hex.empty?
-            change_hex = State.encode_push_data(prepared.change_pkh_hex) +
+            change_hex = State.encode_change_pkh(prepared.change_pkh_hex) +
                          State.encode_script_int(prepared.change_amount)
           end
 
@@ -2690,7 +2690,7 @@ module Runar
 
         change_hex = ''
         if method_needs_change && !change_pkh_hex.empty?
-          change_hex = State.encode_push_data(change_pkh_hex) + State.encode_script_int(change_amount)
+          change_hex = State.encode_change_pkh(change_pkh_hex) + State.encode_script_int(change_amount)
         end
 
         new_amount_hex = method_needs_new_amount ? State.encode_script_int(new_satoshis) : ''

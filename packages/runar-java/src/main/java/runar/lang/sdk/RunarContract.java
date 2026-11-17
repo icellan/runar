@@ -1978,7 +1978,7 @@ public final class RunarContract {
 
         // _changePKH + _changeAmount
         if (changePkhHex != null) {
-            sb.append(ScriptUtils.encodePushData(changePkhHex));
+            sb.append(StateSerializer.encodeChangePkh(changePkhHex));
             sb.append(ContractScript.encodeConstructorArg(java.math.BigInteger.valueOf(changeAmount), "bigint"));
         }
 

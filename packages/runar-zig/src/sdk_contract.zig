@@ -3060,7 +3060,7 @@ pub const RunarContract = struct {
 
         // _changePKH + _changeAmount (for stateful methods that need change)
         if (change_pkh_hex) |pkh| {
-            const pkh_push = try state_mod.encodePushData(self.allocator, pkh);
+            const pkh_push = try state_mod.encodeChangePkh(self.allocator, pkh);
             defer self.allocator.free(pkh_push);
             try script.appendSlice(self.allocator, pkh_push);
 

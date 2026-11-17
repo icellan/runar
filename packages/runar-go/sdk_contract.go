@@ -1622,7 +1622,11 @@ func (c *RunarContract) PrepareCall(
 			}
 			changeHex := ""
 			if methodNeedsChange && changePKHHex != "" {
-				changeHex = EncodePushData(changePKHHex) + encodeArg(txChangeAmount)
+				changePushHex, chgErr := encodeChangePKH(changePKHHex)
+				if chgErr != nil {
+					return "", "", chgErr
+				}
+				changeHex = changePushHex + encodeArg(txChangeAmount)
 			}
 			newAmountHex := ""
 			if methodNeedsNewAmount {
@@ -2017,7 +2021,11 @@ func (c *RunarContract) FinalizeCall(
 		}
 		changeHex := ""
 		if prepared.methodNeedsChange && prepared.changePKHHex != "" {
-			changeHex = EncodePushData(prepared.changePKHHex) + encodeArg(prepared.changeAmount)
+			changePushHex, chgErr := encodeChangePKH(prepared.changePKHHex)
+			if chgErr != nil {
+				return "", nil, fmt.Errorf("RunarContract.FinalizeCall: %w", chgErr)
+			}
+			changeHex = changePushHex + encodeArg(prepared.changeAmount)
 		}
 		newAmountHex := ""
 		if prepared.methodNeedsNewAmount {
@@ -3013,7 +3021,11 @@ func (c *RunarContract) prepareCallTerminal(
 			}
 			changeHex := ""
 			if methodNeedsChange && changePKHHex != "" {
-				changeHex = EncodePushData(changePKHHex) + encodeArg(int64(0))
+				changePushHex, chgErr := encodeChangePKH(changePKHHex)
+				if chgErr != nil {
+					return "", "", chgErr
+				}
+				changeHex = changePushHex + encodeArg(int64(0))
 			}
 			preimageHexStr := hex.EncodeToString(preimage)
 			unlockStr := c.buildStatefulPrefix("", false) +

@@ -1617,7 +1617,7 @@ impl RunarContract {
                 // Append change params (PKH + amount) for methods that need them
                 let mut change_hex = String::new();
                 if method_needs_change && !change_pkh_hex.is_empty() {
-                    change_hex.push_str(&encode_push_data(&change_pkh_hex));
+                    change_hex.push_str(&super::state::encode_change_pkh(&change_pkh_hex)?);
                     change_hex.push_str(&encode_arg(&SdkValue::Int(tx_change_amount)));
                 }
 
@@ -2016,7 +2016,7 @@ impl RunarContract {
             }
             let mut change_hex = String::new();
             if prepared.method_needs_change && !prepared.change_pkh_hex.is_empty() {
-                change_hex.push_str(&encode_push_data(&prepared.change_pkh_hex));
+                change_hex.push_str(&super::state::encode_change_pkh(&prepared.change_pkh_hex)?);
                 change_hex.push_str(&encode_arg(&SdkValue::Int(prepared.change_amount)));
             }
             let mut new_amount_hex = String::new();
@@ -2244,7 +2244,7 @@ impl RunarContract {
                 // Terminal: 0 change
                 let mut change_hex = String::new();
                 if method_needs_change && !change_pkh_hex.is_empty() {
-                    change_hex.push_str(&encode_push_data(change_pkh_hex));
+                    change_hex.push_str(&super::state::encode_change_pkh(change_pkh_hex)?);
                     change_hex.push_str(&encode_arg(&SdkValue::Int(0)));
                 }
                 // Terminal never needs code part. BUG-100: no op_sig pushed —
