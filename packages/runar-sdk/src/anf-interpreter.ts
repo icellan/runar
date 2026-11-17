@@ -1573,7 +1573,16 @@ function sha256CompressBytes(state: number[], block: number[]): number[] {
 function sha256FinalizeFn(stateArg: unknown, remainingArg: unknown, bitLenArg: unknown): string {
   const state = Utils.toArray(String(stateArg ?? ''), 'hex');
   const remaining = Utils.toArray(String(remainingArg ?? ''), 'hex');
-  if (typeof bitLenArg !== 'bigint') throw new Error('sha256Finalize: msgBitLen must be a bigint');
+  // A literal msgBitLen reaches here as a `load_const` whose JSON value is a
+  // bare number (or "<n>n" past 2^53); a method argument as a bigint.
+  const bitLen =
+    typeof bitLenArg === 'bigint'
+      ? bitLenArg
+      : (typeof bitLenArg === 'number' && Number.isSafeInteger(bitLenArg)) ||
+          (typeof bitLenArg === 'string' && /^-?\d+n$/.test(bitLenArg))
+        ? toBigInt(bitLenArg)
+        : null;
+  if (bitLen === null) throw new Error('sha256Finalize: msgBitLen must be a bigint');
   if (state.length !== 32) throw new Error(`sha256Finalize: state must be 32 bytes, got ${state.length}`);
   // Past 119 bytes the padding needs a third block, which the script never
   // emits: it aborts (F-142).
@@ -1582,15 +1591,15 @@ function sha256FinalizeFn(stateArg: unknown, remainingArg: unknown, bitLenArg: u
   }
   // GK-BUG-013: the script requires the 9th byte of msgBitLen's 9-byte
   // OP_NUM2BIN form to be 0x00, i.e. 0 <= msgBitLen < 2^64.
-  if (bitLenArg < 0n || bitLenArg >= 1n << 64n) {
-    throw new Error(`sha256Finalize: msgBitLen must be in [0, 2^64), got ${bitLenArg}`);
+  if (bitLen < 0n || bitLen >= 1n << 64n) {
+    throw new Error(`sha256Finalize: msgBitLen must be in [0, 2^64), got ${bitLen}`);
   }
   const blocks = remaining.length + 1 + 8 <= 64 ? 1 : 2;
   const padded = new Array<number>(blocks * 64).fill(0);
   remaining.forEach((v, i) => { padded[i] = v; });
   padded[remaining.length] = 0x80;
   for (let i = 0; i < 8; i++) {
-    padded[padded.length - 1 - i] = Number((bitLenArg >> BigInt(8 * i)) & 0xffn);
+    padded[padded.length - 1 - i] = Number((bitLen >> BigInt(8 * i)) & 0xffn);
   }
   let s = state;
   for (let i = 0; i < blocks; i++) s = sha256CompressBytes(s, padded.slice(i * 64, (i + 1) * 64));

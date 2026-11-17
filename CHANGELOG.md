@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Preimage properties, stateless `tx_preimage`, SDK `sha256Finalize` (PR F)
+
+- **All seven compilers — breaking:** any property holding a `SigHashPreimage` (readonly or
+  mutable, scalar or `FixedArray`, stateless or stateful) is refused at its declaration:
+  `property '<name>' cannot hold a SigHashPreimage: a preimage stored in a property was fixed
+  before the spending transaction existed, so it can never pass checkPreimage() and every field
+  an extractor reads from it is unverified`. Take the preimage as a method parameter and
+  `assert(checkPreimage(p))`. The implicit `txPreimage` of `StatefulSmartContract` is unaffected.
+- **Rust DSL, all seven compilers — breaking:** a `tx_preimage` field in a contract that
+  resolves to stateless (`#[runar::contract]` with no other mutable field, or
+  `#[runar::unsafe_contract]`) is refused by the parser; the field no longer makes a contract
+  stateful by itself (TS and Ruby used to compile such a contract as stateful, Python into a
+  script that can never be spent).
+- **Python compiler:** reading an undeclared property in a contract with no constructor-param
+  property is refused instead of compiling to an always-aborting script.
+- **SDK ANF interpreters (TS, Go, Rust, Python, Zig, Ruby, Java):** `sha256Finalize` is computed
+  as the compiled script computes it (it returned nil / None / undefined in five SDKs and was
+  refused in TS and Java), and refused for a non-32-byte state, more than 119 remaining bytes, or
+  `msgBitLen` outside [0, 2^64).
+
 ### Packaging: `runar-testing` runtime dependency, `runar-ir-schema` validators subpath
 
 - **`runar-testing`** (#188): `fast-check` moved from `devDependencies` to `dependencies`. The
