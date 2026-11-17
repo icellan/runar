@@ -5,6 +5,19 @@
   "description": "JSON Schema definitions and validators for Rúnar IR formats",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./validators": {
+      "types": "./dist/validators.d.ts",
+      "import": "./dist/validators.js",
+      "default": "./dist/validators.js"
+    }
+  },
+  "sideEffects": false,
   "scripts": {
     "build": "tsc && rm -rf dist/schemas && cp -r src/schemas dist/schemas",
     "test": "vitest run",

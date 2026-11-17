@@ -231,8 +231,15 @@ const normalized = canonicalise(prettyPrintedJson);
 
 ## JSON Schema Validation
 
+> **Breaking change (1.0.0-rc):** the validators are no longer exported from the
+> package root. They load Node-only modules (`node:fs`, `node:path`, `node:url`)
+> at import time, which made every consumer of the root entry (including
+> `runar-sdk`) unbundleable for the browser. Import them from the
+> `runar-ir-schema/validators` subpath. The root entry is now free of Node
+> built-ins and marked `"sideEffects": false`.
+
 ```typescript
-import { validateANF, validateArtifact } from 'runar-ir-schema';
+import { validateANF, validateArtifact } from 'runar-ir-schema/validators';
 
 const result = validateANF(jsonData);
 if (!result.valid) {
@@ -240,7 +247,7 @@ if (!result.valid) {
 }
 
 // Or use the assert variants that throw on failure:
-import { assertValidANF, assertValidArtifact } from 'runar-ir-schema';
+import { assertValidANF, assertValidArtifact } from 'runar-ir-schema/validators';
 assertValidANF(jsonData); // throws if invalid
 ```
 

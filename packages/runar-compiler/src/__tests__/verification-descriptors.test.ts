@@ -12,7 +12,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { compile } from '../index.js';
-import { validateArtifact, canonicalJsonStringify } from 'runar-ir-schema';
+import { canonicalJsonStringify } from 'runar-ir-schema';
+import { validateArtifact } from 'runar-ir-schema/validators';
 
 const EAC_SHAPED_SOURCE = `
 import { StatefulSmartContract, assert, checkSig } from 'runar-lang';
