@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Checked preimage extractor arguments, IR-loader preimage properties, SDK `sha256Compress` (PR G)
+
+- **SDK ANF interpreters (TS, Go, Rust, Python, Zig, Ruby, Java):** `sha256Compress` is computed
+  as the compiled script computes it (one SHA-256 block compression; it returned nil / None /
+  undefined in five SDKs and was refused in TS and Java), and refused for a state that is not 32
+  bytes or a block that is not 64 bytes (`sha256Compress: state must be 32 bytes, got N`,
+  `sha256Compress: block must be 64 bytes, got N`).
+
 ### Preimage properties, stateless `tx_preimage`, SDK `sha256Finalize` (PR F)
 
 - **All seven compilers — breaking:** any property holding a `SigHashPreimage` (readonly or

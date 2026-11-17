@@ -1037,6 +1037,13 @@ fn evalNode(
             if (std.mem.eql(u8, c.func, "sha256Finalize")) {
                 return sha256FinalizeVal(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env), getArg(c.args, 2, env));
             }
+            // D16: one SHA-256 block compression. It used to fall through to
+            // the `none` default. What the script refuses (F-114: a state that
+            // is not 32 bytes or a block that is not 64) takes the same
+            // on-chain-abort channel as sha256Finalize.
+            if (std.mem.eql(u8, c.func, "sha256Compress")) {
+                return sha256CompressVal(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env));
+            }
             // Strict mode: a `call(assert, x)` lowering path must enforce the
             // predicate the same way the dedicated `assert` ANF node does.
             // Crypto built-ins (`checkSig`, `checkMultiSig`, `checkPreimage`)
@@ -2133,6 +2140,33 @@ fn evalMethodCall(
 // ---------------------------------------------------------------------------
 // Hash helpers
 // ---------------------------------------------------------------------------
+
+/// D16: `sha256Compress(state, block)` as the compiled script computes it.
+/// `error.ScriptNumberError` where the script refuses: a state that is not 32
+/// bytes or a block that is not 64 (the shared diagnostics read
+/// "sha256Compress: ..." elsewhere).
+fn sha256CompressVal(allocator: std.mem.Allocator, state_v: ANFValue, block_v: ANFValue) error{ OutOfMemory, ScriptNumberError }!ANFValue {
+    const state_hex = switch (state_v) {
+        .bytes => |b| b,
+        else => return error.ScriptNumberError,
+    };
+    const block_hex = switch (block_v) {
+        .bytes => |b| b,
+        else => return error.ScriptNumberError,
+    };
+    const state = bsvz.primitives.hex.decode(allocator, state_hex) catch return error.ScriptNumberError;
+    defer allocator.free(state);
+    const block = bsvz.primitives.hex.decode(allocator, block_hex) catch return error.ScriptNumberError;
+    defer allocator.free(block);
+    if (state.len != 32) return error.ScriptNumberError;
+    if (block.len != 64) return error.ScriptNumberError;
+
+    var out: [32]u8 = undefined;
+    runar_builtins.sha256CompressBlock(&out, state, block);
+    const hex_out = try allocator.alloc(u8, 64);
+    _ = bsvz.primitives.hex.encodeLower(&out, hex_out) catch return error.OutOfMemory;
+    return .{ .bytes = hex_out };
+}
 
 /// D11: `sha256Finalize(state, remaining, msgBitLen)` as the compiled script
 /// computes it. `error.ScriptNumberError` where the script refuses: a state

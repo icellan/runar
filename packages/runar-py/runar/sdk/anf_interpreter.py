@@ -1301,6 +1301,22 @@ def _eval_unary_op(op: str, operand: Any, result_type: Optional[str] = None) -> 
 # Built-in function calls
 # ---------------------------------------------------------------------------
 
+def _sha256_compress(state_hex: Any, block_hex: Any) -> str:
+    """sha256Compress as the compiled script computes it (one block
+    compression), refusing exactly what the script refuses (F-114: a state
+    that is not 32 bytes or a block that is not 64) with the diagnostics every
+    tier shares."""
+    from runar.builtins import sha256_compress
+
+    state = bytes.fromhex(str(state_hex or ''))
+    block = bytes.fromhex(str(block_hex or ''))
+    if len(state) != 32:
+        raise ValueError(f'sha256Compress: state must be 32 bytes, got {len(state)}')
+    if len(block) != 64:
+        raise ValueError(f'sha256Compress: block must be 64 bytes, got {len(block)}')
+    return sha256_compress(state, block).hex()
+
+
 def _sha256_finalize(state_hex: Any, remaining_hex: Any, msg_bit_len: Any) -> str:
     """sha256Finalize as the compiled script computes it, refusing exactly what
     the script refuses (F-114 state size, F-142 remaining length, GK-BUG-013
@@ -1386,6 +1402,10 @@ def _eval_call(
     # silently wrong off-chain.
     if func == 'sha256Finalize':
         return _sha256_finalize(*(list(args) + [None, None, None])[:3])
+    # D16: one SHA-256 block compression. It used to fall through to the None
+    # default, so a state field derived from it was silently wrong off-chain.
+    if func == 'sha256Compress':
+        return _sha256_compress(*(list(args) + [None, None])[:2])
 
     # Assert -- skip
     if func == 'assert':

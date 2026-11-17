@@ -1121,6 +1121,10 @@ function evalCall(
     // what it refuses (F-114 state size, F-142 remaining length, GK-BUG-013
     // msgBitLen domain) with the diagnostics every tier shares.
     case 'sha256Finalize': return sha256FinalizeFn(args[0], args[1], args[2]);
+    // D16: one SHA-256 block compression, refusing what the compiled script
+    // refuses (F-114: a state that is not 32 bytes or a block that is not 64)
+    // with the diagnostics every tier shares.
+    case 'sha256Compress': return sha256CompressFn(args[0], args[1]);
 
     // Assert — skip (on-chain handles it)
     case 'assert': return undefined;
@@ -1420,7 +1424,7 @@ function evalCall(
       // made the `try/catch` guard in `contract.ts` structurally unable to
       // fire for the 76 of runar-lang's 105 builtins this interpreter does
       // not model — every EC op, every NIST P-256/P-384 op, all six SLH-DSA
-      // verifies, Rabin, `sha256Compress`, `merkleRootSha256` (F-274 modelled
+      // verifies, Rabin, `merkleRootSha256` (D16 modelled `sha256Compress`; F-274 modelled
       // `left`/`right`, above; N-171 modelled `split` the same way, above).
       // `contract.ts` then spreads the result over the
       // real state and the `undefined` wins, so a `boolean` state field fed
@@ -1519,9 +1523,10 @@ function hashFn(
 }
 
 // ---------------------------------------------------------------------------
-// Partial SHA-256 (D11): sha256Finalize, FIPS 180-4 padding + the final one
-// or two compressions, the same function as the runar-testing interpreter and
-// every runar-lang runtime.
+// Partial SHA-256: sha256Compress (D16), one block compression, and
+// sha256Finalize (D11), FIPS 180-4 padding + the final one or two
+// compressions; the same functions as the runar-testing interpreter and every
+// runar-lang runtime.
 // ---------------------------------------------------------------------------
 
 const SHA256_K = [
@@ -1568,6 +1573,14 @@ function sha256CompressBytes(state: number[], block: number[]): number[] {
     out.push(x >>> 24, (x >>> 16) & 0xff, (x >>> 8) & 0xff, x & 0xff);
   });
   return out;
+}
+
+function sha256CompressFn(stateArg: unknown, blockArg: unknown): string {
+  const state = Utils.toArray(String(stateArg ?? ''), 'hex');
+  const block = Utils.toArray(String(blockArg ?? ''), 'hex');
+  if (state.length !== 32) throw new Error(`sha256Compress: state must be 32 bytes, got ${state.length}`);
+  if (block.length !== 64) throw new Error(`sha256Compress: block must be 64 bytes, got ${block.length}`);
+  return Utils.toHex(sha256CompressBytes(state, block));
 }
 
 function sha256FinalizeFn(stateArg: unknown, remainingArg: unknown, bitLenArg: unknown): string {

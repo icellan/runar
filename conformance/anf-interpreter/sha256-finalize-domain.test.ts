@@ -28,8 +28,7 @@ import { enforceDriverGate } from './driver-gate.js';
 // cross-interpreter.test.ts against independently computed goldens and the
 // compiled script.
 //
-// Does not prove: anything about sha256Compress, which no SDK interpreter
-// models (TS / Java refuse it, the other five still return nil).
+// sha256Compress (D16) has its own witness replay: sha256-compress-domain.test.ts.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..');
