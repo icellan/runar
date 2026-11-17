@@ -1928,7 +1928,7 @@ describe('D15: Preimage{Write,Read} state fields are refused on the IR path in e
     });
 
     for (const tier of tiers) {
-      it.skipIf(!tier.available)(`${tier.name} refuses ${name} ANF IR with the D9 text`, () => {
+      it.skipIf(!tier.available)(`D15 ${tier.name} refuses ${name} ANF IR with the D9 text`, () => {
         const irPath = join(tempDir, `${name}-${tier.name}.anf.json`);
         writeFileSync(irPath, anfToJson(lowered()));
         const out = tier.run(irPath);
