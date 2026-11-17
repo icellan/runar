@@ -80,8 +80,8 @@ if [ "$CMD" == "start" ]; then
 port=$P2P_PORT
 rpcbind=0.0.0.0
 rpcport=$RPC_PORT
-rpcuser=bitcoin
-rpcpassword=bitcoin
+rpcuser=${RPC_USER:-bitcoin}
+rpcpassword=${RPC_PASS:-bitcoin}
 rpcallowip=0.0.0.0/0
 dnsseed=0
 listenonion=0

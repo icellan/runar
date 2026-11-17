@@ -631,7 +631,7 @@ fn test_fungible_token_merge_wrong_signer() {
     let probe = provider.rejection_probe();
     let result = contract1.call(
         "merge",
-        &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Int(4000)],
+        &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
         &mut provider,
         &*signer_b,
         Some(&call_opts),

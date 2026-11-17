@@ -85,4 +85,24 @@ describe('GK-BUG-002: regtest nodes are published on loopback only', () => {
     expect(text).toMatch(/cat\s+<<\s*EOL\s*>\s*\S*bitcoin\.conf/);
     expect(text).toMatch(/^regtest=1$/m);
   });
+
+  // Because the conf is rewritten on every start, the node's RPC credentials
+  // must come from the same variables every tier's client reads (RPC_USER /
+  // RPC_PASS, default bitcoin/bitcoin). Hard-coding bitcoin/bitcoin here made
+  // CI's integration job (RPC_USER=regtest) see a 401 and report "Regtest node
+  // not running" although the node was up.
+  it('the conf takes its RPC credentials from RPC_USER / RPC_PASS', () => {
+    const text = read(REGTEST);
+    expect(text).toMatch(/^rpcuser=\$\{RPC_USER:-bitcoin\}$/m);
+    expect(text).toMatch(/^rpcpassword=\$\{RPC_PASS:-bitcoin\}$/m);
+    expect(text, 'a hard-coded rpcuser ignores RPC_USER').not.toMatch(/^rpcuser=bitcoin$/m);
+  });
+
+  it('no workflow pre-writes the bitcoin.conf that regtest.sh overwrites', () => {
+    const workflows = execFileSync('git', ['ls-files', '.github/workflows/*.yml'], { cwd: ROOT, encoding: 'utf8' })
+      .split('\n')
+      .filter(Boolean);
+    const offenders = workflows.filter((f) => /regtest-data\/[^\s'"]*bitcoin\.conf/.test(read(f)));
+    expect(offenders, 'a pre-written conf is silently replaced at start; set RPC_USER/RPC_PASS instead').toEqual([]);
+  });
 });
