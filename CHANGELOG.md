@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   laundering local, a helper's return value or a ternary used to compile with the value never
   checked against the transaction; it is now a type error (`<fn>() needs a checked
   SigHashPreimage: ...`, spec/type-system.md 4.3).
+- **All seven IR loaders (`--ir` / `compileFromANF`) — breaking:** the preimage rules the frontend
+  enforces are re-derived on the ANF: a property typed `SigHashPreimage` is refused with the D9
+  text; every `SigHashPreimage` parameter of a public method must be asserted with
+  `checkPreimage` on every path (GK-GAP-010 text); and every extractor argument, and every
+  argument to a private method's `SigHashPreimage` parameter, must resolve to a checked
+  `SigHashPreimage` parameter or the implicit stateful `txPreimage` (D14 text). The ANF carries no
+  source-level type, so a hand-written IR is taken at its declared parameter types; a check only
+  inside a loop body or a multi-result `if` is refused on the IR path (spec/type-system.md 4.3).
 - **SDK ANF interpreters (TS, Go, Rust, Python, Zig, Ruby, Java):** `sha256Compress` is computed
   as the compiled script computes it (one SHA-256 block compression; it returned nil / None /
   undefined in five SDKs and was refused in TS and Java), and refused for a state that is not 32

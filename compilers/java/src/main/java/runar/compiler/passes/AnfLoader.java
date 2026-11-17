@@ -243,6 +243,9 @@ public final class AnfLoader {
         // N-205: F-286's verifyRabinSig key provenance, and the write rule for
         // a mutable key property (shared rule and diagnostics, 7 tiers).
         RabinKeyProvenance.check(props, methods);
+        // D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
+        // diagnostics, 7 tiers; see IrPreimageRules).
+        IrPreimageRules.check(props, methods);
         return new AnfProgram(name, props, methods, parentClass);
     }
 

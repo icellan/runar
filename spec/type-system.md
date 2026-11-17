@@ -452,6 +452,25 @@ extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashP
 an input index and a script, and checks the script against the implicit
 `txPreimage` itself.
 
+**The IR path (D15).** `--ir` / `compileFromANF` skip validate and typecheck,
+so every tier's IR loader re-derives these rules from the ANF: a property
+typed `SigHashPreimage` is refused with the property diagnostic above; every
+`SigHashPreimage` parameter of a public method must be checked on every path
+(an `assert` of a `check_preimage` of it, an `&&`-lowered `if` whose other arm
+is the constant `false`, an `if` both of whose arms check it, or a top-level
+call to a private method that checks it; a loop body checks nothing), with
+the GK-GAP-010 diagnostic; and every extractor argument, and every argument
+passed to a private method's `SigHashPreimage` parameter, must resolve
+through `@ref:` aliases of names bound once to a `load_param` of a
+`SigHashPreimage` parameter of that method (or, in a private method of a
+program whose every public method declares `txPreimage: SigHashPreimage`, to
+the implicit `txPreimage`), with the D14 diagnostic. ANF carries no
+source-level type, so a hand-written IR that declares a parameter
+`SigHashPreimage` is taken at its word, and then must check it; a check the
+lowering placed where this analysis does not look (only inside a loop body,
+or in a multi-result `if`) is refused on the IR path even where the source
+compiler accepts it.
+
 ### 4.4 Practical Impact
 
 ```typescript

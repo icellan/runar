@@ -98,6 +98,7 @@ function single(edit: (method: Json, checkPreimage: Json) => void): Json {
 /**
  * The nested control: a check_preimage inside an `if` arm or a `loop` body.
  * No golden nests one, so this is the smallest program all six CLIs accept
+ * (with the parameter also asserted at the top level, which D15 requires)
  * (asserted below before any of its negatives is graded).
  */
 function nested(wrap: 'if' | 'loop', flag?: number): Json {
@@ -123,6 +124,12 @@ function nested(wrap: 'if' | 'loop', flag?: number): Json {
         params: [{ name: 'txPreimage', type: 'SigHashPreimage' }],
         body: [
           { name: 't0', value: { kind: 'load_param', name: 'txPreimage' } },
+          // D15: the IR loaders now require the parameter asserted on every
+          // path (GK-GAP-010), which the nested check alone is not; this
+          // top-level check keeps the control accepted, and the nested one
+          // still carries the flag under test.
+          { name: 't7', value: { kind: 'check_preimage', preimage: 't0' } },
+          { name: 't8', value: { kind: 'assert', value: 't7' } },
           { name: 't1', value: { kind: 'load_const', value: true } },
           { name: 't2', value: block },
           { name: 't5', value: { kind: 'load_const', value: true } },

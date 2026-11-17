@@ -16,7 +16,10 @@ import {
   BINDING_VARIANT_MALFORMED_ERROR,
   BINDING_VARIANT_MULTIPLE_ERROR,
 } from '../passes/bindingvariant-directive.js';
-import { loadANFFromJSON, lowerToANF, compileFromANF } from '../index.js';
+import { loadANFFromJSON, lowerToANF, compileFromANF, optimizeEC } from '../index.js';
+import { lowerToStack } from '../passes/05-stack-lower.js';
+import { optimizeStackIR } from '../optimizer/peephole.js';
+import { emit } from '../passes/06-emit.js';
 
 function errors(src: string, fileName = 'C.runar.ts'): string {
   return parse(src, fileName).errors.filter((e) => e.severity === 'error').map((e) => e.message).join('\n');
@@ -224,7 +227,14 @@ describe('@bindingVariant through ANF and codegen', () => {
     const nodes = checkPreimages(anf);
     expect(nodes.length).toBeGreaterThanOrEqual(3);
     expect(nodes.every((c) => c.bindingVariant === 'all')).toBe(true);
-    const hex = compileFromANF(anf).scriptHex;
+    // D15: the IR loader refuses it too (no SigHashPreimage property, and a
+    // check only in a loop body / ternary arm proves nothing) ...
+    expect(() => compileFromANF(anf)).toThrow("property 'a' cannot hold a SigHashPreimage");
+    // ... so drive the pipeline compileFromANF runs below its loader to pin
+    // the codegen: every nested check_preimage emits the `all` binding blob.
+    const stack = lowerToStack(optimizeEC(anf));
+    for (const m of stack.methods) m.ops = optimizeStackIR(m.ops);
+    const hex = emit(stack).scriptHex;
     expect(hex).toContain(CHECK_PREIMAGE_BINDING_ALL_HEX);
     expect(hex).not.toContain(CHECK_PREIMAGE_BINDING_HEX);
   });

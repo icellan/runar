@@ -12,6 +12,7 @@ const sighash_directive = @import("../frontend/sighash_directive.zig");
 const stateful_scaffold = @import("stateful_scaffold.zig");
 const synthetic_array_chain = @import("synthetic_array_chain.zig");
 const rabin_key_provenance = @import("rabin_key_provenance.zig");
+const preimage_rules = @import("preimage_rules.zig");
 const call_depth = @import("call_depth.zig");
 pub const required_fields = @import("required_fields.zig");
 
@@ -89,6 +90,7 @@ const ParseError = error{
     // leaves that are not one expansion). Message in lastDiagnostic().
     SyntheticArrayChainMalformed,
     RabinKeyProvenance,
+    PreimageRuleViolation,
     // N-265: a cycle in the method_call graph. `compile-ir` skips the
     // frontend entirely, so frontend/validate.zig's recursion check never
     // ran; stack lowering inlines every method_call with no cycle guard,
@@ -522,6 +524,12 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     // mutable key property (shared rule and diagnostics, 7 tiers).
     rabin_key_provenance.check(allocator, properties, method_list.items) catch |err| switch (err) {
         error.RabinKeyProvenance => return ParseError.RabinKeyProvenance,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    // D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
+    // diagnostics, 7 tiers; see preimage_rules.zig).
+    preimage_rules.check(allocator, properties, method_list.items) catch |err| switch (err) {
+        error.PreimageRuleViolation => return ParseError.PreimageRuleViolation,
         error.OutOfMemory => return error.OutOfMemory,
     };
 
