@@ -174,3 +174,4 @@ func TestGK005ExtensionDispatch(t *testing.T) {
 		t.Fatalf("no file name: %v", n.ErrorStrings())
 	}
 }
+

@@ -92,22 +92,24 @@ fn sig_state_continuation_frames_like_bytestring() {
     );
 }
 
+/// D9: no property may hold a SigHashPreimage any more (a stored preimage can
+/// never pass checkPreimage), so this source is refused at validate. The
+/// framing of a SigHashPreimage state field is still pinned below the
+/// validator, on the lowered program, by r015_sig_state_varlen_tests.rs.
 #[test]
-fn sighash_preimage_state_continuation_frames_like_bytestring() {
-    let control = control_hex();
-    let got = script_hex(&write_src("SigHashPreimage"), WRITE_FILE);
-    assert_eq!(
-        got.len(),
-        control.len(),
-        "a mutable SigHashPreimage field does not push-data-frame its \
-         continuation state (len {} vs ByteString's {})",
-        got.len(),
-        control.len()
+fn sighash_preimage_state_field_is_refused() {
+    let opts = CompileOptions {
+        disable_constant_folding: true,
+        ..CompileOptions::default()
+    };
+    let result = compile_from_source_str_with_result(&write_src("SigHashPreimage"), Some(WRITE_FILE), &opts);
+    assert!(
+        result.diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.message.contains("property 'tag' cannot hold a SigHashPreimage")),
+        "want the D9 diagnostic, got {:?}",
+        result.diagnostics
     );
-    assert_eq!(
-        got, control,
-        "a mutable SigHashPreimage field does not frame its continuation like ByteString"
-    );
+    assert!(result.script_hex.is_none(), "a SigHashPreimage state field compiled");
 }
 
 /// Negative controls — without these the two tests above would still pass if

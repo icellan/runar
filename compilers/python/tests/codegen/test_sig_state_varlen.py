@@ -36,7 +36,10 @@ import pytest
 
 from runar_compiler.compiler import compile_from_source_str_with_result
 
-VAR_LEN_TYPES = ["Sig", "SigHashPreimage"]
+# D9: no property may hold a SigHashPreimage any more (a stored preimage can
+# never pass checkPreimage); the framing lock runs for Sig, and
+# TestSigHashPreimageField pins the refusal of the SigHashPreimage rows.
+VAR_LEN_TYPES = ["Sig"]
 
 
 def write_src(prop_type: str) -> str:
@@ -120,3 +123,13 @@ class TestNegativeControls:
             f"{prop_type} compiled identically to ByteString — it must keep its "
             "fixed-width framing, or the assertions above stop discriminating"
         )
+
+
+class TestSigHashPreimageField:
+    """D9: a SigHashPreimage state field is refused at validate, read or write."""
+
+    @pytest.mark.parametrize("src_fn", [write_src, read_src])
+    def test_refused(self, src_fn):
+        r = compile_from_source_str_with_result(src_fn("SigHashPreimage"), "VarLen.runar.ts", disable_constant_folding=True)
+        assert not r.success
+        assert any("property 'tag' cannot hold a SigHashPreimage" in d.message for d in r.diagnostics)

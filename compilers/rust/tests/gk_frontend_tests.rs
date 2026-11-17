@@ -112,3 +112,4 @@ fn gk005_extension_dispatch() {
         assert!(n.contract.is_some() && n.errors.is_empty(), "{name:?}: {:?}", n.errors);
     }
 }
+

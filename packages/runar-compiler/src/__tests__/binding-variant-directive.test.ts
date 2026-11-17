@@ -16,7 +16,7 @@ import {
   BINDING_VARIANT_MALFORMED_ERROR,
   BINDING_VARIANT_MULTIPLE_ERROR,
 } from '../passes/bindingvariant-directive.js';
-import { loadANFFromJSON } from '../index.js';
+import { loadANFFromJSON, lowerToANF, compileFromANF } from '../index.js';
 
 function errors(src: string, fileName = 'C.runar.ts'): string {
   return parse(src, fileName).errors.filter((e) => e.severity === 'error').map((e) => e.message).join('\n');
@@ -156,18 +156,50 @@ describe('@bindingVariant through ANF and codegen', () => {
     expect(r.artifact!.script).toContain(CHECK_PREIMAGE_BINDING_ALL_HEX.replace(/0141(7e21[0-9a-f]{66}ad)$/, '01c1$1'));
   });
 
-  // The preimages are MUTABLE state fields of a stateful contract: a public
-  // SigHashPreimage PARAMETER must be asserted via checkPreimage on every path
-  // (GK-GAP-010), which a loop body or one ternary arm is not, and a readonly
-  // SigHashPreimage property is refused at its declaration (R3-GK010-GAPS).
-  // The auto-injected txPreimage check is a fourth check_preimage node; it
-  // must carry the method variant too.
-  it('nested loop and ternary arms inherit the method variant', () => {
+  // Every check_preimage node in the method inherits the method variant, not
+  // just the auto-injected one. Two legs, because the source language no
+  // longer has a legal loop-body or ternary-arm check:
+  //  - a loop body or one ternary arm is not "every path", so it cannot be a
+  //    SigHashPreimage PARAMETER's only check (GK-GAP-010), and the parameter
+  //    is affine, so it cannot be checked a second time; and no property may
+  //    hold a SigHashPreimage at all, readonly or mutable (R3-GK010-GAPS, D9).
+  //  - so the if/else arms, the nesting the language still allows, go through
+  //    the full source compile; the loop and ternary arms go through ANF
+  //    lowering and codegen directly (the validator is the only thing that
+  //    refuses their source, and it is pinned elsewhere: the corpus in
+  //    conformance/negatives/preimage-checked-cases.json).
+  it('if/else arms inherit the method variant (full compile)', () => {
     const src = `
-      class G extends StatefulSmartContract {
-        a: SigHashPreimage;
-        b: SigHashPreimage;
-        c: SigHashPreimage;
+      class G extends SmartContract {
+        readonly n: bigint;
+        constructor(n: bigint) {
+          super(n);
+          this.n = n;
+        }
+        /** @bindingVariant all */
+        public unlock(a: SigHashPreimage, d: boolean) {
+          if (d) {
+            assert(checkPreimage(a));
+          } else {
+            assert(checkPreimage(a));
+          }
+        }
+      }`;
+    const r = compile(src, { fileName: 'G.runar.ts' });
+    expect(r.success, (r.diagnostics ?? []).map((d) => d.message).join('\n')).toBe(true);
+    const nodes = checkPreimages(r.anf);
+    expect(nodes.length).toBe(2);
+    expect(nodes.every((c) => c.bindingVariant === 'all')).toBe(true);
+    expect(r.artifact!.script).toContain(CHECK_PREIMAGE_BINDING_ALL_HEX);
+    expect(r.artifact!.script).not.toContain(CHECK_PREIMAGE_BINDING_HEX);
+  });
+
+  it('nested loop and ternary arms inherit the method variant (ANF lowering + codegen)', () => {
+    const src = `
+      class G extends SmartContract {
+        readonly a: SigHashPreimage;
+        readonly b: SigHashPreimage;
+        readonly c: SigHashPreimage;
         constructor(a: SigHashPreimage, b: SigHashPreimage, c: SigHashPreimage) {
           super(a, b, c);
           this.a = a;
@@ -183,12 +215,18 @@ describe('@bindingVariant through ANF and codegen', () => {
           assert(ok);
         }
       }`;
-    const r = compile(src, { fileName: 'G.runar.ts' });
-    expect(r.success, (r.diagnostics ?? []).map((d) => d.message).join('\n')).toBe(true);
-    const nodes = checkPreimages(r.anf);
-    expect(nodes.length).toBeGreaterThanOrEqual(4);
+    // The full compile refuses it at the declarations (D9) ...
+    expect(compile(src, { fileName: 'G.runar.ts' }).success).toBe(false);
+    // ... so lower the parsed contract directly.
+    const parsed = parse(src, 'G.runar.ts');
+    expect(parsed.errors).toEqual([]);
+    const anf = lowerToANF(parsed.contract!);
+    const nodes = checkPreimages(anf);
+    expect(nodes.length).toBeGreaterThanOrEqual(3);
     expect(nodes.every((c) => c.bindingVariant === 'all')).toBe(true);
-    expect(r.artifact!.script).not.toContain(CHECK_PREIMAGE_BINDING_HEX);
+    const hex = compileFromANF(anf).scriptHex;
+    expect(hex).toContain(CHECK_PREIMAGE_BINDING_ALL_HEX);
+    expect(hex).not.toContain(CHECK_PREIMAGE_BINDING_HEX);
   });
 
   it('--ir: the loader accepts lowS/all and refuses any other bindingVariant', () => {

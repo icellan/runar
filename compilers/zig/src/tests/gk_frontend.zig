@@ -140,3 +140,4 @@ test "GK-GAP-005/006: extension dispatch" {
     try std.testing.expectEqual(@as(usize, 0), n.errors.len);
     try std.testing.expect(n.contract != null);
 }
+

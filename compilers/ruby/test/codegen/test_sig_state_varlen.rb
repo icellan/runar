@@ -41,7 +41,10 @@ require_relative "codegen_helper"
 class TestSigStateVarLen < Minitest::Test
   include CodegenTestHelpers
 
-  VAR_LEN_TYPES = %w[Sig SigHashPreimage].freeze
+  # D9: no property may hold a SigHashPreimage any more (a stored preimage can
+  # never pass checkPreimage); the framing lock runs for Sig, and
+  # test_sig_hash_preimage_field_is_refused pins the refusal.
+  VAR_LEN_TYPES = %w[Sig].freeze
 
   # Mutating method -- drives the state-continuation WRITE path. The field is
   # rewritten from itself: a public SigHashPreimage parameter must reach
@@ -115,6 +118,13 @@ class TestSigStateVarLen < Minitest::Test
       fixed = compile_ts_source(write_src(prop_type), "VarLenStateWrite.runar.ts")
       refute_equal control.script, fixed.script,
                    "#{prop_type} compiled identically to ByteString — it must keep its fixed-width framing"
+    end
+  end
+
+  def test_sig_hash_preimage_field_is_refused
+    [write_src("SigHashPreimage"), read_src("SigHashPreimage")].each do |src|
+      err = assert_raises(RuntimeError) { compile_ts_source(src, "VarLen.runar.ts") }
+      assert_includes err.message, "property 'tag' cannot hold a SigHashPreimage"
     end
   end
 end

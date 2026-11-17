@@ -36,6 +36,7 @@ pub struct P2PKH {
 - `#[runar::stateful_contract]` can be used instead to explicitly mark a contract as stateful. This is equivalent to `#[runar::contract]` when any field lacks `#[readonly]`.
 - `#[readonly]` marks immutable properties (baked into the locking script).
 - Fields without `#[readonly]` are mutable (stateful).
+- No other field may have type `SigHashPreimage` (readonly or mutable): a stored preimage can never pass `check_preimage` (spec/type-system.md 4.3).
 - Fields should be `pub` so tests can construct the struct directly.
 - All fields use snake_case; the Rúnar parser converts to camelCase for the AST.
 

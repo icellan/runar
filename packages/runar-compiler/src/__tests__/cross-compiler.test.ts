@@ -4,7 +4,8 @@ import { writeFileSync, mkdtempSync, rmSync, readdirSync, readFileSync, existsSy
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
-import { compile } from '../index.js';
+import { compile as compileSource, compileFromANF, lowerToANF } from '../index.js';
+import { parse } from '../passes/01-parse.js';
 import type { ANFProgram } from '../ir/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -768,6 +769,27 @@ class P384StateRead extends StatefulSmartContract {
   }
 }
 `;
+
+/**
+ * D9: no property may hold a SigHashPreimage any more, so `compile()` refuses
+ * the two Preimage* contracts at validate. The seven backends still share the
+ * state-framing codegen for the type (reachable from `--ir`), so those two are
+ * lowered directly and every tier is held to the same IR -> hex as before.
+ */
+const IR_ONLY_SOURCES = new Set([PREIMAGE_STATE_WRITE_SOURCE, PREIMAGE_STATE_READ_SOURCE]);
+
+function compile(source: string, options?: Parameters<typeof compileSource>[1]): ReturnType<typeof compileSource> {
+  if (!IR_ONLY_SOURCES.has(source)) return compileSource(source, options);
+  expect(compileSource(source, options).success, 'D9: a SigHashPreimage state field must not compile').toBe(false);
+  const parsed = parse(source, 'Contract.runar.ts');
+  if (!parsed.contract) throw new Error(parsed.errors.map((e) => e.message).join('; '));
+  const r = compileFromANF(lowerToANF(parsed.contract), {
+    disableConstantFolding: options?.disableConstantFolding,
+  });
+  return { success: true, anf: r.anf, scriptHex: r.scriptHex, diagnostics: [] } as unknown as ReturnType<
+    typeof compileSource
+  >;
+}
 
 const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'P2PKH', source: P2PKH_SOURCE },

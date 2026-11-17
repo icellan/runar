@@ -36,6 +36,7 @@ package compiler
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -92,7 +93,7 @@ func compileVarLenOrFatal(t *testing.T, source, fileName string) *CompileResult 
 func TestVarLenStateWrite_SigFramesLikeByteString(t *testing.T) {
 	control := compileVarLenOrFatal(t, varLenWriteSource("ByteString"), "VarLenStateWrite.runar.ts")
 
-	for _, propType := range []string{"Sig", "SigHashPreimage"} {
+	for _, propType := range []string{"Sig"} {
 		t.Run(propType, func(t *testing.T) {
 			got := compileVarLenOrFatal(t, varLenWriteSource(propType), "VarLenStateWrite.runar.ts")
 			if got.Artifact.Script != control.Artifact.Script {
@@ -106,7 +107,7 @@ func TestVarLenStateWrite_SigFramesLikeByteString(t *testing.T) {
 func TestVarLenStateRead_SigTakesCodePartLikeByteString(t *testing.T) {
 	control := compileVarLenOrFatal(t, varLenReadSource("ByteString"), "VarLenStateRead.runar.ts")
 
-	for _, propType := range []string{"Sig", "SigHashPreimage"} {
+	for _, propType := range []string{"Sig"} {
 		t.Run(propType, func(t *testing.T) {
 			got := compileVarLenOrFatal(t, varLenReadSource(propType), "VarLenStateRead.runar.ts")
 			if got.Artifact.Script != control.Artifact.Script {
@@ -175,4 +176,25 @@ func assertUsesCodePart(t *testing.T, result *CompileResult, method string, want
 		return
 	}
 	t.Fatalf("method %q not found in the ABI", method)
+}
+
+// D9: no property may hold a SigHashPreimage any more (a stored preimage can
+// never pass checkPreimage), so the SigHashPreimage rows the lock above used
+// to carry are refused at validate, write and read shapes alike, with the
+// shared diagnostic. The framing lock keeps running for Sig.
+func TestVarLenState_SigHashPreimageFieldIsRefused(t *testing.T) {
+	for name, src := range map[string]string{
+		"write": varLenWriteSource("SigHashPreimage"),
+		"read":  varLenReadSource("SigHashPreimage"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := CompileFromSourceStrWithResult(src, "VarLen.runar.ts", CompileOptions{DisableConstantFolding: true})
+			if result.Success {
+				t.Fatal("a SigHashPreimage state field compiled")
+			}
+			if !strings.Contains(fmt.Sprint(result.Diagnostics), "property 'tag' cannot hold a SigHashPreimage") {
+				t.Fatalf("want the D9 diagnostic, got %v", result.Diagnostics)
+			}
+		})
+	}
 }

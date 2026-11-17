@@ -49,7 +49,7 @@ import { createHash } from 'node:crypto';
 import { parse } from '../passes/01-parse.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
-import { compile } from '../index.js';
+import { compile, compileFromANF } from '../index.js';
 import type { StackProgram } from '../ir/index.js';
 
 /** Mutating method — drives the state-continuation WRITE path (defect 1). */
@@ -126,6 +126,22 @@ function abiUsesCodePart(source: string, fileName: string, method: string): bool
   return entry.usesCodePart === true;
 }
 
+/**
+ * D9: no property may hold a SigHashPreimage, so `compile()` refuses every
+ * SigHashPreimage source below at validate. The state-framing codegen for the
+ * type is still reachable from IR (`--ir` / compileFromANF), so the
+ * SigHashPreimage rows lower the parsed contract directly and compare the
+ * script that path emits, on both sides of each equality.
+ */
+function irHexOf(source: string): string {
+  const parsed = parse(source);
+  if (!parsed.contract) throw new Error(`parse failed: ${parsed.errors.map(e => e.message).join('; ')}`);
+  return compileFromANF(lowerToANF(parsed.contract), { disableConstantFolding: true }).scriptHex.toLowerCase();
+}
+const hexFor = (t: string, fileName: string) => (src: string) =>
+  t === 'SigHashPreimage' ? irHexOf(src) : hexOf(src, fileName);
+const D9_REFUSAL = "property 'tag' cannot hold a SigHashPreimage";
+
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
 const VAR_LEN_TYPES = ['Sig', 'SigHashPreimage'] as const;
@@ -147,9 +163,19 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
         expect(() => compileToStack(terminalSource(t))).not.toThrow();
       });
 
-      it(`compiles a ${t} state field end-to-end to script hex`, () => {
-        expect(() => hexOf(writeSourceFor(t)(t), WRITE_FILE)).not.toThrow();
-      });
+      if (t === 'SigHashPreimage') {
+        it('refuses a SigHashPreimage state field at compile (D9)', () => {
+          for (const src of [writeSourceFor(t)(t), terminalSource(t)]) {
+            const r = compile(src, { fileName: WRITE_FILE, disableConstantFolding: true });
+            expect(r.success).toBe(false);
+            expect(r.diagnostics.map(d => d.message).join('\n')).toContain(D9_REFUSAL);
+          }
+        });
+      } else {
+        it(`compiles a ${t} state field end-to-end to script hex`, () => {
+          expect(() => hexOf(writeSourceFor(t)(t), WRITE_FILE)).not.toThrow();
+        });
+      }
     }
   });
 
@@ -161,7 +187,8 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
     for (const t of VAR_LEN_TYPES) {
       it(`a mutating method on a ${t} field lowers identically to ByteString`, () => {
         const src = writeSourceFor(t);
-        expect(hexOf(src(t), WRITE_FILE)).toBe(hexOf(src('ByteString'), WRITE_FILE));
+        const hex = hexFor(t, WRITE_FILE);
+        expect(hex(src(t))).toBe(hex(src('ByteString')));
       });
     }
   });
@@ -182,14 +209,17 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
         expect(program.methods.find(m => m.name === 'check')?.usesCodePart).toBe(true);
       });
 
-      it(`a ${t} field advertises _codePart in the compiled ABI`, () => {
-        expect(abiUsesCodePart(terminalSource(t), READ_FILE, 'check')).toBe(true);
-      });
+      // The ABI exists only for a source compile, which D9 refuses for
+      // SigHashPreimage; the Stack-IR flag above is its evidence.
+      if (t !== 'SigHashPreimage') {
+        it(`a ${t} field advertises _codePart in the compiled ABI`, () => {
+          expect(abiUsesCodePart(terminalSource(t), READ_FILE, 'check')).toBe(true);
+        });
+      }
 
       it(`a terminal read of a ${t} field lowers identically to ByteString`, () => {
-        expect(hexOf(terminalSource(t), READ_FILE)).toBe(
-          hexOf(terminalSource('ByteString'), READ_FILE),
-        );
+        const hex = hexFor(t, READ_FILE);
+        expect(hex(terminalSource(t))).toBe(hex(terminalSource('ByteString')));
       });
     }
 

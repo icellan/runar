@@ -382,23 +382,25 @@ its `checkPreimage`. A `Sig` that is never consumed is not an error.
 Two other places a preimage could sit are refused outright, so no unchecked
 preimage reaches an extractor through them:
 
-- **A readonly property holding a `SigHashPreimage`** (scalar, or a
-  `FixedArray` of any nesting depth whose element is `SigHashPreimage`) is a
-  validate error at its declaration, on every surface (in the Rust DSL a plain
-  field of a `SmartContract`, in Python a `SmartContract` annotation, in Go a
-  `runar:"readonly"` field):
+- **Any property holding a `SigHashPreimage`**, readonly or mutable (scalar,
+  or a `FixedArray` of any nesting depth whose element is `SigHashPreimage`),
+  in a stateless or a stateful contract, is a validate error at its
+  declaration, on every surface:
 
   ```
-  readonly property '<name>' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified
+  property '<name>' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified
   ```
 
   A readonly property is a constant in the locking script, and a sighash
   preimage commits to the `scriptCode` and outpoint of the very output that
   carries that script, so no preimage fixed there can ever be the spending
-  transaction's: `checkPreimage(this.p)` is unsatisfiable, and without it
-  every field an extractor reads from `this.p` is unverified. This rule does
-  not cover a mutable `SigHashPreimage` state field of a
-  `StatefulSmartContract`.
+  transaction's. A mutable state field was written by an earlier spend and
+  describes that earlier transaction; the spending transaction's own
+  preimage cannot be stored in the output it spends either. Either way
+  `checkPreimage(this.p)` is unsatisfiable, and without it every field an
+  extractor reads from `this.p` is unverified. Take the preimage as a method
+  parameter and `assert(checkPreimage(p))` instead. The implicit `txPreimage`
+  of a `StatefulSmartContract` is not a declared property and is unaffected.
 - **A `FixedArray<SigHashPreimage, N>` method parameter** is refused by the
   validator like every `FixedArray` method parameter (each tier words that
   diagnostic itself).
