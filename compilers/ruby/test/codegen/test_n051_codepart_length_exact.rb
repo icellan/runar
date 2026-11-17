@@ -96,8 +96,9 @@ class TestN051CodePartLengthExact < Minitest::Test
     refute_includes script, "81a269", "no lower-bound (OP_GREATERTHANOREQUAL) pin may remain"
 
     json = JSON.parse(RunarCompiler.artifact_to_json(artifact))
-    # Byte-identical with the TS reference compiler (fold OFF).
-    assert_equal [{ "byteOffset" => 947 }], json["codePartLenSlots"]
+    # Byte-identical with the TS reference compiler (fold OFF). #180 / #213
+    # moved it 947 -> 954: the 7-byte `_changePKH` entry width gate ahead of it.
+    assert_equal [{ "byteOffset" => 954 }], json["codePartLenSlots"]
     assert_equal found.map(&:first), json["codePartLenSlots"].map { |s| s["byteOffset"] }
 
     off = json["codePartLenSlots"][0]["byteOffset"]

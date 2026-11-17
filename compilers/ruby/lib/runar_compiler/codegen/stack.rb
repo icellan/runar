@@ -782,9 +782,10 @@ module RunarCompiler::Codegen
     VARIABLE_LENGTH_STATE_TYPES.include?(t)
   end
 
-  # N-045: declared byte width of each fixed-width byte state type. MUST match
-  # the reader's size table in _lower_deserialize_state and the shared
-  # STATE_FIELD_WIDTHS table.
+  # N-045: declared byte width of each fixed-width byte type. MUST match the
+  # reader's size table in _lower_deserialize_state and the shared
+  # STATE_FIELD_WIDTHS table. Also the width table of the #180 / #213
+  # parameter entry gate.
   FIXED_WIDTH_STATE_BYTES = {
     "PubKey" => 33,
     "Addr" => 20,
@@ -799,6 +800,150 @@ module RunarCompiler::Codegen
   # @return [Integer] the declared byte width, or 0 for any other type
   def self.fixed_width_state_bytes(t)
     FIXED_WIDTH_STATE_BYTES.fetch(t, 0)
+  end
+
+  # -----------------------------------------------------------------------
+  # #180 / #213 / D13: which public-method parameters get a width gate
+  # -----------------------------------------------------------------------
+
+  # Built-ins that consume a PubKey's bytes without copying them anywhere: a
+  # signature check, or a fixed-width digest.
+  PUBKEY_VERIFY_FUNCS = %w[checkSig checkMultiSig hash160].to_set.freeze
+
+  # Every binding reachable from +bs+, nested `if` arms and loop bodies
+  # included (pre-order: the binding, then its then-arm, else-arm or body).
+  def self.flatten_bindings(bs, out = [])
+    bs.each do |b|
+      out << b
+      v = b.value
+      if v.kind == "if"
+        flatten_bindings(v.then || [], out)
+        flatten_bindings(v.else_ || [], out)
+      elsif v.kind == "loop"
+        flatten_bindings(v.body || [], out)
+      end
+    end
+    out
+  end
+
+  # The temps a value reads DIRECTLY (nested arms are visited as their own
+  # bindings by `flatten_bindings`). Unlike `collect_refs` this does not
+  # descend into `if` / `loop` bodies and does not count `load_param`. Every
+  # kind is listed: a new ANF kind must be added here, in all seven tiers and
+  # in the Lean model (`directRefs`).
+  def self.direct_refs(v)
+    case v.kind
+    when "load_const"
+      s = v.const_string
+      s.is_a?(String) && s.start_with?("@ref:") ? [s[5..]] : []
+    when "bin_op" then [v.left, v.right]
+    when "unary_op" then [v.operand]
+    when "call" then (v.args || []).dup
+    when "method_call" then [v.object, *(v.args || [])]
+    when "if" then [v.cond]
+    when "assert", "update_prop" then [v.value_ref]
+    when "check_preimage", "deserialize_state" then [v.preimage]
+    when "add_output" then [v.satoshis, *(v.state_values || []), v.preimage]
+    when "add_raw_output", "add_data_output" then [v.satoshis, v.script_bytes]
+    when "array_literal" then (v.elements || []).dup
+    when "load_param", "load_prop", "get_state_script", "loop", "raw_script" then []
+    else
+      raise ::RunarCompiler::IR::UnknownANFKindError.new(v.kind, "stack-lower.directRefs")
+    end
+  end
+
+  # The names of the bindings whose value flows OUT of a body without being
+  # referenced: the last binding of the method body (a private helper's
+  # return value) and of every nested `if` arm and loop body (an arm's value,
+  # e.g. a ternary). Such a temp has no direct reference to inspect, so it
+  # counts as an "other use" (fail closed).
+  def self.collect_value_tails(bs, out = Set.new)
+    out << bs.last.name unless bs.empty?
+    bs.each do |b|
+      v = b.value
+      if v.kind == "if"
+        collect_value_tails(v.then || [], out)
+        collect_value_tails(v.else_ || [], out)
+      elsif v.kind == "loop"
+        collect_value_tails(v.body || [], out)
+      end
+    end
+    out
+  end
+
+  # D13: does the temp +name+ (defined in a method whose flattened body is
+  # +body+) only ever reach PUBKEY_VERIFY_FUNCS -- directly, through an
+  # `@ref:` alias, an array literal, or a private helper's parameter? Any
+  # other use (cat, comparison, output, state write, another built-in, ...)
+  # answers false, and so does a temp in +tails+ (it leaves its body as an
+  # arm's or a helper's value; see `collect_value_tails`). A name already on
+  # +on_path+ (branch merges re-bind locals by name) is a cycle and answers
+  # false, as the Lean model's fuel-bounded walk does.
+  def self.only_verified_temp?(name, body, tails, private_methods, on_path = Set.new)
+    return false if tails.include?(name)
+    return false if on_path.include?(name)
+
+    on_path.add(name)
+    begin
+      only_verified_temp_walk?(name, body, tails, private_methods, on_path)
+    ensure
+      on_path.delete(name)
+    end
+  end
+
+  def self.only_verified_temp_walk?(name, body, tails, private_methods, on_path)
+    body.each do |b|
+      v = b.value
+      next unless direct_refs(v).include?(name)
+
+      case v.kind
+      when "call"
+        return false unless PUBKEY_VERIFY_FUNCS.include?(v.func)
+      when "load_const", "array_literal"
+        return false unless only_verified_temp?(b.name, body, tails, private_methods, on_path)
+      when "method_call"
+        return false if v.object == name
+
+        pm = private_methods[v.method]
+        return false if pm.nil?
+
+        (v.args || []).each_with_index do |arg, i|
+          next unless arg == name
+
+          p = pm.params[i]
+          return false if p.nil? || !only_verified_param?(p.name, pm, private_methods)
+        end
+      else
+        return false
+      end
+    end
+    true
+  end
+
+  # Every `load_param pname` in +m+'s body satisfies `only_verified_temp?`.
+  def self.only_verified_param?(pname, m, private_methods)
+    body = flatten_bindings(m.body)
+    tails = collect_value_tails(m.body)
+    body.none? do |b|
+      b.value.kind == "load_param" && b.value.name == pname &&
+        !only_verified_temp?(b.name, body, tails, private_methods)
+    end
+  end
+
+  # #180 / #213 / D13 -- THE rule (spec/type-system.md, "Fixed-width
+  # parameters"): a public method's parameter is width-gated at entry iff its
+  # type is fixed-width (`fixed_width_state_bytes`), except a `PubKey` whose
+  # value only ever reaches checkSig / checkMultiSig / hash160. That exemption
+  # keeps a plain P2PKH on its standard template; OP_CHECKSIG and the 20-byte
+  # digest consume such a key without copying its bytes anywhere. `Sig` is
+  # never gated (variable-width DER). Mirrored by `paramWidthGate?` in
+  # runar-verification/RunarVerification/Pipeline.lean and by the TS reference
+  # (`paramNeedsWidthGate` in 05-stack-lower.ts).
+  def self.param_needs_width_gate?(name, type, method, private_methods)
+    return false if fixed_width_state_bytes(type).zero?
+    return !only_verified_param?(name, method, private_methods) if type == "PubKey"
+
+    true
   end
 
   # -----------------------------------------------------------------------
@@ -1443,16 +1588,21 @@ module RunarCompiler::Codegen
       @sm.pop; @sm.pop
     end
 
-    # N-045: before a fixed-width state value (Sha256, PubKey, Addr,
-    # Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
-    # assert it has exactly its declared width:
+    # Assert that the value on top of the stack has exactly the declared width
+    # of its fixed-width type (Sha256, PubKey, Addr, Ripemd160, Point,
+    # P256Point, P384Point):
     #
     #   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
     #
-    # The writer copies these values as they are and the next spend's reader
-    # slices each at its declared width, so a wrong-width value shifts every
-    # later field. No-op for every other type.
-    def emit_fixed_width_state_check(type)
+    # No-op for every other type. Two callers:
+    #
+    # - N-045, state writes: before a fixed-width state value is committed to
+    #   a continuation. The writer copies these values as they are and the next
+    #   spend's reader slices each at its declared width, so a wrong-width value
+    #   shifts every later field.
+    # - #180 / #213, public-method parameters: `emit_fixed_width_param_gate`,
+    #   at method entry (this includes the compiler-injected `_changePKH`).
+    def emit_fixed_width_check(type)
       width = RunarCompiler::Codegen.fixed_width_state_bytes(type)
       return if width.zero?
 
@@ -1472,6 +1622,33 @@ module RunarCompiler::Codegen
     #
     # @param name [String]
     # @param consume [Boolean]
+    # #180 / #213 -- enforce a fixed-width parameter's declared width on-chain.
+    #
+    # A public method's witness items are arbitrary bytes. A `Point` /
+    # `Sha256` / `Ripemd160` / ... parameter that the body splices into a
+    # script (`cat` into `addRawOutput`, a state write, the change output)
+    # could otherwise carry extra bytes, opcodes included. The
+    # compiler-injected `_changePKH` (Ripemd160) is such a parameter: without
+    # the gate a spender extended it so the covenant's change output
+    # serialised as the change output followed by an extra output of the
+    # spender's choosing (#213).
+    #
+    # Emitted at the unlocking boundary for each parameter
+    # `param_needs_width_gate?` selects, in declaration order together with the
+    # boolean gate:
+    #
+    #   <copy of param>  OP_SIZE <width> OP_NUMEQUALVERIFY  OP_DROP
+    #
+    # Net stack effect is zero.
+    def emit_fixed_width_param_gate(name, type)
+      slot = @renamed_params.fetch(name, name)
+      bring_to_top(slot, false)
+      emit_fixed_width_check(type)
+      emit_op({ op: "drop" })
+      @sm.pop
+      _track_depth
+    end
+
     # W3 / BoolBamboozle -- enforce the `boolean` ABI domain on-chain.
     #
     # The source type `boolean` denotes {true, false}, but a witness item is
@@ -4830,7 +5007,7 @@ module RunarCompiler::Codegen
         end
 
         # N-045: a fixed-width byte value must have its declared width.
-        emit_fixed_width_state_check(prop.type)
+        emit_fixed_width_check(prop.type)
 
         # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
         # The width MUST come from `numeric_state_type_width` -- the same table
@@ -5072,7 +5249,7 @@ module RunarCompiler::Codegen
         bring_to_top(value_ref, consume)
 
         # N-045: a fixed-width byte value must have its declared width.
-        emit_fixed_width_state_check(prop.type)
+        emit_fixed_width_check(prop.type)
 
         # Same table as the reader -- see `numeric_state_type_width`.
         numeric_width = RunarCompiler::Codegen.numeric_state_type_width(prop.type)
@@ -5643,9 +5820,17 @@ module RunarCompiler::Codegen
     # `emit_boolean_param_gate`. Constructor args are baked into the locking
     # script by the assembler, never pushed by a spender, so only public methods
     # need the gate.
+    #
+    # #180 / #213: likewise pin each fixed-width parameter to its declared width
+    # (see `emit_fixed_width_param_gate` / `param_needs_width_gate?`). One loop,
+    # in declaration order, so every tier and the Lean model agree on the order.
     if method.is_public
       method.params.each do |p|
-        ctx.emit_boolean_param_gate(p.name) if p.type == "boolean"
+        if p.type == "boolean"
+          ctx.emit_boolean_param_gate(p.name)
+        elsif RunarCompiler::Codegen.param_needs_width_gate?(p.name, p.type, method, private_methods)
+          ctx.emit_fixed_width_param_gate(p.name, p.type)
+        end
       end
     end
 

@@ -1351,6 +1351,33 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// #180 / #213 — enforce a fixed-width parameter's declared width on-chain.
+    ///
+    /// A public method's witness items are arbitrary bytes. A `Point` /
+    /// `Sha256` / `Ripemd160` / ... parameter that the body splices into a
+    /// script (`cat` into `addRawOutput`, a state write, the change output)
+    /// could otherwise carry extra bytes, opcodes included. The
+    /// compiler-injected `_changePKH` (Ripemd160) is such a parameter: without
+    /// the gate a spender extended it so the covenant's change output
+    /// serialised as the change output followed by an extra output of the
+    /// spender's choosing (#213).
+    ///
+    /// Emitted at the unlocking boundary for each parameter
+    /// `paramNeedsWidthGate` selects, in declaration order together with the
+    /// boolean gate:
+    ///
+    ///     <copy of param>  OP_SIZE <width> OP_NUMEQUALVERIFY  OP_DROP
+    ///
+    /// Net stack effect is zero.
+    fn emitFixedWidthParamGate(self: *LowerCtx, name: []const u8, t: types.RunarType) !void {
+        const slot = self.renamed_params.get(name) orelse name;
+        try self.bringToTop(slot, false);
+        try self.emitFixedWidthCheck(t);
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        self.trackDepth();
+    }
+
     fn isLastUse(self: *const LowerCtx, name: []const u8) bool {
         if (self.last_uses.get(name)) |last_idx| {
             return self.current_idx >= last_idx;
@@ -4646,7 +4673,7 @@ const LowerCtx = struct {
             }
 
             // N-045: a fixed-width byte value must have its declared width.
-            try self.emitFixedWidthStateCheck(prop.type_info);
+            try self.emitFixedWidthCheck(prop.type_info);
 
             if (isNumericStateType(prop.type_info)) {
                 const width: i64 = if (prop.type_info == .boolean) 1 else 8;
@@ -4695,9 +4722,10 @@ const LowerCtx = struct {
         };
     }
 
-    /// N-045: declared byte width of a fixed-width byte state type, or 0 for
-    /// every other type. MUST match statePropSize (the reader's table) and
-    /// the shared STATE_FIELD_WIDTHS table.
+    /// N-045: declared byte width of a fixed-width byte type, or 0 for every
+    /// other type. MUST match statePropSize (the reader's table) and the
+    /// shared STATE_FIELD_WIDTHS table. Also the width table of the
+    /// #180 / #213 parameter entry gate.
     fn fixedWidthStateBytes(t: types.RunarType) i64 {
         return switch (t) {
             .pub_key => 33,
@@ -4709,16 +4737,21 @@ const LowerCtx = struct {
         };
     }
 
-    /// N-045: before a fixed-width state value (Sha256, PubKey, Addr,
-    /// Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
-    /// assert it has exactly its declared width:
+    /// Assert that the value on top of the stack has exactly the declared
+    /// width of its fixed-width type (Sha256, PubKey, Addr, Ripemd160, Point,
+    /// P256Point, P384Point):
     ///
     ///   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
     ///
-    /// The writer copies these values as they are and the next spend's reader
-    /// slices each at its declared width, so a wrong-width value shifts every
-    /// later field. No-op for every other type.
-    fn emitFixedWidthStateCheck(self: *LowerCtx, t: types.RunarType) !void {
+    /// No-op for every other type. Two callers:
+    ///
+    /// - N-045, state writes: before a fixed-width state value is committed
+    ///   to a continuation. The writer copies these values as they are and the
+    ///   next spend's reader slices each at its declared width, so a
+    ///   wrong-width value shifts every later field.
+    /// - #180 / #213, public-method parameters: `emitFixedWidthParamGate`, at
+    ///   method entry (this includes the compiler-injected `_changePKH`).
+    fn emitFixedWidthCheck(self: *LowerCtx, t: types.RunarType) !void {
         const width = fixedWidthStateBytes(t);
         if (width == 0) return;
         try self.emitOp(.op_size);
@@ -7103,7 +7136,7 @@ const LowerCtx = struct {
 
             try self.bringToTopOperand(value_ref, output_operands);
             // N-045: a fixed-width byte value must have its declared width.
-            try self.emitFixedWidthStateCheck(prop.type_info);
+            try self.emitFixedWidthCheck(prop.type_info);
             if (isNumericStateType(prop.type_info)) {
                 const width: i64 = if (prop.type_info == .boolean) 1 else 8;
                 try self.emitPushInt(width);
@@ -7270,8 +7303,17 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         // `emitBooleanParamGate`. Constructor args are baked into the locking
         // script by the assembler, never pushed by a spender, so only public
         // methods need the gate (and `lower` only visits public ones anyway).
+        //
+        // #180 / #213: likewise pin each fixed-width parameter to its declared
+        // width (see `emitFixedWidthParamGate` / `paramNeedsWidthGate`). One
+        // loop, in declaration order, so every tier and the Lean model agree
+        // on the order.
         for (method.params) |param| {
-            if (paramIsBoolean(param)) try ctx.emitBooleanParamGate(param.name);
+            if (paramIsBoolean(param)) {
+                try ctx.emitBooleanParamGate(param.name);
+            } else if (try paramNeedsWidthGate(allocator, param, method, program.methods)) {
+                try ctx.emitFixedWidthParamGate(param.name, paramRunarType(param));
+            }
         }
 
         // Use body or bindings (whichever is populated)
@@ -7490,6 +7532,195 @@ fn setupMethodStack(ctx: *LowerCtx, program: types.ANFProgram, method: types.ANF
 /// `parseParams`) only carries the textual `type`, so both spellings count.
 fn paramIsBoolean(param: types.ANFParam) bool {
     return param.type_info == .boolean or std.mem.eql(u8, param.type_name, "boolean");
+}
+
+// ============================================================================
+// #180 / #213 / D13: which public-method parameters get a width gate
+// ============================================================================
+
+/// Built-ins that consume a PubKey's bytes without copying them anywhere: a
+/// signature check, or a fixed-width digest.
+const pubkey_verify_funcs = [_][]const u8{ "checkSig", "checkMultiSig", "hash160" };
+
+/// Every binding reachable from `bs`, nested `if` arms and loop bodies
+/// included (pre-order: the binding, then its then-arm, else-arm or body).
+fn flattenBindings(
+    allocator: Allocator,
+    bs: []const types.ANFBinding,
+    out: *std.ArrayListUnmanaged(types.ANFBinding),
+) Allocator.Error!void {
+    for (bs) |b| {
+        try out.append(allocator, b);
+        switch (b.value) {
+            .@"if" => |ie| {
+                try flattenBindings(allocator, ie.then, out);
+                try flattenBindings(allocator, ie.@"else", out);
+            },
+            .loop => |lp| try flattenBindings(allocator, lp.body, out),
+            else => {},
+        }
+    }
+}
+
+fn sliceHasName(names: []const []const u8, name: []const u8) bool {
+    for (names) |n| {
+        if (std.mem.eql(u8, n, name)) return true;
+    }
+    return false;
+}
+
+/// `directRefs(v).includes(name)` of the TS reference: does `v` read the temp
+/// `name` DIRECTLY? Nested arms are visited as their own bindings by
+/// `flattenBindings`, so unlike `scanValueForRefs` this does not descend into
+/// `if` / `loop` bodies and does not count `load_param`. The switch is
+/// exhaustive: a new ANF kind must be added here, in all seven tiers and in
+/// the Lean model (`directRefs`).
+fn directRefsContain(v: types.ANFValue, name: []const u8) bool {
+    const eql = std.mem.eql;
+    return switch (v) {
+        .load_const => |lc| switch (lc.value) {
+            .string => |s| std.mem.startsWith(u8, s, "@ref:") and eql(u8, s[5..], name),
+            else => false,
+        },
+        .bin_op => |bop| eql(u8, bop.left, name) or eql(u8, bop.right, name),
+        .unary_op => |uop| eql(u8, uop.operand, name),
+        .call => |c| sliceHasName(c.args, name),
+        .method_call => |mc| eql(u8, mc.object, name) or sliceHasName(mc.args, name),
+        .@"if" => |ie| eql(u8, ie.cond, name),
+        .assert => |a| eql(u8, a.value, name),
+        .update_prop => |up| eql(u8, up.value, name),
+        .check_preimage => |cp| eql(u8, cp.preimage, name),
+        .deserialize_state => |ds| eql(u8, ds.preimage, name),
+        // `state_refs` is this tier's in-memory companion of `state_values`
+        // (read by `scanValueForRefs` too); empty for source-built ANF.
+        .add_output => |ao| eql(u8, ao.satoshis, name) or sliceHasName(ao.state_values, name) or
+            sliceHasName(ao.state_refs, name) or eql(u8, ao.preimage, name),
+        .add_raw_output => |aro| eql(u8, aro.satoshis, name) or eql(u8, aro.script_bytes, name),
+        .add_data_output => |ado| eql(u8, ado.satoshis, name) or eql(u8, ado.script_bytes, name),
+        .array_literal => |al| sliceHasName(al.elements, name),
+        .load_param, .load_prop, .get_state_script, .loop, .raw_script => false,
+    };
+}
+
+/// The names of the bindings whose value flows OUT of a body without being
+/// referenced: the last binding of the method body (a private helper's return
+/// value) and of every nested `if` arm and loop body (an arm's value, e.g. a
+/// ternary). Such a temp has no direct reference to inspect, so it counts as
+/// an "other use" (fail closed).
+fn collectValueTails(
+    allocator: Allocator,
+    bs: []const types.ANFBinding,
+    out: *std.StringHashMapUnmanaged(void),
+) Allocator.Error!void {
+    if (bs.len > 0) try out.put(allocator, bs[bs.len - 1].name, {});
+    for (bs) |b| {
+        switch (b.value) {
+            .@"if" => |ie| {
+                try collectValueTails(allocator, ie.then, out);
+                try collectValueTails(allocator, ie.@"else", out);
+            },
+            .loop => |lp| try collectValueTails(allocator, lp.body, out),
+            else => {},
+        }
+    }
+}
+
+/// D13: does the temp `name` (defined in a method whose flattened body is
+/// `body`) only ever reach `pubkey_verify_funcs` — directly, through an
+/// `@ref:` alias, an array literal, or a private helper's parameter? Any
+/// other use (cat, comparison, output, state write, another built-in, ...)
+/// answers false, and so does a temp in `tails` (it leaves its body as an
+/// arm's or a helper's value; see `collectValueTails`). A name already on
+/// `on_path` (branch merges re-bind locals by name) is a cycle and answers
+/// false, as the Lean model's fuel-bounded walk does.
+fn onlyVerifiedTemp(
+    allocator: Allocator,
+    name: []const u8,
+    body: []const types.ANFBinding,
+    tails: *const std.StringHashMapUnmanaged(void),
+    methods: []const types.ANFMethod,
+    on_path: *std.StringHashMapUnmanaged(void),
+) Allocator.Error!bool {
+    if (tails.contains(name)) return false;
+    if (on_path.contains(name)) return false;
+    try on_path.put(allocator, name, {});
+    defer _ = on_path.remove(name);
+    for (body) |b| {
+        if (!directRefsContain(b.value, name)) continue;
+        switch (b.value) {
+            .call => |c| {
+                if (!sliceHasName(&pubkey_verify_funcs, c.func)) return false;
+            },
+            .load_const, .array_literal => {
+                if (!try onlyVerifiedTemp(allocator, b.name, body, tails, methods, on_path)) return false;
+            },
+            .method_call => |mc| {
+                if (std.mem.eql(u8, mc.object, name)) return false;
+                const pm = findPrivateMethod(methods, mc.method) orelse return false;
+                for (mc.args, 0..) |arg, i| {
+                    if (!std.mem.eql(u8, arg, name)) continue;
+                    if (i >= pm.params.len) return false;
+                    if (!try onlyVerifiedParam(allocator, pm.params[i].name, pm, methods)) return false;
+                }
+            },
+            else => return false,
+        }
+    }
+    return true;
+}
+
+/// Every `load_param pname` in `m`'s body satisfies `onlyVerifiedTemp`.
+fn onlyVerifiedParam(
+    allocator: Allocator,
+    pname: []const u8,
+    m: types.ANFMethod,
+    methods: []const types.ANFMethod,
+) Allocator.Error!bool {
+    var flat = std.ArrayListUnmanaged(types.ANFBinding).empty;
+    defer flat.deinit(allocator);
+    try flattenBindings(allocator, methodBindings(m), &flat);
+    var tails: std.StringHashMapUnmanaged(void) = .empty;
+    defer tails.deinit(allocator);
+    try collectValueTails(allocator, methodBindings(m), &tails);
+    var on_path: std.StringHashMapUnmanaged(void) = .empty;
+    defer on_path.deinit(allocator);
+    for (flat.items) |b| {
+        switch (b.value) {
+            .load_param => |lp| {
+                if (std.mem.eql(u8, lp.name, pname) and
+                    !try onlyVerifiedTemp(allocator, b.name, flat.items, &tails, methods, &on_path)) return false;
+            },
+            else => {},
+        }
+    }
+    return true;
+}
+
+/// A parameter's resolved type. `--ir` input carries only `type_name`
+/// (ir/json.zig leaves `type_info` at `.unknown`), so fall back to parsing it.
+fn paramRunarType(param: types.ANFParam) types.RunarType {
+    return if (param.type_info != .unknown) param.type_info else types.parseRunarType(param.type_name);
+}
+
+/// #180 / #213 / D13 — THE rule (spec/type-system.md, "Fixed-width
+/// parameters"): a public method's parameter is width-gated at entry iff its
+/// type is fixed-width (`fixedWidthStateBytes`), except a `PubKey` whose value
+/// only ever reaches checkSig / checkMultiSig / hash160. That exemption keeps
+/// a plain P2PKH on its standard template; OP_CHECKSIG and the 20-byte digest
+/// consume such a key without copying its bytes anywhere. `Sig` is never
+/// gated (variable-width DER). Mirrored by `paramWidthGate?` in
+/// runar-verification/RunarVerification/Pipeline.lean and by the TS reference
+/// (`paramNeedsWidthGate` in 05-stack-lower.ts).
+fn paramNeedsWidthGate(
+    allocator: Allocator,
+    param: types.ANFParam,
+    method: types.ANFMethod,
+    methods: []const types.ANFMethod,
+) Allocator.Error!bool {
+    const t = paramRunarType(param);
+    if (LowerCtx.fixedWidthStateBytes(t) == 0) return false;
+    if (t == .pub_key) return !try onlyVerifiedParam(allocator, param.name, method, methods);
+    return true;
 }
 
 pub fn methodBindings(method: types.ANFMethod) []const types.ANFBinding {

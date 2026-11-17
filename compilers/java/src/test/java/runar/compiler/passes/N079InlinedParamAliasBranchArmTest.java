@@ -266,27 +266,28 @@ class N079InlinedParamAliasBranchArmTest {
 
     /** {label, source, byte length, sha256 of the lowercase script hex}. */
     private static final Object[][] SEVEN_TIER = {
+        // #180 / #213 (PR B): re-pinned; every stateful method with a change output gains the 7-byte _changePKH entry width gate (`<d> OP_PICK OP_SIZE 0x14 OP_NUMEQUALVERIFY OP_DROP`). New bytes equal the TS reference tier's, both fold modes.
         // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
-        {"if-arm", IF_ARM, 701,
-            "01fc4e2a33d7eab587a7eff268d5bafbe40836a40c8f58b4665ef860306471a9"},
-        {"if-arm-manual", IF_ARM_MANUAL, 701,
-            "01fc4e2a33d7eab587a7eff268d5bafbe40836a40c8f58b4665ef860306471a9"},
-        {"if-arm-200", IF_ARM_200, 702,
-            "f22c8cd3e1fa94ee938819d40b4c92770b220db9edac5c513d3c7a49d572be69"},
-        {"ternary-arm", TERNARY_ARM, 688,
-            "ffdf44269ab63b6ae616448384d16a17f2f1987bc519e53a6c53b184ee1779a6"},
-        {"ternary-arm-manual", TERNARY_ARM_MANUAL, 688,
-            "ffdf44269ab63b6ae616448384d16a17f2f1987bc519e53a6c53b184ee1779a6"},
-        {"loop-body", LOOP_BODY, 695,
-            "1b79e6c258aec5f041236ca3a1a9b9f3537405531439a8337db2a8001ab1624f"},
-        {"loop-body-manual", LOOP_BODY_MANUAL, 695,
-            "1b79e6c258aec5f041236ca3a1a9b9f3537405531439a8337db2a8001ab1624f"},
-        {"no-if", NO_IF, 680,
-            "a31e207c875e996ea8fbe20ad348ba8bd062e4e14b7473d02dac40065f869734"},
-        {"stmt-level", STMT_LEVEL, 697,
-            "b7a9174c58353d308961e3761988671af95bd3ae54a8ff6ff6edc4a6944a134b"},
-        {"passthrough", PASSTHROUGH, 699,
-            "17767a3afcf95c0403e1cd8425ae7b9b0ea1b2511f0d8e68664dd60d55d430db"},
+        {"if-arm", IF_ARM, 708,
+            "c3ee22461bd2e18e05051ba9447f461536cb85858433bdb9257aec97a7eb1525"},
+        {"if-arm-manual", IF_ARM_MANUAL, 708,
+            "c3ee22461bd2e18e05051ba9447f461536cb85858433bdb9257aec97a7eb1525"},
+        {"if-arm-200", IF_ARM_200, 709,
+            "bcb713cdc640f60d8a34e6606028d2d68cf15ae6585fb5c68c4af317ba9d34a5"},
+        {"ternary-arm", TERNARY_ARM, 695,
+            "1a9864c54f5ddc4826b058cdd21f9564368643f7a76901d0c7144c33988e4e19"},
+        {"ternary-arm-manual", TERNARY_ARM_MANUAL, 695,
+            "1a9864c54f5ddc4826b058cdd21f9564368643f7a76901d0c7144c33988e4e19"},
+        {"loop-body", LOOP_BODY, 702,
+            "8001bb6edfcae361bdb950984c85d4fbec951fae099f273bd84c4e6feedf7c0b"},
+        {"loop-body-manual", LOOP_BODY_MANUAL, 702,
+            "8001bb6edfcae361bdb950984c85d4fbec951fae099f273bd84c4e6feedf7c0b"},
+        {"no-if", NO_IF, 687,
+            "f0ce580eb041536f69088468d846957f8375969712cbc549e4c8a7796b501eb2"},
+        {"stmt-level", STMT_LEVEL, 704,
+            "590acc8f13735d86e3ae40ce4befa7f2cbbd42c2d3f0492a9768dbf85e5abb1a"},
+        {"passthrough", PASSTHROUGH, 706,
+            "e54b5cddd07d1c6e390094c43c11469d67c4f2f9d09445e7f08412a1a2b0f167"},
     };
 
     private static String hex(String source, boolean disableConstantFolding) throws Exception {

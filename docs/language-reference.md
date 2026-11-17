@@ -237,7 +237,16 @@ actually exhaustive on-chain; see `spec/type-system.md` § 2 for why.
 | `SigHashPreimage` | variable | Transaction sighash preimage for OP_PUSH_TX. Not allowed as a readonly property (see `checkPreimage`) |
 | `Point` | 64 | secp256k1 elliptic curve point (x[32] \|\| y[32], big-endian) |
 
-All domain types (`PubKey`, `Sig`, `Point`, etc.) are representational subtypes of `ByteString` — they share the same runtime encoding as raw bytes and exist for documentation and readability, not for compile-time size enforcement. The type checker accepts assignment in both directions: a domain type value can be widened to `ByteString`, and a `ByteString` value can be passed where a domain type is expected. Cross-subtype assignment within the `ByteString` family is also accepted (e.g., `Ripemd160` assignable to `Addr`). Developers are responsible for any required length or domain checks at runtime — for example `assert(len(pk) === 33n)` for a `PubKey`, or `assert(len(addr) === 20n)` for an `Addr`. See `spec/type-system.md` §2.2 for the full subtyping rule.
+All domain types (`PubKey`, `Sig`, `Point`, etc.) are representational subtypes of `ByteString` — they share the same runtime encoding as raw bytes. The type checker does not enforce their sizes and accepts assignment in both directions: a domain type value can be widened to `ByteString`, and a `ByteString` value can be passed where a domain type is expected. Cross-subtype assignment within the `ByteString` family is also accepted (e.g., `Ripemd160` assignable to `Addr`).
+
+**The sizes in the table ARE enforced on-chain where a value enters the script from outside:**
+
+- **Public-method parameters.** Every `Point` (64), `P256Point` (64), `P384Point` (96), `Sha256` (32), `Ripemd160` (20) and `Addr` (20) parameter is width-checked at method entry (`OP_SIZE <width> OP_NUMEQUALVERIFY` on a copy), so an oversized argument aborts the script instead of carrying extra bytes into an output it is spliced into (#180). This includes the compiler-injected `_changePKH` of a stateful method (#213).
+- **`PubKey` parameters** get the same 33-byte check UNLESS every use of the key, including inside private helpers it is passed to, is an argument of `checkSig`, `checkMultiSig` or `hash160`. That keeps a plain P2PKH on its standard template; a `PubKey` that is concatenated, compared, written to state or put in an output is checked.
+- **`Sig` parameters are never checked** (DER signatures are variable-width).
+- **Mutable state fields** of a fixed-width type are width-checked before every continuation write (N-045).
+
+A value computed inside the script (a `split()` half, a `cat` result, a preimage field) is not checked; assert its length yourself when it matters, e.g. `assert(len(x) === 32n)`. See `spec/type-system.md` §2.2 ("Fixed-width parameters") for the exact rule and the subtyping rule.
 
 ### Rabin Types
 

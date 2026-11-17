@@ -86,17 +86,21 @@ function args(r: GateRow, e: string | bigint | boolean): unknown[] {
   return out;
 }
 
+// The operands are ByteString params on purpose: a public `Point` param is
+// width-gated at method entry (PR B, #180), which would abort a 63/65-byte
+// operand before the builtin's OWN operand gate -- the thing under test here --
+// ever ran. A ByteString reaches the builtin byte-for-byte.
 const PROBES: Array<[string, string, string]> = [
   // [fn, params, call]
-  ['ecAdd', 'p: Point, q: Point, e: Point', 'ecAdd(p, q)'],
-  ['ecMul', 'p: Point, k: bigint, e: Point', 'ecMul(p, k)'],
+  ['ecAdd', 'p: ByteString, q: ByteString, e: Point', 'ecAdd(p, q)'],
+  ['ecMul', 'p: ByteString, k: bigint, e: Point', 'ecMul(p, k)'],
   ['ecMulGen', 'k: bigint, e: Point', 'ecMulGen(k)'],
-  ['ecNegate', 'p: Point, e: Point', 'ecNegate(p)'],
-  ['ecPointX', 'p: Point, e: bigint', 'ecPointX(p)'],
-  ['ecPointY', 'p: Point, e: bigint', 'ecPointY(p)'],
-  ['ecEncodeCompressed', 'p: Point, e: ByteString', 'ecEncodeCompressed(p)'],
+  ['ecNegate', 'p: ByteString, e: Point', 'ecNegate(p)'],
+  ['ecPointX', 'p: ByteString, e: bigint', 'ecPointX(p)'],
+  ['ecPointY', 'p: ByteString, e: bigint', 'ecPointY(p)'],
+  ['ecEncodeCompressed', 'p: ByteString, e: ByteString', 'ecEncodeCompressed(p)'],
   // N-184: ecOnCurve is boolean, so the eq/ne probe compares a boolean.
-  ['ecOnCurve', 'p: Point, e: boolean', 'ecOnCurve(p)'],
+  ['ecOnCurve', 'p: ByteString, e: boolean', 'ecOnCurve(p)'],
 ];
 
 function probeSource(): string {

@@ -92,15 +92,19 @@ class N130CompoundAssignTest {
                 this.tag ^= m;
         """;
 
-    /** sha256 of the TS reference script hex for Arith.runar.java. */
+    /**
+     * sha256 of the TS reference script hex for Arith.runar.java. #180 / #213
+     * (PR B): this and COMPOUND re-pinned to the TS tier; +7 B for the
+     * _changePKH entry width gate.
+     */
     private static final String ARITH_TS_SHA256 =
-        "81dde0f19bf5e3f794e881314033cadaa754938b27d575e801c699bf05e5c3b5";
-    private static final int ARITH_TS_HEX_LEN = 1792;
+        "c84357e34c97ecc149d3af49050ced73085692d889d2d606cf0176da1c583738";
+    private static final int ARITH_TS_HEX_LEN = 1806;
 
     /** sha256 of the TS reference script hex for Compound.runar.java. */
     private static final String COMPOUND_TS_SHA256 =
-        "32339da8b1c1e9fd2f390b48f64f5952caf398b64262452bdbf1f3ca2277acdf";
-    private static final int COMPOUND_TS_HEX_LEN = 1868;
+        "cc9b5518a45f4b6ef99365051e9c423f0870310759fb695db4eb44d909fb68f0";
+    private static final int COMPOUND_TS_HEX_LEN = 1882;
 
     @Test
     void arithmeticCompoundAssignmentsMatchTheTsReference(@TempDir Path tmp) throws Exception {
@@ -154,8 +158,9 @@ class N130CompoundAssignTest {
     /** sha256 of the TS reference script hex for the unit-step loop (all 7 tiers agree). */
     // N-216 (2026-10-21): re-pinned; one lowerUpdateProp `OP_2 OP_ROLL` now folds to OP_ROT (886 -> 885 B).
     // Ports #170: re-pinned; C=1 binding blob, 885 -> 879 B.
+    // #180 / #213 (PR B): re-pinned to the TS tier; _changePKH entry width gate, 879 -> 886 B.
     private static final String UNIT_LOOP_TS_SHA256 =
-        "3dafdb07cb6d97d37acaa1f88300751c45a5342be801f0ee9b6c801055f62cc7";
+        "25388743355d2098a0ca88b12fd4b74c9710339e1c626e8b0fbf4c8ee5503845";
 
     /** A unit-step {@code i += Bigint.ONE} loop update compiles exactly like {@code i++}. */
     @Test

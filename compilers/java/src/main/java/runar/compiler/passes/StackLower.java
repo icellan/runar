@@ -216,9 +216,10 @@ public final class StackLower {
     }
 
     /**
-     * N-045: declared byte width of a fixed-width byte state type, or 0 for
-     * every other type. MUST match the reader's size table in the
-     * deserializer and the shared STATE_FIELD_WIDTHS table.
+     * N-045: declared byte width of a fixed-width byte type, or 0 for every
+     * other type. MUST match the reader's size table in the deserializer and
+     * the shared STATE_FIELD_WIDTHS table. Also the width table of the
+     * #180 / #213 parameter entry gate.
      */
     private static int fixedWidthStateBytes(String t) {
         return switch (t) {
@@ -229,6 +230,181 @@ public final class StackLower {
             case "P384Point" -> 96;
             default -> 0;
         };
+    }
+
+    // -----------------------------------------------------------------
+    // #180 / #213 / D13: which public-method parameters get a width gate
+    // -----------------------------------------------------------------
+
+    /**
+     * Built-ins that consume a PubKey's bytes without copying them anywhere:
+     * a signature check, or a fixed-width digest.
+     */
+    private static final Set<String> PUBKEY_VERIFY_FUNCS = Set.of("checkSig", "checkMultiSig", "hash160");
+
+    /** Every binding reachable from {@code bs} in pre-order, nested if arms and loop bodies included. */
+    private static List<AnfBinding> flattenBindings(List<AnfBinding> bs, List<AnfBinding> out) {
+        for (AnfBinding b : bs) {
+            out.add(b);
+            AnfValue v = b.value();
+            if (v instanceof If iff) {
+                flattenBindings(iff.thenBranch(), out);
+                if (iff.elseBranch() != null) flattenBindings(iff.elseBranch(), out);
+            } else if (v instanceof Loop lp) {
+                flattenBindings(lp.body(), out);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The temps a value reads DIRECTLY (nested arms are visited as their own
+     * bindings by {@link #flattenBindings}). Every kind is listed: a new ANF
+     * kind must be added here, in all seven tiers and in the Lean model
+     * ({@code directRefs}). An unknown kind fails closed.
+     */
+    private static List<String> directRefs(AnfValue v) {
+        if (v instanceof LoadConst lc) {
+            if (lc.value() instanceof BytesConst bc && bc.hex() != null && bc.hex().startsWith("@ref:")) {
+                return java.util.Arrays.asList(bc.hex().substring(5));
+            }
+            return List.of();
+        }
+        if (v instanceof BinOp b) return java.util.Arrays.asList(b.left(), b.right());
+        if (v instanceof UnaryOp u) return java.util.Arrays.asList(u.operand());
+        if (v instanceof Call c) return c.args();
+        if (v instanceof MethodCall mc) {
+            List<String> refs = new ArrayList<>();
+            refs.add(mc.object());
+            refs.addAll(mc.args());
+            return refs;
+        }
+        if (v instanceof If iff) return java.util.Arrays.asList(iff.cond());
+        if (v instanceof Assert a) return java.util.Arrays.asList(a.value());
+        if (v instanceof UpdateProp up) return java.util.Arrays.asList(up.value());
+        if (v instanceof CheckPreimage cp) return java.util.Arrays.asList(cp.preimage());
+        if (v instanceof DeserializeState ds) return java.util.Arrays.asList(ds.preimage());
+        if (v instanceof AddOutput ao) {
+            List<String> refs = new ArrayList<>();
+            refs.add(ao.satoshis());
+            refs.addAll(ao.stateValues());
+            refs.add(ao.preimage());
+            return refs;
+        }
+        if (v instanceof AddRawOutput ar) return java.util.Arrays.asList(ar.satoshis(), ar.scriptBytes());
+        if (v instanceof AddDataOutput ad) return java.util.Arrays.asList(ad.satoshis(), ad.scriptBytes());
+        if (v instanceof ArrayLiteral al) return al.elements();
+        if (v instanceof LoadParam || v instanceof LoadProp || v instanceof GetStateScript
+            || v instanceof Loop || v instanceof RawScript) {
+            return List.of();
+        }
+        throw new UnknownAnfKindError(v.kind(), "stack-lower.directRefs");
+    }
+
+    /**
+     * The names of the bindings whose value flows OUT of a body without being
+     * referenced: the last binding of the method body (a private helper's
+     * return value) and of every nested {@code if} arm and loop body (an arm's
+     * value, e.g. a ternary). Such a temp has no direct reference to inspect,
+     * so it counts as an "other use" (fail closed).
+     */
+    private static Set<String> collectValueTails(List<AnfBinding> bs, Set<String> out) {
+        if (!bs.isEmpty()) out.add(bs.get(bs.size() - 1).name());
+        for (AnfBinding b : bs) {
+            AnfValue v = b.value();
+            if (v instanceof If iff) {
+                collectValueTails(iff.thenBranch(), out);
+                if (iff.elseBranch() != null) collectValueTails(iff.elseBranch(), out);
+            } else if (v instanceof Loop lp) {
+                collectValueTails(lp.body(), out);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * D13: does the temp {@code name} (defined in a method whose flattened
+     * body is {@code body}) only ever reach {@link #PUBKEY_VERIFY_FUNCS} —
+     * directly, through an {@code @ref:} alias, an array literal, or a
+     * private helper's parameter? Any other use (cat, comparison, output,
+     * state write, another built-in, ...) answers false, and so does a temp
+     * in {@code tails} (it leaves its body as an arm's or a helper's value;
+     * see {@link #collectValueTails}). A name already on {@code onPath}
+     * (branch merges re-bind locals by name) is a cycle and answers false,
+     * as the Lean model's fuel-bounded walk does.
+     */
+    private static boolean onlyVerifiedTemp(
+        String name, List<AnfBinding> body, Set<String> tails, Map<String, AnfMethod> privateMethods,
+        Set<String> onPath
+    ) {
+        if (tails.contains(name)) return false;
+        if (!onPath.add(name)) return false;
+        try {
+        for (AnfBinding b : body) {
+            AnfValue v = b.value();
+            if (!directRefs(v).contains(name)) continue;
+            if (v instanceof Call c) {
+                if (PUBKEY_VERIFY_FUNCS.contains(c.func())) continue;
+                return false;
+            }
+            if (v instanceof LoadConst || v instanceof ArrayLiteral) {
+                if (onlyVerifiedTemp(b.name(), body, tails, privateMethods, onPath)) continue;
+                return false;
+            }
+            if (v instanceof MethodCall mc && !name.equals(mc.object())) {
+                AnfMethod pm = privateMethods.get(mc.method());
+                if (pm == null) return false;
+                for (int i = 0; i < mc.args().size(); i++) {
+                    if (!name.equals(mc.args().get(i))) continue;
+                    if (i >= pm.params().size()
+                        || !onlyVerifiedParam(pm.params().get(i).name(), pm, privateMethods)) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            return false;
+        }
+        return true;
+        } finally {
+            onPath.remove(name);
+        }
+    }
+
+    /** Every {@code load_param pname} in {@code m}'s body satisfies {@link #onlyVerifiedTemp}. */
+    private static boolean onlyVerifiedParam(
+        String pname, AnfMethod m, Map<String, AnfMethod> privateMethods
+    ) {
+        List<AnfBinding> body = flattenBindings(m.body(), new ArrayList<>());
+        Set<String> tails = collectValueTails(m.body(), new HashSet<>());
+        for (AnfBinding b : body) {
+            if (b.value() instanceof LoadParam lp && pname.equals(lp.name())
+                && !onlyVerifiedTemp(b.name(), body, tails, privateMethods, new HashSet<>())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * #180 / #213 / D13 — THE rule (spec/type-system.md, "Fixed-width
+     * parameters"): a public method's parameter is width-gated at entry iff
+     * its type is fixed-width ({@link #fixedWidthStateBytes}), except a
+     * {@code PubKey} whose value only ever reaches checkSig / checkMultiSig /
+     * hash160. That exemption keeps a plain P2PKH on its standard template;
+     * OP_CHECKSIG and the 20-byte digest consume such a key without copying
+     * its bytes anywhere. {@code Sig} is never gated (variable-width DER).
+     * Mirrored by {@code paramWidthGate?} in
+     * runar-verification/RunarVerification/Pipeline.lean and by the TS
+     * reference ({@code paramNeedsWidthGate} in
+     * packages/runar-compiler/src/passes/05-stack-lower.ts).
+     */
+    static boolean paramNeedsWidthGate(
+        String name, String type, AnfMethod method, Map<String, AnfMethod> privateMethods
+    ) {
+        if (fixedWidthStateBytes(type) == 0) return false;
+        if ("PubKey".equals(type)) return !onlyVerifiedParam(name, method, privateMethods);
+        return true;
     }
 
     /**
@@ -1001,9 +1177,18 @@ public final class StackLower {
         // emitBooleanParamGate. Constructor args are baked into the locking
         // script by the assembler, never pushed by a spender, so only public
         // methods need the gate.
+        //
+        // #180 / #213: likewise pin each fixed-width parameter to its declared
+        // width (see emitFixedWidthParamGate / paramNeedsWidthGate). One loop,
+        // in declaration order, so every tier and the Lean model agree on the
+        // order.
         if (method.isPublic()) {
             for (AnfParam p : method.params()) {
-                if ("boolean".equals(p.type())) ctx.emitBooleanParamGate(p.name());
+                if ("boolean".equals(p.type())) {
+                    ctx.emitBooleanParamGate(p.name());
+                } else if (paramNeedsWidthGate(p.name(), p.type(), method, privateMethods)) {
+                    ctx.emitFixedWidthParamGate(p.name(), p.type());
+                }
             }
         }
 
@@ -1450,6 +1635,39 @@ public final class StackLower {
             emitOp(new OpcodeOp("OP_VERIFY"));
             sm.pop();
 
+            trackDepth();
+        }
+
+        /**
+         * #180 / #213 — enforce a fixed-width parameter's declared width
+         * on-chain.
+         *
+         * <p>A public method's witness items are arbitrary bytes. A
+         * {@code Point} / {@code Sha256} / {@code Ripemd160} / ... parameter
+         * that the body splices into a script ({@code cat} into
+         * {@code addRawOutput}, a state write, the change output) could
+         * otherwise carry extra bytes, opcodes included. The compiler-injected
+         * {@code _changePKH} (Ripemd160) is such a parameter: without the gate
+         * a spender extended it so the covenant's change output serialised as
+         * the change output followed by an extra output of the spender's
+         * choosing (#213).
+         *
+         * <p>Emitted at the unlocking boundary for each parameter
+         * {@link StackLower#paramNeedsWidthGate} selects, in declaration order
+         * together with the boolean gate:
+         *
+         * <pre>
+         *   &lt;copy of param&gt;  OP_SIZE &lt;width&gt; OP_NUMEQUALVERIFY  OP_DROP
+         * </pre>
+         *
+         * <p>Net stack effect is zero.
+         */
+        void emitFixedWidthParamGate(String name, String type) {
+            String slot = renamedParams.getOrDefault(name, name);
+            bringToTop(slot, false);
+            emitFixedWidthCheck(type);
+            emitOp(new DropOp());
+            sm.pop();
             trackDepth();
         }
 
@@ -4314,7 +4532,7 @@ public final class StackLower {
                 }
 
                 // N-045: a fixed-width byte value must have its declared width.
-                emitFixedWidthStateCheck(prop.type());
+                emitFixedWidthCheck(prop.type());
 
                 // The width MUST come from numericStateTypeWidth — the same
                 // table the reader splits on — or this continuation cannot be
@@ -5084,15 +5302,23 @@ public final class StackLower {
         }
 
         /**
-         * N-045: before a fixed-width state value (Sha256, PubKey, Addr,
-         * Ripemd160, Point, P256Point, P384Point) is committed to a
-         * continuation, assert it has exactly its declared width:
+         * Assert that the value on top of the stack has exactly the declared
+         * width of its fixed-width type (Sha256, PubKey, Addr, Ripemd160,
+         * Point, P256Point, P384Point):
          * {@code [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]}.
-         * The writer copies these values as they are and the next spend's
-         * reader slices each at its declared width, so a wrong-width value
-         * shifts every later field. No-op for every other type.
+         * No-op for every other type. Two callers:
+         *
+         * <ul>
+         *   <li>N-045, state writes: before a fixed-width state value is
+         *   committed to a continuation. The writer copies these values as
+         *   they are and the next spend's reader slices each at its declared
+         *   width, so a wrong-width value shifts every later field.</li>
+         *   <li>#180 / #213, public-method parameters:
+         *   {@link #emitFixedWidthParamGate}, at method entry (this includes
+         *   the compiler-injected {@code _changePKH}).</li>
+         * </ul>
          */
-        private void emitFixedWidthStateCheck(String type) {
+        private void emitFixedWidthCheck(String type) {
             int width = fixedWidthStateBytes(type);
             if (width == 0) return;
             emitOp(new OpcodeOp("OP_SIZE"));
@@ -5175,7 +5401,7 @@ public final class StackLower {
                 AnfProperty prop = stateProps.get(i);
                 bringToTop(valueRef, operandConsume(valueRef, outputOperands, idx, lastUses));
                 // N-045: a fixed-width byte value must have its declared width.
-                emitFixedWidthStateCheck(prop.type());
+                emitFixedWidthCheck(prop.type());
                 // Same table as the reader — see numericStateTypeWidth.
                 int numericWidth = numericStateTypeWidth(prop.type());
                 if (numericWidth > 0) {

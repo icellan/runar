@@ -62,7 +62,9 @@ contract F200Silent is StatefulSmartContract {
 """
 
 UNBOUND_HEX = "009c"
-SILENT_SHA256 = "484142b25662c6a0a0126f11b1d4700fd79632224dc38c6ae869c889e5fe30d5"
+# #180 / #213 moved it from 484142b2...: inc gained the 7-byte `_changePKH`
+# entry width gate (TS reference, same source, fold ON: 6001736c...).
+SILENT_SHA256 = "6001736ca0dd06f9b6b772cf09952c98d042fdfb65dd4a2f46be69b9d5de3feb"
 
 
 def _method(src: str, file: str, name: str):

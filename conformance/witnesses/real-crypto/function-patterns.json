@@ -27,10 +27,10 @@
             "$pubkey": "alice"
           }
         },
-        "codePartByteLength": 2999,
+        "codePartByteLength": 3027,
         "holds": [
           {
-            "at": 546,
+            "at": 553,
             "was": [
               "21",
               {
@@ -39,7 +39,7 @@
             ]
           },
           {
-            "at": 1285,
+            "at": 1299,
             "was": [
               "21",
               {
@@ -48,7 +48,7 @@
             ]
           },
           {
-            "at": 2051,
+            "at": 2072,
             "was": [
               "21",
               {
@@ -57,7 +57,7 @@
             ]
           },
           {
-            "at": 2788,
+            "at": 2816,
             "was": [
               "21",
               {
@@ -71,7 +71,7 @@
             "name": "non-push opcode (OP_CHECKSIG) at the last owner reference",
             "edits": [
               {
-                "at": 2788,
+                "at": 2816,
                 "was": [
                   "21",
                   {
@@ -87,7 +87,7 @@
             "name": "second owner reference holds a different key",
             "edits": [
               {
-                "at": 1285,
+                "at": 1299,
                 "was": [
                   "21",
                   {
@@ -107,7 +107,7 @@
             "name": "32-byte push at every 33-byte owner slot",
             "edits": [
               {
-                "at": 546,
+                "at": 553,
                 "was": [
                   "21",
                   {
@@ -120,7 +120,7 @@
                 ]
               },
               {
-                "at": 1285,
+                "at": 1299,
                 "was": [
                   "21",
                   {
@@ -133,7 +133,7 @@
                 ]
               },
               {
-                "at": 2051,
+                "at": 2072,
                 "was": [
                   "21",
                   {
@@ -146,7 +146,7 @@
                 ]
               },
               {
-                "at": 2788,
+                "at": 2816,
                 "was": [
                   "21",
                   {
@@ -226,6 +226,6 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "627b93eeda39bc8becfe676247f71e7866bc9e49b4c4423b5ddbcc8ceee2aef6"
+    "expected-script.hex": "feb6b97de9cb80b700c4547674dbb81c7b1002c46ee0bfe27520b074a6108fe9"
   }
 }

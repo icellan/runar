@@ -315,9 +315,10 @@ fn is_variable_length_state_type(t: &str) -> bool {
     matches!(t, "ByteString" | "Sig" | "SigHashPreimage")
 }
 
-/// N-045: the declared byte width of a fixed-width byte state type, or 0 for
-/// every other type. MUST match the reader's size table in
-/// `lower_deserialize_state` and the shared STATE_FIELD_WIDTHS table.
+/// N-045: the declared byte width of a fixed-width byte type, or 0 for every
+/// other type. MUST match the reader's size table in
+/// `lower_deserialize_state` and the shared STATE_FIELD_WIDTHS table. Also the
+/// width table of the #180 / #213 parameter entry gate.
 fn fixed_width_state_bytes(t: &str) -> usize {
     match t {
         "PubKey" => 33,
@@ -327,6 +328,202 @@ fn fixed_width_state_bytes(t: &str) -> usize {
         "P384Point" => 96,
         _ => 0,
     }
+}
+
+// ---------------------------------------------------------------------------
+// #180 / #213 / D13: which public-method parameters get a width gate
+// ---------------------------------------------------------------------------
+
+/// Built-ins that consume a PubKey's bytes without copying them anywhere: a
+/// signature check, or a fixed-width digest.
+const PUBKEY_VERIFY_FUNCS: [&str; 3] = ["checkSig", "checkMultiSig", "hash160"];
+
+/// Every binding reachable from `bs` in pre-order, nested `if` arms and loop
+/// bodies included.
+fn flatten_bindings<'a>(bs: &'a [ANFBinding], out: &mut Vec<&'a ANFBinding>) {
+    for b in bs {
+        out.push(b);
+        match &b.value {
+            ANFValue::If { then, else_branch, .. } => {
+                flatten_bindings(then, out);
+                flatten_bindings(else_branch, out);
+            }
+            ANFValue::Loop { body, .. } => flatten_bindings(body, out),
+            _ => {}
+        }
+    }
+}
+
+/// The temps a value reads DIRECTLY (nested arms are visited as their own
+/// bindings by `flatten_bindings`). Exhaustive over `ANFValue`: a new ANF kind
+/// must be added here, in all seven tiers and in the Lean model
+/// (`directRefs`).
+fn direct_refs(v: &ANFValue) -> Vec<&str> {
+    match v {
+        ANFValue::LoadConst { value } => match value.as_str().and_then(|s| s.strip_prefix("@ref:")) {
+            Some(r) => vec![r],
+            None => vec![],
+        },
+        ANFValue::BinOp { left, right, .. } => vec![left.as_str(), right.as_str()],
+        ANFValue::UnaryOp { operand, .. } => vec![operand.as_str()],
+        ANFValue::Call { args, .. } => args.iter().map(String::as_str).collect(),
+        ANFValue::MethodCall { object, args, .. } => {
+            std::iter::once(object.as_str()).chain(args.iter().map(String::as_str)).collect()
+        }
+        ANFValue::If { cond, .. } => vec![cond.as_str()],
+        ANFValue::Assert { value, .. } => vec![value.as_str()],
+        ANFValue::UpdateProp { value, .. } => vec![value.as_str()],
+        ANFValue::CheckPreimage { preimage, .. } => vec![preimage.as_str()],
+        ANFValue::DeserializeState { preimage } => vec![preimage.as_str()],
+        ANFValue::AddOutput { satoshis, state_values, preimage } => std::iter::once(satoshis.as_str())
+            .chain(state_values.iter().map(String::as_str))
+            .chain(std::iter::once(preimage.as_str()))
+            .collect(),
+        ANFValue::AddRawOutput { satoshis, script_bytes }
+        | ANFValue::AddDataOutput { satoshis, script_bytes } => vec![satoshis.as_str(), script_bytes.as_str()],
+        ANFValue::ArrayLiteral { elements } => elements.iter().map(String::as_str).collect(),
+        ANFValue::LoadParam { .. }
+        | ANFValue::LoadProp { .. }
+        | ANFValue::GetStateScript {}
+        | ANFValue::Loop { .. }
+        | ANFValue::RawScript { .. } => vec![],
+    }
+}
+
+/// The names of the bindings whose value flows OUT of a body without being
+/// referenced: the last binding of the method body (a private helper's return
+/// value) and of every nested `if` arm and loop body (an arm's value, e.g. a
+/// ternary). Such a temp has no direct reference to inspect, so it counts as
+/// an "other use" (fail closed).
+fn collect_value_tails<'a>(bs: &'a [ANFBinding], out: &mut HashSet<&'a str>) {
+    if let Some(last) = bs.last() {
+        out.insert(last.name.as_str());
+    }
+    for b in bs {
+        match &b.value {
+            ANFValue::If { then, else_branch, .. } => {
+                collect_value_tails(then, out);
+                collect_value_tails(else_branch, out);
+            }
+            ANFValue::Loop { body, .. } => collect_value_tails(body, out),
+            _ => {}
+        }
+    }
+}
+
+/// D13: does the temp `name` (defined in a method whose flattened body is
+/// `body`) only ever reach `PUBKEY_VERIFY_FUNCS` — directly, through an
+/// `@ref:` alias, an array literal, or a private helper's parameter? Any other
+/// use (cat, comparison, output, state write, another built-in, ...) answers
+/// false, and so does a temp in `tails` (it leaves its body as an arm's or a
+/// helper's value; see `collect_value_tails`). A name already on `on_path`
+/// (branch merges re-bind locals by name) is a cycle and answers false, as the
+/// Lean model's fuel-bounded walk does.
+fn only_verified_temp<'a>(
+    name: &'a str,
+    body: &[&'a ANFBinding],
+    tails: &HashSet<&str>,
+    private_methods: &HashMap<String, ANFMethod>,
+    on_path: &mut HashSet<&'a str>,
+) -> bool {
+    if tails.contains(name) {
+        return false;
+    }
+    if !on_path.insert(name) {
+        return false;
+    }
+    let r = only_verified_temp_walk(name, body, tails, private_methods, on_path);
+    on_path.remove(name);
+    r
+}
+
+fn only_verified_temp_walk<'a>(
+    name: &'a str,
+    body: &[&'a ANFBinding],
+    tails: &HashSet<&str>,
+    private_methods: &HashMap<String, ANFMethod>,
+    on_path: &mut HashSet<&'a str>,
+) -> bool {
+    for b in body {
+        let v = &b.value;
+        if !direct_refs(v).contains(&name) {
+            continue;
+        }
+        match v {
+            ANFValue::Call { func, .. } => {
+                if PUBKEY_VERIFY_FUNCS.contains(&func.as_str()) {
+                    continue;
+                }
+                return false;
+            }
+            ANFValue::LoadConst { .. } | ANFValue::ArrayLiteral { .. } => {
+                if only_verified_temp(&b.name, body, tails, private_methods, on_path) {
+                    continue;
+                }
+                return false;
+            }
+            ANFValue::MethodCall { object, method, args } if object != name => {
+                let pm = match private_methods.get(method) {
+                    Some(pm) => pm,
+                    None => return false,
+                };
+                for (i, a) in args.iter().enumerate() {
+                    if a != name {
+                        continue;
+                    }
+                    match pm.params.get(i) {
+                        Some(p) if only_verified_param(&p.name, pm, private_methods) => {}
+                        _ => return false,
+                    }
+                }
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Every `load_param pname` in `m`'s body satisfies `only_verified_temp`.
+fn only_verified_param(
+    pname: &str,
+    m: &ANFMethod,
+    private_methods: &HashMap<String, ANFMethod>,
+) -> bool {
+    let mut body = Vec::new();
+    flatten_bindings(&m.body, &mut body);
+    let mut tails = HashSet::new();
+    collect_value_tails(&m.body, &mut tails);
+    body.iter().all(|b| match &b.value {
+        ANFValue::LoadParam { name } if name == pname => {
+            only_verified_temp(&b.name, &body, &tails, private_methods, &mut HashSet::new())
+        }
+        _ => true,
+    })
+}
+
+/// #180 / #213 / D13 — THE rule (spec/type-system.md, "Fixed-width
+/// parameters"): a public method's parameter is width-gated at entry iff its
+/// type is fixed-width (`fixed_width_state_bytes`), except a `PubKey` whose
+/// value only ever reaches checkSig / checkMultiSig / hash160. That exemption
+/// keeps a plain P2PKH on its standard template; OP_CHECKSIG and the 20-byte
+/// digest consume such a key without copying its bytes anywhere. `Sig` is
+/// never gated (variable-width DER). Mirrored by `paramWidthGate?` in
+/// runar-verification/RunarVerification/Pipeline.lean and by the TS reference
+/// (`paramNeedsWidthGate` in packages/runar-compiler/src/passes/05-stack-lower.ts).
+fn param_needs_width_gate(
+    name: &str,
+    t: &str,
+    method: &ANFMethod,
+    private_methods: &HashMap<String, ANFMethod>,
+) -> bool {
+    if fixed_width_state_bytes(t) == 0 {
+        return false;
+    }
+    if t == "PubKey" {
+        return !only_verified_param(name, method, private_methods);
+    }
+    true
 }
 
 fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
@@ -1750,16 +1947,21 @@ impl LoweringContext {
         self.sm.pop(); self.sm.pop();
     }
 
-    /// N-045: before a fixed-width state value (Sha256, PubKey, Addr,
-    /// Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
-    /// assert it has exactly its declared width:
+    /// Assert that the value on top of the stack has exactly the declared
+    /// width of its fixed-width type (Sha256, PubKey, Addr, Ripemd160, Point,
+    /// P256Point, P384Point):
     ///
     ///   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
     ///
-    /// The writer copies these values as they are and the next spend's reader
-    /// slices each at its declared width, so a wrong-width value shifts every
-    /// later field. No-op for every other type.
-    fn emit_fixed_width_state_check(&mut self, t: &str) {
+    /// No-op for every other type. Two callers:
+    ///
+    /// - N-045, state writes: before a fixed-width state value is committed to
+    ///   a continuation. The writer copies these values as they are and the
+    ///   next spend's reader slices each at its declared width, so a
+    ///   wrong-width value shifts every later field.
+    /// - #180 / #213, public-method parameters: `emit_fixed_width_param_gate`,
+    ///   at method entry (this includes the compiler-injected `_changePKH`).
+    fn emit_fixed_width_check(&mut self, t: &str) {
         let width = fixed_width_state_bytes(t);
         if width == 0 {
             return;
@@ -1928,6 +2130,37 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
         self.sm.pop();
 
+        self.track_depth();
+    }
+
+    /// #180 / #213 — enforce a fixed-width parameter's declared width on-chain.
+    ///
+    /// A public method's witness items are arbitrary bytes. A `Point` /
+    /// `Sha256` / `Ripemd160` / ... parameter that the body splices into a
+    /// script (`cat` into `addRawOutput`, a state write, the change output)
+    /// could otherwise carry extra bytes, opcodes included. The
+    /// compiler-injected `_changePKH` (Ripemd160) is such a parameter: without
+    /// the gate a spender extended it so the covenant's change output
+    /// serialised as the change output followed by an extra output of the
+    /// spender's choosing (#213).
+    ///
+    /// Emitted at the unlocking boundary for each parameter
+    /// `param_needs_width_gate` selects, in declaration order together with
+    /// the boolean gate:
+    ///
+    ///   <copy of param>  OP_SIZE <width> OP_NUMEQUALVERIFY  OP_DROP
+    ///
+    /// Net stack effect is zero.
+    fn emit_fixed_width_param_gate(&mut self, name: &str, t: &str) {
+        let slot = self
+            .renamed_params
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string());
+        self.bring_to_top(&slot, false);
+        self.emit_fixed_width_check(t);
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
         self.track_depth();
     }
 
@@ -4098,7 +4331,7 @@ impl LoweringContext {
             }
 
             // N-045: a fixed-width byte value must have its declared width.
-            self.emit_fixed_width_state_check(&prop.prop_type);
+            self.emit_fixed_width_check(&prop.prop_type);
 
             // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
             // The width MUST come from `numeric_state_type_width` — the same
@@ -4443,7 +4676,7 @@ impl LoweringContext {
             self.bring_to_top(value_ref, consume);
 
             // N-045: a fixed-width byte value must have its declared width.
-            self.emit_fixed_width_state_check(&prop.prop_type);
+            self.emit_fixed_width_check(&prop.prop_type);
 
             // Same table as the reader — see `numeric_state_type_width`.
             let numeric_width = numeric_state_type_width(&prop.prop_type);
@@ -7545,10 +7778,17 @@ fn lower_method_with_private_methods(
     // `emit_boolean_param_gate`. Constructor args are baked into the locking
     // script by the assembler, never pushed by a spender, so only public
     // methods need the gate.
+    //
+    // #180 / #213: likewise pin each fixed-width parameter to its declared
+    // width (see `emit_fixed_width_param_gate` / `param_needs_width_gate`).
+    // One loop, in declaration order, so every tier and the Lean model agree
+    // on the order.
     if method.is_public {
         for p in &method.params {
             if p.param_type == "boolean" {
                 ctx.emit_boolean_param_gate(&p.name);
+            } else if param_needs_width_gate(&p.name, &p.param_type, method, private_methods) {
+                ctx.emit_fixed_width_param_gate(&p.name, &p.param_type);
             }
         }
     }

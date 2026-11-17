@@ -197,9 +197,11 @@ def test_stateless_artifact_json_omits_code_separator_keys():
 #   from runar_compiler import compile  # packages/runar-compiler/src/index.ts
 #   compile(MULTI_METHOD_SRC, { fileName: 'MultiMethodVault.runar.ts', disableConstantFolding: true })
 #
-# TS reference: script sha256 8a4b0ec1..., codeSeparatorIndex 1,
+# TS reference: script sha256 ddfe514f..., codeSeparatorIndex 1,
 # codeSeparatorIndices [1], codeSepIndexSlots
-# [{"byteOffset": 592, "codeSepIndex": 1}, {"byteOffset": 1431, "codeSepIndex": 1}].
+# [{"byteOffset": 599, "codeSepIndex": 1}, {"byteOffset": 1445, "codeSepIndex": 1}].
+# (#180 / #213 moved it from 8a4b0ec1... / 592 / 1431: each method gained the
+# 7-byte `_changePKH` entry width gate.)
 MULTI_METHOD_SRC = """
 import { StatefulSmartContract, assert, extractAmount, checkSig } from 'runar-lang';
 import type { ByteString, PubKey, Sig } from 'runar-lang';
@@ -225,11 +227,11 @@ class MultiMethodVault extends StatefulSmartContract {
 """
 
 TS_MULTI_METHOD_SCRIPT_SHA256 = (
-    "8a4b0ec1bef1add4754da4315d401c9f7bf6f74c6b07b7f5b165ac6df09e9c41"
+    "ddfe514f0560b196c208caa7af1af5c9ba8d745d31e3af6dac5ffba64f33dba9"
 )
 TS_MULTI_METHOD_SLOTS = [
-    {"byteOffset": 592, "codeSepIndex": 1},
-    {"byteOffset": 1431, "codeSepIndex": 1},
+    {"byteOffset": 599, "codeSepIndex": 1},
+    {"byteOffset": 1445, "codeSepIndex": 1},
 ]
 
 

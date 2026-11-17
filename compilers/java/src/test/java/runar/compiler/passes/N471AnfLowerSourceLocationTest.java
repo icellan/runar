@@ -95,9 +95,13 @@ class N471AnfLowerSourceLocationTest {
         }
         """;
 
-    /** TS reference map runs: {firstOpcode, lastOpcode, line, column}. */
+    /**
+     * TS reference map runs: {firstOpcode, lastOpcode, line, column}.
+     * #180 / #213 (PR B): re-pinned from the TS tier; every opcode moved by +6
+     * for the `_changePKH` entry width gate.
+     */
     private static final int[][] TS_RUNS = {
-        {102, 105, 17, 4}, {106, 168, 12, 4}, {169, 169, 13, 4}, {172, 174, 18, 4},
+        {108, 111, 17, 4}, {112, 174, 12, 4}, {175, 175, 13, 4}, {178, 180, 18, 4},
     };
 
     private static final Pattern MAPPING = Pattern.compile(

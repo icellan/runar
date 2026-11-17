@@ -146,7 +146,8 @@ class R025FieldPreservationTest {
     void fixedArraySingleDiffersFromDefaultAtExactlyTheTwoSighashBytes() throws Exception {
         String single = PipelineTestSupport.hex(
             sighashSrc("/** @sighash SINGLE|FORKID */", ARRAY_PROP), "Boardy.runar.ts");
-        String dflt = PipelineTestSupport.hex(sighashSrc("", ARRAY_PROP), "Boardy.runar.ts");
+        String dflt = stripChangePkhGate(
+            PipelineTestSupport.hex(sighashSrc("", ARRAY_PROP), "Boardy.runar.ts"));
         // N-038 (R64): the SINGLE continuation also drops the change segment and
         // its params, which shrinks the script and shifts stack depths from
         // byte 480 on; the pure flag swap is checked over the prologue before
@@ -169,6 +170,19 @@ class R025FieldPreservationTest {
         assertEquals("01419d", dflt.substring(2 * 515, 2 * 518));
         assertEquals("01439d", single.substring(2 * 515, 2 * 518),
             "the preimage-type assert const carries the declared mode");
+    }
+
+    /**
+     * #180 / #213: the default-mode script carries the {@code _changePKH} entry
+     * width gate ({@code <d> OP_PICK OP_SIZE 0x14 OP_NUMEQUALVERIFY OP_DROP},
+     * 7 bytes) right after the {@code 61ab} prologue; a SINGLE continuation
+     * drops {@code _changePKH}, so it has none. Remove it so the two prologues
+     * line up byte-for-byte again.
+     */
+    private static String stripChangePkhGate(String dflt) {
+        assertEquals("8201149d75", dflt.substring(8, 18),
+            "default script must open with the _changePKH width gate");
+        return dflt.substring(0, 4) + dflt.substring(18);
     }
 
     // ------------------------------------------------------------------
