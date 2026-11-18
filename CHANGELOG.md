@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### SDK (TypeScript): `buildContractUnlock` for a transaction built elsewhere (#198)
+
+- **`runar-sdk`:** new `buildContractUnlock(tx, inputIndex, input, { dryRun? })` returns
+  `{ unlockingScript, preimage }` for a covenant input of a transaction built outside Rúnar, such as a
+  BRC-100 wallet funding the call. `assembleMultiContractCall` now calls it (byte-identical output,
+  pinned). New `buildContractUnlockSkeleton(input)` gives a placeholder unlock for fee sizing. A
+  wallet-built tx verifies only if its outputs are exactly what the covenant hashes, including change at
+  `_changeAmount` to `_changePKH`; the API refuses (throws) a non-zero declared change that is not the tx's
+  last output, a trailing change the covenant does not commit (via a Spend dry run), a `changePKH` that is
+  not 20 bytes, a mis-sized fixed-width argument and a wrong outpoint. The other six SDKs are unchanged.
+  Reported by `E-Jacko`. Fixes #198.
+
 ### Checked preimage extractor arguments, IR-loader preimage properties, SDK `sha256Compress` (PR G)
 
 - **All seven compilers — breaking:** a preimage extractor (`extractVersion`, `extractHashPrevouts`,

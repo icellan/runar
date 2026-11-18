@@ -357,6 +357,33 @@ await counter.call('increment', []);
 
 `WalletProvider` broadcasts in EF (Extended Format) via ARC, caching parent transactions for child-tx EF assembly. If you also pass `overlayUrl` and `overlayTopics`, every broadcast is fire-and-forget submitted to the overlay for indexing.
 
+### 9d. Unlocking a covenant input of a transaction built elsewhere (`buildContractUnlock`)
+
+When a wallet builds and funds the transaction (it adds its own funding inputs and change), the app only has to supply the unlocking script of its covenant input. `buildContractUnlock` is the per-input step `assembleMultiContractCall` performs, exported for that case:
+
+```typescript
+import { buildContractUnlock, buildContractUnlockSkeleton, dryRunMultiContractInput } from 'runar-sdk';
+
+// Fee sizing before the tx exists (e.g. BRC-100 createAction `unlockingScriptLength`):
+const input = { contract, method: 'bump', args: [null, 2000n], signer, changePKH, changeAmount: 1000n };
+const { length } = buildContractUnlockSkeleton(input);   // upper bound, never below the real unlock
+
+// `tx` is the wallet's final transaction (contract input at index 1, wallet funding input at 0):
+const { unlockingScript, preimage } = await buildContractUnlock(tx, 1, input, { dryRun: true });
+```
+
+The tx you pass is only read (version, lockTime, input outpoints and sequences, outputs); it is never mutated. Inputs need `sourceTXID` or `sourceTransaction`, and every output needs a final `satoshis`.
+
+**Wallet-funding caveat: a wallet-built tx verifies only if its outputs are exactly what the covenant hashes.** That is the contract's continuation output(s), raw outputs and data outputs in the contract's own order, followed, when the method declares `_changePKH`, by change at exactly `_changeAmount` to `_changePKH`. The wallet's own change output must therefore equal the declared change; otherwise declare `changeAmount: 0n` and make sure the wallet adds no change output. A mismatch cannot verify on-chain and strands the covenant UTXO, so the API refuses instead of building:
+
+- a non-zero `changeAmount` whose P2PKH(`changePKH`) is not the tx's last output at exactly that amount throws;
+- `changeAmount` 0 with a tx that still ends in a P2PKH to `changePKH` is validated through Spend and throws if it fails (it may be a legitimate raw output, so it is not refused blindly);
+- the `changePKH` must be exactly 20 bytes (the #213 gate), and every fixed-width public-method argument is width-checked (`Sha256`, `PubKey`, ... as on `call()`), as on the `call()` path;
+- the input at `inputIndex` must spend the UTXO you pass;
+- `{ dryRun: true }` replays the built unlock through @bsv/sdk's `Spend` against the tx's exact outputs and throws on failure. Use it whenever you hold the wallet's final tx; the wallet must not alter inputs' outpoints/sequences or outputs afterwards.
+
+There is no pre-sign preimage hook: the preimage is returned next to the unlock.
+
 ---
 
 ## Stateful contracts

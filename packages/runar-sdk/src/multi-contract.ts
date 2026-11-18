@@ -173,119 +173,16 @@ export async function assembleMultiContractCall(
   };
 
   const skeleton = build(inputs.map(() => ''));
-  const skeletonHex = skeleton.toHex();
 
   const unlocks: string[] = [];
   const preimages: string[] = [];
 
   for (let i = 0; i < inputs.length; i++) {
-    const inp = inputs[i]!;
-    const utxo = utxos[i]!;
-    const artifact = inp.contract.artifact;
-    const publicMethods = artifact.abi.methods.filter((m) => m.isPublic);
-    const methodIndex = publicMethods.findIndex((m) => m.name === inp.method);
-    if (methodIndex < 0) {
-      throw new Error(
-        `assembleMultiContractCall: input ${i}: public method '${inp.method}' not found on ${artifact.contractName}`,
-      );
-    }
-    const method = publicMethods[methodIndex]!;
-
-    const witnessParams = method.params.filter((p) => isAutoInjectedWitnessParam(p.name));
-    if (witnessParams.length > 0) {
-      throw new Error(
-        `assembleMultiContractCall: input ${i}: method '${inp.method}' declares intent-intrinsic witness params ` +
-        `(${witnessParams.map((p) => p.name).join(', ')}) — not supported by multi-contract assembly yet`,
-      );
-    }
-
-    const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
-    const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
-    const methodUsesCodePart = method.usesCodePart ?? methodNeedsChange;
-    // Shared SDK-supplied-param predicate (N-149), the SAME one
-    // RunarContract.prepareCall uses (N-411): non-empty stateFields. A
-    // StatefulSmartContract with ZERO mutable fields has empty stateFields, so
-    // its txPreimage is a user arg (pass null), as on the single-contract path.
-    const isStateful = (artifact.stateFields?.length ?? 0) > 0;
-    const userParams = method.params.filter((p) => !isSdkSuppliedParam(p, isStateful));
-    if (userParams.length !== inp.args.length) {
-      throw new Error(
-        `assembleMultiContractCall: input ${i}: method '${inp.method}' expects ${userParams.length} args, got ${inp.args.length}`,
-      );
-    }
-    if (methodNeedsChange && !inp.changePKH) {
-      throw new Error(
-        `assembleMultiContractCall: input ${i}: method '${inp.method}' requires \`changePKH\` (ABI declares _changePKH)`,
-      );
-    }
-    // #213 (defence in depth): the covenant gates `_changePKH` at exactly 20
-    // bytes; refuse anything else before building a transaction.
-    if (methodNeedsChange) {
-      assertFixedWidthValue(inp.changePKH, 'Ripemd160', `assembleMultiContractCall: input ${i}: changePKH`);
-    }
-
-    // OP_PUSH_TX preimage against THIS artifact's codesep layout. BUG-100: the
-    // signature is derived on-chain from the preimage, so only the preimage is
-    // pushed (buildStatefulPrefix pushes no signature).
-    const { preimageHex } = inp.contract.computeOpPushTxPreimageWithCodeSep(
-      skeleton, i, utxo.script, utxo.satoshis, methodIndex,
+    const { unlockingScript, preimage } = await unlockForInput(
+      skeleton, i, inputs[i]!, utxos[i]!, `assembleMultiContractCall: input ${i}`,
     );
-
-    // Resolve user args; sign null Sig params over the trimmed subscript.
-    let argsHex = '';
-    let preimageInArgs = false;
-    for (let a = 0; a < userParams.length; a++) {
-      let value = inp.args[a];
-      if (userParams[a]!.type === 'Sig' && value === null) {
-        if (!inp.signer) {
-          throw new Error(
-            `assembleMultiContractCall: input ${i}: arg ${a} is a null Sig but no \`signer\` was provided`,
-          );
-        }
-        const trimmed = inp.contract.getSubscriptForSigning(utxo.script, methodIndex);
-        value = await inp.signer.sign(skeletonHex, i, trimmed, utxo.satoshis);
-      }
-      // N-411: a zero-mutable StatefulSmartContract's txPreimage is a user
-      // arg (null); it resolves to the preimage computed above.
-      if (userParams[a]!.type === 'SigHashPreimage' && value === null) {
-        value = preimageHex;
-        preimageInArgs = true;
-      }
-      // This low-level surface only auto-resolves null `Sig` and
-      // SigHashPreimage params. A null of
-      // any other type would otherwise be encoded as the ASCII bytes of "null";
-      // reject it with an actionable message instead (pass a concrete value).
-      if (value === null || value === undefined) {
-        throw new Error(
-          `assembleMultiContractCall: input ${i}: arg ${a} (param '${userParams[a]!.name}': ${userParams[a]!.type}) is ${value}; only null Sig params are auto-signed — pass a concrete value for every other param`,
-        );
-      }
-      // N-045 (defence in depth): a fixed-width arg must have its declared width.
-      assertFixedWidthValue(
-        value, userParams[a]!.type,
-        `assembleMultiContractCall: input ${i}: arg ${a} (param '${userParams[a]!.name}')`,
-      );
-      argsHex += encodeArg(value);
-    }
-
-    let changeHex = '';
-    if (methodNeedsChange) {
-      changeHex = encodePushData(inp.changePKH!) + encodeScriptNumber(inp.changeAmount ?? 0n);
-    }
-    let newAmountHex = '';
-    if (methodNeedsNewAmount) {
-      newAmountHex = encodeScriptNumber(inp.newAmount ?? BigInt(utxo.satoshis));
-    }
-    const selectorHex = publicMethods.length > 1 ? encodeScriptNumber(BigInt(methodIndex)) : '';
-
-    const unlock =
-      inp.contract.buildStatefulPrefix('', methodUsesCodePart) +
-      argsHex + changeHex + newAmountHex +
-      (preimageInArgs ? '' : encodePushData(preimageHex)) +
-      selectorHex;
-
-    unlocks.push(unlock);
-    preimages.push(preimageHex);
+    unlocks.push(unlockingScript);
+    preimages.push(preimage);
   }
 
   const tx = build(unlocks);
@@ -304,6 +201,336 @@ export async function assembleMultiContractCall(
   }
 
   return { tx, txHex, unlocks, preimages };
+}
+
+// ---------------------------------------------------------------------------
+// Per-input unlock builder (#198)
+// ---------------------------------------------------------------------------
+
+/** Options for {@link buildContractUnlock}. */
+export interface BuildContractUnlockOptions {
+  /**
+   * Replay the built unlock through @bsv/sdk's Spend interpreter against the
+   * given tx's EXACT outputs/inputs and throw when it does not validate.
+   * Default false (the tx a wallet hands over may still change; callers that
+   * hold the final tx should turn this on). Other inputs' unlocks are not
+   * needed: each input is validated independently.
+   */
+  dryRun?: boolean;
+}
+
+const p2pkhScript = (pkhHex: string): string => '76a914' + pkhHex + '88ac';
+
+/**
+ * Copy the parts of `tx` a BIP-143 preimage commits to into a FRESH
+ * transaction with empty unlocks. Never serializes (or mutates) the caller's
+ * object: @bsv/sdk caches `toHex()`, and a wallet-built tx may carry inputs
+ * with only a `sourceTransaction` / `unlockingScriptTemplate`.
+ */
+function snapshotSkeleton(tx: BsvTransaction, label: string): BsvTransaction {
+  const sk = new BsvTransaction(tx.version, [], [], tx.lockTime);
+  tx.inputs.forEach((inp, i) => {
+    const sourceTXID = inp.sourceTXID ?? inp.sourceTransaction?.id('hex');
+    if (!sourceTXID) {
+      throw new Error(`${label}: tx input ${i} has neither sourceTXID nor sourceTransaction`);
+    }
+    sk.addInput({
+      sourceTXID,
+      sourceOutputIndex: inp.sourceOutputIndex,
+      unlockingScript: new UnlockingScript(),
+      sequence: inp.sequence ?? 0xffffffff,
+    });
+  });
+  tx.outputs.forEach((out, i) => {
+    if (out.satoshis === undefined || !out.lockingScript) {
+      throw new Error(
+        `${label}: tx output ${i} has no final satoshis/lockingScript (an unresolved wallet change output?)`,
+      );
+    }
+    sk.addOutput({ satoshis: out.satoshis, lockingScript: out.lockingScript });
+  });
+  return sk;
+}
+
+/** Shared method/ABI resolution for the unlock builder and the sizing skeleton. */
+function resolveUnlockMethod(inp: MultiContractCallInput, label: string) {
+  const artifact = inp.contract.artifact;
+  const publicMethods = artifact.abi.methods.filter((m) => m.isPublic);
+  const methodIndex = publicMethods.findIndex((m) => m.name === inp.method);
+  if (methodIndex < 0) {
+    throw new Error(`${label}: public method '${inp.method}' not found on ${artifact.contractName}`);
+  }
+  const method = publicMethods[methodIndex]!;
+
+  const witnessParams = method.params.filter((p) => isAutoInjectedWitnessParam(p.name));
+  if (witnessParams.length > 0) {
+    throw new Error(
+      `${label}: method '${inp.method}' declares intent-intrinsic witness params ` +
+      `(${witnessParams.map((p) => p.name).join(', ')}) — not supported by multi-contract assembly yet`,
+    );
+  }
+
+  const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
+  const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
+  const methodUsesCodePart = method.usesCodePart ?? methodNeedsChange;
+  // Shared SDK-supplied-param predicate (N-149), the SAME one
+  // RunarContract.prepareCall uses (N-411): non-empty stateFields. A
+  // StatefulSmartContract with ZERO mutable fields has empty stateFields, so
+  // its txPreimage is a user arg (pass null), as on the single-contract path.
+  const isStateful = (artifact.stateFields?.length ?? 0) > 0;
+  const userParams = method.params.filter((p) => !isSdkSuppliedParam(p, isStateful));
+  if (userParams.length !== inp.args.length) {
+    throw new Error(
+      `${label}: method '${inp.method}' expects ${userParams.length} args, got ${inp.args.length}`,
+    );
+  }
+  if (methodNeedsChange && !inp.changePKH) {
+    throw new Error(
+      `${label}: method '${inp.method}' requires \`changePKH\` (ABI declares _changePKH)`,
+    );
+  }
+  // #213 (defence in depth): the covenant gates `_changePKH` at exactly 20
+  // bytes; refuse anything else before building a transaction.
+  if (methodNeedsChange) {
+    assertFixedWidthValue(inp.changePKH, 'Ripemd160', `${label}: changePKH`);
+  }
+  return {
+    artifact, publicMethods, methodIndex, method, userParams,
+    methodNeedsChange, methodNeedsNewAmount, methodUsesCodePart,
+  };
+}
+
+/**
+ * The compiled covenant reconstructs `[state/raw outputs][data outputs]` and
+ * then, iff `_changeAmount !== 0`, ONE trailing P2PKH(`_changePKH`,
+ * `_changeAmount`). So for a non-zero declared change the LAST output of the
+ * spending tx must be exactly that P2PKH; anything else can never satisfy the
+ * covenant's hashOutputs and the funds would be stranded. Returns true when
+ * the (zero-change) case is ambiguous and needs a definitive dry run: a
+ * trailing P2PKH to `changePKH` is either a wallet change the covenant does
+ * not commit, or a legitimate `addRawOutput(x, p2pkh(samePKH))`.
+ */
+function checkDeclaredChange(
+  outputs: BsvTransaction['outputs'], changePKH: string, changeAmount: bigint, label: string,
+): boolean {
+  if (changeAmount < 0n) throw new Error(`${label}: changeAmount must be >= 0, got ${changeAmount}`);
+  const last = outputs[outputs.length - 1];
+  const lastIsChangeToPKH = !!last && last.lockingScript.toHex() === p2pkhScript(changePKH.toLowerCase());
+  if (changeAmount !== 0n) {
+    if (!last || !lastIsChangeToPKH || BigInt(last.satoshis ?? -1) !== changeAmount) {
+      throw new Error(
+        `${label}: declared change (${changeAmount} sats to P2PKH ${changePKH}) does not match the tx: ` +
+        `the covenant requires the LAST output to be exactly that P2PKH change. ` +
+        (last
+          ? `The tx's last output is ${last.satoshis} sats to ${last.lockingScript.toHex()}. `
+          : 'The tx has no outputs. ') +
+        `A wallet-built tx must carry change at exactly _changeAmount/_changePKH (or declare changeAmount 0 ` +
+        `and carry no change output); otherwise the spend cannot verify.`,
+      );
+    }
+    return false;
+  }
+  return lastIsChangeToPKH;
+}
+
+async function unlockForInput(
+  skeleton: BsvTransaction,
+  inputIndex: number,
+  inp: MultiContractCallInput,
+  utxo: UTXO,
+  label: string,
+): Promise<{ unlockingScript: string; preimage: string; ambiguousZeroChange: boolean }> {
+  const {
+    publicMethods, methodIndex, userParams,
+    methodNeedsChange, methodNeedsNewAmount, methodUsesCodePart,
+  } = resolveUnlockMethod(inp, label);
+
+  let ambiguousZeroChange = false;
+  if (methodNeedsChange) {
+    ambiguousZeroChange = checkDeclaredChange(
+      skeleton.outputs, inp.changePKH!, inp.changeAmount ?? 0n, label,
+    );
+  }
+
+  const skeletonHex = skeleton.toHex();
+
+  // OP_PUSH_TX preimage against THIS artifact's codesep layout. BUG-100: the
+  // signature is derived on-chain from the preimage, so only the preimage is
+  // pushed (buildStatefulPrefix pushes no signature).
+  const { preimageHex } = inp.contract.computeOpPushTxPreimageWithCodeSep(
+    skeleton, inputIndex, utxo.script, utxo.satoshis, methodIndex,
+  );
+
+  // Resolve user args; sign null Sig params over the trimmed subscript.
+  let argsHex = '';
+  let preimageInArgs = false;
+  for (let a = 0; a < userParams.length; a++) {
+    let value = inp.args[a];
+    if (userParams[a]!.type === 'Sig' && value === null) {
+      if (!inp.signer) {
+        throw new Error(`${label}: arg ${a} is a null Sig but no \`signer\` was provided`);
+      }
+      const trimmed = inp.contract.getSubscriptForSigning(utxo.script, methodIndex);
+      value = await inp.signer.sign(skeletonHex, inputIndex, trimmed, utxo.satoshis);
+    }
+    // N-411: a zero-mutable StatefulSmartContract's txPreimage is a user
+    // arg (null); it resolves to the preimage computed above.
+    if (userParams[a]!.type === 'SigHashPreimage' && value === null) {
+      value = preimageHex;
+      preimageInArgs = true;
+    }
+    // This low-level surface only auto-resolves null `Sig` and
+    // SigHashPreimage params. A null of
+    // any other type would otherwise be encoded as the ASCII bytes of "null";
+    // reject it with an actionable message instead (pass a concrete value).
+    if (value === null || value === undefined) {
+      throw new Error(
+        `${label}: arg ${a} (param '${userParams[a]!.name}': ${userParams[a]!.type}) is ${value}; only null Sig params are auto-signed — pass a concrete value for every other param`,
+      );
+    }
+    // N-045 (defence in depth): a fixed-width arg must have its declared width.
+    assertFixedWidthValue(
+      value, userParams[a]!.type,
+      `${label}: arg ${a} (param '${userParams[a]!.name}')`,
+    );
+    argsHex += encodeArg(value);
+  }
+
+  let changeHex = '';
+  if (methodNeedsChange) {
+    changeHex = encodePushData(inp.changePKH!) + encodeScriptNumber(inp.changeAmount ?? 0n);
+  }
+  let newAmountHex = '';
+  if (methodNeedsNewAmount) {
+    newAmountHex = encodeScriptNumber(inp.newAmount ?? BigInt(utxo.satoshis));
+  }
+  const selectorHex = publicMethods.length > 1 ? encodeScriptNumber(BigInt(methodIndex)) : '';
+
+  const unlockingScript =
+    inp.contract.buildStatefulPrefix('', methodUsesCodePart) +
+    argsHex + changeHex + newAmountHex +
+    (preimageInArgs ? '' : encodePushData(preimageHex)) +
+    selectorHex;
+
+  return { unlockingScript, preimage: preimageHex, ambiguousZeroChange };
+}
+
+/**
+ * Build the unlocking script (and the BIP-143 preimage it embeds) for covenant
+ * input `inputIndex` of a transaction that was built ELSEWHERE, e.g. by a
+ * BRC-100 wallet that adds its own funding inputs and change. This is the
+ * per-input step `assembleMultiContractCall` performs, and it is what that
+ * function now calls.
+ *
+ * WALLET-FUNDING CAVEAT: the covenant verifies only if the tx's outputs are
+ * EXACTLY what it hashes: its continuation(s), raw outputs and data outputs in
+ * the contract's order, then (iff the method declares `_changePKH`) change at
+ * exactly `_changeAmount` to `_changePKH`. A wallet's own change output must
+ * therefore equal the declared change, or `changeAmount` must be 0 and no
+ * change output may exist. This function REFUSES (throws) when a non-zero
+ * declared change is not the tx's last output; when `changeAmount` is 0 but
+ * the tx ends in a P2PKH to `changePKH` it validates the input through Spend
+ * and refuses on failure. Pass `{ dryRun: true }` to validate every case
+ * through Spend before returning. Fixed-width arguments and the 20-byte
+ * `changePKH` are width-gated exactly as on the `call()` path.
+ *
+ * The passed `tx` is read, never mutated or serialized: a private skeleton is
+ * built from its version, lockTime, input outpoints/sequences and outputs.
+ * Inputs need `sourceTXID` or `sourceTransaction`; every output needs a final
+ * `satoshis` (resolve wallet change first).
+ *
+ * @throws if the method/arity/UTXO/signer/changePKH/width checks fail, the
+ *         input at `inputIndex` does not spend the UTXO, the declared change
+ *         cannot match the tx, or an applicable dry run fails.
+ */
+export async function buildContractUnlock(
+  tx: BsvTransaction,
+  inputIndex: number,
+  input: MultiContractCallInput,
+  opts: BuildContractUnlockOptions = {},
+): Promise<{ unlockingScript: string; preimage: string }> {
+  const label = `buildContractUnlock: input ${inputIndex}`;
+  const target = tx.inputs[inputIndex];
+  if (!target) throw new Error(`${label}: no input at index ${inputIndex}`);
+  const utxo = input.utxo ?? input.contract.getUtxo();
+  if (!utxo) {
+    throw new Error(`${label}: no UTXO — pass \`utxo\` or deploy/connect the contract first`);
+  }
+  const skeleton = snapshotSkeleton(tx, label);
+  const sk = skeleton.inputs[inputIndex]!;
+  if (sk.sourceTXID!.toLowerCase() !== utxo.txid.toLowerCase() || sk.sourceOutputIndex !== utxo.outputIndex) {
+    throw new Error(
+      `${label}: the tx input spends outpoint ${sk.sourceTXID}:${sk.sourceOutputIndex}, ` +
+      `not the contract UTXO ${utxo.txid}:${utxo.outputIndex} — wrong inputIndex or UTXO`,
+    );
+  }
+
+  const built = await unlockForInput(skeleton, inputIndex, input, utxo, label);
+
+  if (opts.dryRun || built.ambiguousZeroChange) {
+    const probe = snapshotSkeleton(tx, label);
+    probe.inputs[inputIndex]!.unlockingScript = UnlockingScript.fromHex(built.unlockingScript);
+    const r = dryRunMultiContractInput(probe.toHex(), inputIndex, utxo.script, utxo.satoshis);
+    if (!r.valid) {
+      throw new Error(
+        `${label}: offline validation FAILED for input ${inputIndex} ` +
+        `(${input.contract.artifact.contractName}.${input.method}): ${r.error ?? 'script invalid'}` +
+        (built.ambiguousZeroChange
+          ? ' — changeAmount is 0 but the tx ends in a P2PKH to changePKH that the covenant does not commit; ' +
+            'declare that change amount or drop the output'
+          : ''),
+      );
+    }
+  }
+  return { unlockingScript: built.unlockingScript, preimage: built.preimage };
+}
+
+/**
+ * A placeholder unlocking script for covenant input `input.method`, for FEE
+ * SIZING before the final tx exists (e.g. a BRC-100 `createAction`
+ * `unlockingScriptLength`). Same layout as {@link buildContractUnlock}; null
+ * `Sig` args become 73-byte zero pushes, the preimage a zero push of its exact
+ * length for the UTXO script, and `_changeAmount`/`_newAmount` 8-byte numbers,
+ * so `length` is an upper bound (never below the real unlock; a few bytes
+ * above at most). Not a valid unlock: never broadcast it.
+ */
+export function buildContractUnlockSkeleton(
+  input: MultiContractCallInput,
+): { unlockingScript: string; length: number } {
+  const label = 'buildContractUnlockSkeleton';
+  const {
+    publicMethods, methodIndex, userParams,
+    methodNeedsChange, methodNeedsNewAmount, methodUsesCodePart,
+  } = resolveUnlockMethod(input, label);
+  const scriptHex = (input.utxo ?? input.contract.getUtxo())?.script ?? input.contract.getLockingScript();
+  const subscriptLen = input.contract.getSubscriptForSigning(scriptHex, methodIndex).length / 2;
+  const varintLen = subscriptLen < 0xfd ? 1 : subscriptLen <= 0xffff ? 3 : 5;
+  const preimagePlaceholder = '00'.repeat(156 + varintLen + subscriptLen);
+
+  let argsHex = '';
+  let preimageInArgs = false;
+  for (let a = 0; a < userParams.length; a++) {
+    let value = input.args[a];
+    if (userParams[a]!.type === 'Sig' && value === null) value = '00'.repeat(73);
+    if (userParams[a]!.type === 'SigHashPreimage' && value === null) {
+      value = preimagePlaceholder;
+      preimageInArgs = true;
+    }
+    if (value === null || value === undefined) {
+      throw new Error(`${label}: arg ${a} (param '${userParams[a]!.name}') is ${value}; pass a concrete value`);
+    }
+    argsHex += encodeArg(value);
+  }
+  const num8 = '08' + 'ff'.repeat(8);
+  const changeHex = methodNeedsChange ? encodePushData(input.changePKH ?? '00'.repeat(20)) + num8 : '';
+  const newAmountHex = methodNeedsNewAmount ? num8 : '';
+  const selectorHex = publicMethods.length > 1 ? encodeScriptNumber(BigInt(methodIndex)) : '';
+  const unlockingScript =
+    input.contract.buildStatefulPrefix('', methodUsesCodePart) +
+    argsHex + changeHex + newAmountHex +
+    (preimageInArgs ? '' : encodePushData(preimagePlaceholder)) +
+    selectorHex;
+  return { unlockingScript, length: unlockingScript.length / 2 };
 }
 
 /**
