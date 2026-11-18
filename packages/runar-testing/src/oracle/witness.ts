@@ -36,12 +36,23 @@ function pushData(data: Uint8Array): Uint8Array {
     out.set(data, 2);
     return out;
   }
-  // PUSHDATA2 for larger elements.
-  const out = new Uint8Array(3 + data.length);
-  out[0] = 0x4d;
+  // PUSHDATA2 up to 65535 bytes.
+  if (data.length <= 0xffff) {
+    const out = new Uint8Array(3 + data.length);
+    out[0] = 0x4d;
+    out[1] = data.length & 0xff;
+    out[2] = (data.length >> 8) & 0xff;
+    out.set(data, 3);
+    return out;
+  }
+  // D12 BM-F9: PUSHDATA4 above that (a 16-bit length silently truncated).
+  const out = new Uint8Array(5 + data.length);
+  out[0] = 0x4e;
   out[1] = data.length & 0xff;
-  out[2] = (data.length >> 8) & 0xff;
-  out.set(data, 3);
+  out[2] = (data.length >>> 8) & 0xff;
+  out[3] = (data.length >>> 16) & 0xff;
+  out[4] = (data.length >>> 24) & 0xff;
+  out.set(data, 5);
   return out;
 }
 

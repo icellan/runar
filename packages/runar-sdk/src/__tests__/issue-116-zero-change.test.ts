@@ -106,7 +106,7 @@ describe('#116 — exact-cover call (change 0) omits the change output', () => {
     // No funding UTXOs for `caller` → the continuation keeps the full contract
     // value and `change` clamps to 0, so the SDK emits only the continuation
     // output (no change output).
-    await contract.call('bump', [], provider, caller);
+    await contract.call('bump', [], provider, caller, { allowFeeBelowRate: true });
     const callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
 
     // Sanity: only the single continuation output — no change output.
