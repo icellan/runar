@@ -21,6 +21,7 @@ require_relative "stateful_scaffold"
 require_relative "synthetic_array_chain"
 require_relative "rabin_key_provenance"
 require_relative "preimage_rules"
+require_relative "continuation_rules"
 
 module RunarCompiler
   module IR
@@ -126,6 +127,11 @@ module RunarCompiler
       # N-205: F-286's verifyRabinSig key provenance, and the write rule for a
       # mutable key property (shared rule and diagnostics, 7 tiers).
       RabinKeyProvenance.assert!(program)
+
+      # D18: validate_ir's N-101 scaffolding check passed; a stateful public
+      # method that writes state behind raw outputs only drops its state write
+      # (shared rule and diagnostic, 7 tiers; see continuation_rules.rb).
+      ContinuationRules.assert!(program) if _effective_parent_class(program) == "StatefulSmartContract"
 
       # D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
       # diagnostics, 7 tiers; see preimage_rules.rb).

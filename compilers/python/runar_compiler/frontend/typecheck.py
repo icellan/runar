@@ -44,6 +44,10 @@ from runar_compiler.frontend.side_effect_summary import (
     MethodEffects,
     compute_side_effect_summary,
 )
+from runar_compiler.frontend.continuation_rules import (
+    dropped_continuation_message,
+    drops_continuation,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1087,6 +1091,10 @@ class _TypeChecker:
                     "unspendable. Assert the bond on a non-continuation output index, or make the method "
                     "terminal (no state mutation)"
                 )
+            # D18: a state write whose only declared outputs are raw ones is
+            # dropped (see continuation_rules.py).
+            if method.visibility == "public" and drops_continuation(effects):
+                self._add_error(dropped_continuation_message(method.name))
 
     def _check_statements(self, stmts: list[Statement], env: _TypeEnv) -> None:
         for stmt in stmts:

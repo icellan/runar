@@ -620,6 +620,14 @@ For each method:
 - Verify no recursion (build call graph, check for cycles).
 - Verify all for-loop bounds are compile-time constants.
 - Verify total unrolled code size is within limits.
+- D18: refuse a public `StatefulSmartContract` method that writes a mutable
+  property and calls `addRawOutput` but never `addOutput` (each followed through
+  private helpers): its declared outputs replace the auto-injected continuation,
+  so the write would be dropped (docs/language-reference.md, "A state write with
+  only raw outputs"). The `--ir` path re-derives it from `update_prop` /
+  `add_raw_output` / `add_output`.
+- #199 (warning only): a `StatefulSmartContract` none of whose public methods is
+  terminal or calls `addOutput` / `addRawOutput` can never release its satoshis.
 
 ---
 

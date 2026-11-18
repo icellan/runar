@@ -677,6 +677,39 @@ other builtins: `runar.ContinuationAmount()` (Go), `continuation_amount()`
 (Python, Ruby, Rust, Move), `runar.continuationAmount()` (Zig),
 `continuationAmount()` (TypeScript, Solidity, Java).
 
+#### A contract whose satoshis can never leave (warning, #199)
+
+Because of that floor, a stateful contract none of whose public methods is
+terminal (writes no state and declares no output) or sizes its own outputs
+(`addOutput` / `addRawOutput`, directly or through a private helper) keeps
+every satoshi locked in its instances forever. That is sometimes intended (a
+perpetual counter) and often a mistake (an escrow or vault with no release
+path), so every compiler emits a non-fatal warning:
+
+```
+contract 'X' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'X'
+```
+
+A contract with no mutable property has only terminal methods and never warns.
+
+#### A state write with only raw outputs (error, D18)
+
+Any `addOutput` / `addRawOutput` in a method replaces the default continuation:
+the covenant then commits to exactly the declared outputs plus change.
+`addRawOutput` carries caller-chosen script bytes, never the contract's state,
+so a public method that writes state and calls `addRawOutput` but never
+`addOutput` would drop the write, and the contract's remaining value would go
+to the spender's change. Every compiler refuses it (on the `--ir` path too):
+
+```
+method 'm' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract
+```
+
+A method that writes nothing and only emits raw outputs ends the contract by
+design and is accepted; `addDataOutput` keeps the default continuation and is
+no trigger. The rule is per method, not per path: a write on a branch whose
+sibling branch calls `addOutput` is not refused.
+
 ### Oracle
 
 | Function | Signature | Description |

@@ -13,6 +13,7 @@ const stateful_scaffold = @import("stateful_scaffold.zig");
 const synthetic_array_chain = @import("synthetic_array_chain.zig");
 const rabin_key_provenance = @import("rabin_key_provenance.zig");
 const preimage_rules = @import("preimage_rules.zig");
+const continuation_rules = @import("continuation_rules.zig");
 const call_depth = @import("call_depth.zig");
 pub const required_fields = @import("required_fields.zig");
 
@@ -91,6 +92,9 @@ const ParseError = error{
     SyntheticArrayChainMalformed,
     RabinKeyProvenance,
     PreimageRuleViolation,
+    // D18: a stateful public method writes state behind raw outputs only.
+    // Message in lastDiagnostic().
+    DroppedContinuation,
     // N-265: a cycle in the method_call graph. `compile-ir` skips the
     // frontend entirely, so frontend/validate.zig's recursion check never
     // ran; stack lowering inlines every method_call with no cycle guard,
@@ -515,6 +519,12 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     if (effective_class == .stateful_smart_contract) {
         stateful_scaffold.check(allocator, properties, method_list.items) catch |err| switch (err) {
             error.StatefulScaffoldMismatch => return ParseError.StatefulScaffoldMismatch,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        // D18: IR input skips typecheck's dropped-continuation rule (shared
+        // rule and diagnostic, 7 tiers; see continuation_rules.zig).
+        continuation_rules.check(allocator, method_list.items) catch |err| switch (err) {
+            error.DroppedContinuation => return ParseError.DroppedContinuation,
             error.OutOfMemory => return error.OutOfMemory,
         };
     }

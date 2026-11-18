@@ -18,6 +18,7 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { computeSideEffectSummary } from './side-effect-summary.js';
+import { dropsContinuation } from './continuation-rules.js';
 import type { MethodEffects, SideEffectSummary } from './side-effect-summary.js';
 
 // ---------------------------------------------------------------------------
@@ -1098,6 +1099,21 @@ class TypeChecker {
             `simultaneously be the required 34-byte P2PKH. This contract would be permanently ` +
             `unspendable. Assert the bond on a non-continuation output index, or make the method ` +
             `terminal (no state mutation)`,
+          'error',
+          method.sourceLocation,
+        ));
+      }
+
+      // D18: a state write whose only declared outputs are raw ones is dropped
+      // (see continuation-rules.ts). Same text as droppedContinuationMessage,
+      // spelled out here so the R-101 extractor can read the template.
+      if (method.visibility === 'public' && dropsContinuation(effects)) {
+        this.errors.push(makeDiagnostic(
+          `method '${method.name}' writes contract state but emits no state continuation: it calls ` +
+            `addRawOutput() without addOutput(), and a method that declares its own outputs gets no ` +
+            `auto-injected continuation, so the state write would be lost and the contract's satoshis ` +
+            `would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or ` +
+            `stop writing state in a method meant to end the contract`,
           'error',
           method.sourceLocation,
         ));

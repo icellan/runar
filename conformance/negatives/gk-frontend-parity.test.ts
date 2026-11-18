@@ -355,4 +355,51 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
       });
     }
   });
+
+  describe('D18: a state write with no state continuation is refused', () => {
+    interface DcCase { name: string; file: string; src: string; error?: string }
+    const data = corpus<{ refuse: DcCase[]; accept: DcCase[] }>('dropped-continuation-cases.json');
+    // Pinned literally (the corpus could drift with it).
+    const D18 = (m: string): string =>
+      `method '${m}' writes contract state but emits no state continuation: it calls addRawOutput() without ` +
+      'addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state ' +
+      "write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, " +
+      '...) to carry the new state, or stop writing state in a method meant to end the contract';
+    it('the corpus carries the pinned text', () => {
+      for (const c of data.refuse) expect(c.error, c.name).toBe(D18(/^method '(\w+)'/.exec(c.error!)![1]!));
+    });
+    for (const c of data.refuse) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${c.name} with the shared diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(c.file, c.src));
+          expect(status, `${tier.id} accepted ${c.name} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(c.error);
+        });
+      }
+    }
+    for (const c of data.accept) {
+      it(`every tier compiles ${c.name} to the same bytes`, () => {
+        const input = writeFile(c.file, c.src);
+        const hexes = new Set(TIERS.map((t) => compileHex(t, input)));
+        expect([...hexes]).toHaveLength(1);
+      });
+    }
+    for (const [f, m] of [
+      ['N536-ts-raw-output-drops-state-write.runar.ts', 'lock'],
+      ['N537-ts-raw-output-helper-drops-state-write.runar.ts', 'pay'],
+      ['N538-py-raw-output-drops-state-write.runar.py', 'sendToScript'],
+    ] as const) {
+      const src = readFileSync(join(__dirname, f), 'utf8');
+      it(`${f} documents the pinned diagnostic`, () => {
+        expect(src.replace(/\n(\/\/|#) +/g, ' ')).toContain(D18(m));
+      });
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${f} with the pinned diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(f, src));
+          expect(status, `${tier.id} accepted ${f} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(D18(m));
+        });
+      }
+    }
+  });
 });

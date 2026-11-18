@@ -139,6 +139,7 @@ import { assertRabinKeyProvenance } from './ir/rabin-key-provenance.js';
 import { builtinArityViolation } from './ir/builtin-arity.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
 import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
+import { assertIrNoDroppedContinuation } from './passes/continuation-rules.js';
 import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -686,6 +687,8 @@ export function compileFromANF(
   // the scaffolding the frontend injects into each public method.
   if (assertIrParentClassRules(anf) === 'StatefulSmartContract') {
     assertIrStatefulScaffolding(anf);
+    // D18: IR input skips typecheck's dropped-continuation rule.
+    assertIrNoDroppedContinuation(anf);
   }
 
   // D15: IR input skips 02-validate and 03-typecheck, so D9 (no SigHashPreimage

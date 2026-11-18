@@ -628,7 +628,7 @@ public final class Typecheck {
                     ));
                 }
                 if (AnfLower.methodCallsRequireOutputP2PKH(m, contract, true)
-                        && AnfLower.methodMutatesState(m, contract)
+                        && ContinuationRules.mutatesState(m, contract)
                         && !hasStateOutput) {
                     errors.add(format(
                         "method '" + m.name() + "' calls requireOutputP2PKH(0, ...) but also "
@@ -641,6 +641,12 @@ public final class Typecheck {
                             + "(no state mutation)",
                         m.sourceLocation()
                     ));
+                }
+
+                // D18: a state write whose only declared outputs are raw ones
+                // is dropped (see ContinuationRules).
+                if (m.visibility() == Visibility.PUBLIC && ContinuationRules.dropsContinuation(m, contract)) {
+                    errors.add(format(ContinuationRules.droppedContinuationMessage(m.name()), m.sourceLocation()));
                 }
             }
         }

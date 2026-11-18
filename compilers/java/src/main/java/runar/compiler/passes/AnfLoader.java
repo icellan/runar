@@ -239,6 +239,9 @@ public final class AnfLoader {
         // exactly the scaffolding the frontend injects. See StatefulScaffold.
         if ("StatefulSmartContract".equals(effectiveClass)) {
             StatefulScaffold.check(props, methods);
+            // D18: IR input skips typecheck's dropped-continuation rule
+            // (shared rule and diagnostic, 7 tiers; see ContinuationRules).
+            ContinuationRules.checkIr(methods);
         }
         // N-096: a syntheticArrayChain must be one expand-fixed-arrays could
         // have written (shared rule and diagnostic, 7 tiers).

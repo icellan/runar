@@ -870,6 +870,13 @@ terminal (no state mutation)",
                     method.name
                 ));
             }
+            // D18: a state write whose only declared outputs are raw ones is
+            // dropped (see continuation_rules.rs).
+            if method.visibility == Visibility::Public
+                && super::continuation_rules::drops_continuation(&effects)
+            {
+                self.add_error(super::continuation_rules::dropped_continuation_message(&method.name));
+            }
         }
     }
 

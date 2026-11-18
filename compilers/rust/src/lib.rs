@@ -1032,6 +1032,12 @@ fn compile_program_checked(program: &ir::ANFProgram, opts: &CompileOptions, prei
     // check, as in the TS reference, so a malformed stateful prologue keeps
     // its own N-101 diagnostic.
     if preimage_rules_apply {
+        // D18: IR input skips typecheck's dropped-continuation rule (see
+        // ir/continuation_rules.rs). The source path proved it in typecheck,
+        // and its ANF can nest past what a recursive walk should take (N-264).
+        if parent_class == "StatefulSmartContract" {
+            ir::continuation_rules::assert_no_dropped_continuation(program)?;
+        }
         ir::preimage_rules::assert_preimage_rules(program)?;
     }
 
