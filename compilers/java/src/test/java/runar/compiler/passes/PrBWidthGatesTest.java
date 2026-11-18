@@ -27,6 +27,7 @@ class PrBWidthGatesTest {
           public lock(p: Point) {
             this.addRawOutput(1000n, cat(cat(toByteString('40'), p), toByteString('87')));
             this.n = this.n + 1n;
+            this.addOutput(100000n, this.n);
           }
         }
         """;
@@ -41,6 +42,7 @@ class PrBWidthGatesTest {
           public pay(pk: PubKey) {
             this.addRawOutput(1000n, cat(cat(toByteString('21'), pk), toByteString('ac')));
             this.n = this.n + 1n;
+            this.addOutput(100000n, this.n);
           }
         }
         """;
@@ -134,6 +136,7 @@ class PrBWidthGatesTest {
             const k = pick ? a : b;
             this.addRawOutput(1000n, cat(cat(toByteString('21'), k), toByteString('ac')));
             this.n = this.n + 1n;
+            this.addOutput(100000n, this.n);
           }
         }
         """;
@@ -149,6 +152,7 @@ class PrBWidthGatesTest {
           public pay(pk: PubKey) {
             this.addRawOutput(1000n, cat(cat(toByteString('21'), this.id(pk)), toByteString('ac')));
             this.n = this.n + 1n;
+            this.addOutput(100000n, this.n);
           }
         }
         """;
