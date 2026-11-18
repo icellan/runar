@@ -1889,13 +1889,13 @@ describe('Cross-compiler: a mixed add/sub constant chain is byte-identical in al
 // ---------------------------------------------------------------------------
 
 describe('D15: Preimage{Write,Read} state fields are refused on the IR path in every tier', () => {
-  const tiers: Array<{ name: string; available: boolean; run: (p: string) => CompilerOutput }> = [
-    { name: 'Go', available: hasGo, run: runGoCompiler },
-    { name: 'Rust', available: hasRust && rustBinaryPath !== null, run: runRustCompiler },
-    { name: 'Python', available: hasPython, run: runPythonCompiler },
-    { name: 'Zig', available: zigBinaryPath !== null, run: runZigCompiler },
-    { name: 'Ruby', available: Boolean(rubyScriptPath), run: runRubyCompiler },
-    { name: 'Java', available: Boolean(javaJarPath), run: runJavaCompiler },
+  const tiers: Array<{ name: string; skip: boolean; run: (p: string) => CompilerOutput }> = [
+    { name: 'Go', skip: !hasGo, run: runGoCompiler },
+    { name: 'Rust', skip: !hasRust || rustBinaryPath === null, run: runRustCompiler },
+    { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+    { name: 'Zig', skip: zigBinaryPath === null, run: runZigCompiler },
+    { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+    { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
   ];
   let tempDir: string;
   beforeAll(() => {
@@ -1928,7 +1928,7 @@ describe('D15: Preimage{Write,Read} state fields are refused on the IR path in e
     });
 
     for (const tier of tiers) {
-      it.skipIf(!tier.available)(`D15 ${tier.name} refuses ${name} ANF IR with the D9 text`, () => {
+      it.skipIf(tier.skip)(`D15 ${tier.name} refuses ${name} ANF IR with the D9 text`, () => {
         const irPath = join(tempDir, `${name}-${tier.name}.anf.json`);
         writeFileSync(irPath, anfToJson(lowered()));
         const out = tier.run(irPath);
