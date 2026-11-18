@@ -357,6 +357,33 @@ await counter.call('increment', []);
 
 `WalletProvider` broadcasts in EF (Extended Format) via ARC, caching parent transactions for child-tx EF assembly. If you also pass `overlayUrl` and `overlayTopics`, every broadcast is fire-and-forget submitted to the overlay for indexing.
 
+### 9d. Unlocking a covenant input of a transaction built elsewhere (`buildContractUnlock`)
+
+When a wallet builds and funds the transaction (it adds its own funding inputs and change), the app only has to supply the unlocking script of its covenant input. `buildContractUnlock` is the per-input step `assembleMultiContractCall` performs, exported for that case:
+
+```typescript
+import { buildContractUnlock, buildContractUnlockSkeleton, dryRunMultiContractInput } from 'runar-sdk';
+
+// Fee sizing before the tx exists (e.g. BRC-100 createAction `unlockingScriptLength`):
+const input = { contract, method: 'bump', args: [null, 2000n], signer, changePKH, changeAmount: 1000n };
+const { length } = buildContractUnlockSkeleton(input);   // upper bound, never below the real unlock
+
+// `tx` is the wallet's final transaction (contract input at index 1, wallet funding input at 0):
+const { unlockingScript, preimage } = await buildContractUnlock(tx, 1, input, { dryRun: true });
+```
+
+The tx you pass is only read (version, lockTime, input outpoints and sequences, outputs); it is never mutated. Inputs need `sourceTXID` or `sourceTransaction`, and every output needs a final `satoshis`.
+
+**Wallet-funding caveat: a wallet-built tx verifies only if its outputs are exactly what the covenant hashes.** That is the contract's continuation output(s), raw outputs and data outputs in the contract's own order, followed, when the method declares `_changePKH`, by change at exactly `_changeAmount` to `_changePKH`. The wallet's own change output must therefore equal the declared change; otherwise declare `changeAmount: 0n` and make sure the wallet adds no change output. A mismatch cannot verify on-chain and strands the covenant UTXO, so the API refuses instead of building:
+
+- a non-zero `changeAmount` whose P2PKH(`changePKH`) is not the tx's last output at exactly that amount throws;
+- `changeAmount` 0 with a tx that still ends in a P2PKH to `changePKH` is validated through Spend and throws if it fails (it may be a legitimate raw output, so it is not refused blindly);
+- the `changePKH` must be exactly 20 bytes (the #213 gate), and every fixed-width public-method argument is width-checked (`Sha256`, `PubKey`, ... as on `call()`), as on the `call()` path;
+- the input at `inputIndex` must spend the UTXO you pass;
+- `{ dryRun: true }` replays the built unlock through @bsv/sdk's `Spend` against the tx's exact outputs and throws on failure. Use it whenever you hold the wallet's final tx; the wallet must not alter inputs' outpoints/sequences or outputs afterwards.
+
+There is no pre-sign preimage hook: the preimage is returned next to the unlock.
+
 ---
 
 ## Stateful contracts
@@ -406,6 +433,28 @@ console.log(counter.state.count); // decoded from the on-chain script
 ```
 
 `fromUtxo` is synchronous; `fromTxId` only adds the provider round-trip to fetch the transaction.
+
+#### Several continuations in one call (raw and data outputs interleaved)
+
+A method may emit more than one state continuation, interleaved with raw outputs, e.g. `this.addOutput(a, ...); this.addRawOutput(fee, payee); this.addOutput(b, ...)`. `call()` builds the transaction from the ANF interpreter's source-ordered output list: state and raw outputs in the order the method writes them, then data outputs (`addDataOutput`), then change, whatever the source order of the `addDataOutput` call. Each state continuation's locking script is built from **its own** state. There is no caller-supplied output plan: the interpreter's order is authoritative.
+
+`call()` / `finalizeCall()` report every continuation, by output index:
+
+```typescript
+const { txid, continuations } = await splitter.call('split', [null, payeeScript]);
+// continuations: [
+//   { outputIndex: 0, satoshis: 1000, state: { owner, count: 1n } },
+//   { outputIndex: 2, satoshis: 1000, state: { owner, count: 100n } },
+// ]
+```
+
+`continuations` is in output-index order, and is empty for a terminal call or one that emits no continuation. After the call:
+
+- `splitter.getUtxo()` and `splitter.state` track the **index-ordered first** continuation (here output 0, `count` 1n). The UTXO is chosen by output index, never by comparing scripts, so a raw output whose script equals a continuation's cannot capture the tracking.
+- a call that emits no continuation clears the tracked UTXO (`getUtxo()` is `null`).
+- to spend any other continuation, build a contract for it: `RunarContract.fromUtxo(artifact, { txid, outputIndex: continuations[1].outputIndex, satoshis: continuations[1].satoshis, script })` (the state is decoded from the script).
+
+`CallOptions.newState` is refused for a method with two or more continuations (it cannot say which one it overrides), and `CallOptions.outputs` cannot be combined with a method that calls `addRawOutput`. This surface is TypeScript-only for now: the other six SDKs keep their fail-closed refusal of this shape.
 
 ### OP_PUSH_TX
 

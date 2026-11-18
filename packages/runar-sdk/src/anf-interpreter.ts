@@ -106,6 +106,15 @@ export interface OrderedOutputEntry {
   kind: 'state' | 'raw';
   satoshis: bigint;
   script?: string;
+  /**
+   * `state` entries only (#197): the FLAT mutable-property values THIS
+   * `addOutput` serializes into its own continuation script (stateValues
+   * mapped positionally onto the mutable properties, remaining properties at
+   * their value when the call ran). A method with two `addOutput`s carries a
+   * different state per continuation; the result's top-level `state` is only
+   * the last write.
+   */
+  state?: Record<string, unknown>;
 }
 
 /**
@@ -704,20 +713,35 @@ function evalValue(
     case 'add_output': {
       // Extract implicit state changes from stateValues array.
       // stateValues[i] maps to the i-th mutable property (declaration order).
+      //
+      // `env` is deliberately NOT written: on-chain an `addOutput` only
+      // serializes its stateValues into ITS OWN output script; it does not
+      // update the property the later bindings `load_prop` (only `update_prop`
+      // does). Writing `env` here made a second `addOutput(.., this.count +
+      // 100n)` read the FIRST output's value and build a continuation the
+      // covenant rejects (#197). `stateDelta` keeps the last write, which is
+      // the post-call state of the single-continuation path.
+      const entryState: Record<string, unknown> = {};
+      if (anf) {
+        for (const prop of anf.properties) {
+          if (!prop.readonly && prop.name in env) entryState[prop.name] = env[prop.name];
+        }
+      }
       if (anf && value.stateValues && value.stateValues.length > 0) {
         const mutableProps = anf.properties.filter((p) => !p.readonly);
         for (let i = 0; i < value.stateValues.length && i < mutableProps.length; i++) {
           const propName = mutableProps[i]!.name;
           const ref = value.stateValues[i]!;
           const newVal = env[ref];
-          env[propName] = newVal;
+          entryState[propName] = newVal;
           stateDelta[propName] = newVal;
         }
       }
       // Record the state continuation output in source order (finding G1): a
       // method may interleave raw outputs around it, and the on-chain covenant
-      // folds them into hashOutputs in exactly this order.
-      outputs.push({ kind: 'state', satoshis: toBigInt(env[value.satoshis]) });
+      // folds them into hashOutputs in exactly this order. `entryState` is the
+      // state THIS output's script carries (#197).
+      outputs.push({ kind: 'state', satoshis: toBigInt(env[value.satoshis]), state: entryState });
       return undefined;
     }
 

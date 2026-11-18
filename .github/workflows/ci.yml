@@ -1110,6 +1110,7 @@ jobs:
           conformance/runner/__tests__
           conformance/anf-interpreter/num2bin-engine-parity.test.ts
           conformance/anf-interpreter/driver-gate.test.ts
+          conformance/anf-interpreter/add-output-env.test.ts
           conformance/wire-primitives.test.ts
           conformance/analyzer/__tests__
           conformance/ir-roundtrip

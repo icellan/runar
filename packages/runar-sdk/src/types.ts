@@ -78,6 +78,32 @@ export interface DeployOptions {
  * extra stack item). See `buildStatefulPrefix`'s docstring for the real
  * (signature-free) layout.
  */
+/**
+ * One state continuation a stateful call commits to (#197): the output it
+ * occupies in the broadcast transaction, its satoshis, and the full contract
+ * state its locking script carries.
+ */
+export interface CallContinuation {
+  /** Index of the continuation output in the call transaction. */
+  outputIndex: number;
+  satoshis: number;
+  /** The complete contract state serialized into this continuation's script. */
+  state: Record<string, unknown>;
+}
+
+/** Result of `call()` / `finalizeCall()`. */
+export interface CallResult {
+  txid: string;
+  tx: TransactionData;
+  /**
+   * Every state continuation of the call, in output-index order (empty for a
+   * terminal call or one that emits no continuation). `currentUtxo` tracks the
+   * FIRST entry; to spend any other, build a contract at that `outputIndex`
+   * (e.g. `RunarContract.fromUtxo`).
+   */
+  continuations: CallContinuation[];
+}
+
 export interface PreparedCall {
   /**
    * BIP-143 sighash (hex) — `hash256(preimage)`, i.e. `sha256(sha256(...))`.
@@ -120,6 +146,13 @@ export interface PreparedCall {
   /** @internal */ _newSatoshis: number;
   /** @internal */ _hasMultiOutput: boolean;
   /** @internal */ _contractOutputs: Array<{ script: string; satoshis: number }>;
+  /**
+   * @internal
+   * Every state continuation by output index, with its locking script. The
+   * first is what `finalizeCall` tracks as `currentUtxo`; empty when the call
+   * emits no continuation. Read directly — never re-derived by script match.
+   */
+  _continuations: Array<CallContinuation & { script: string }>;
   /** @internal The local state before prepareCall advanced it; restored when finalizeCall fails. */
   _stateBefore?: Record<string, unknown>;
   /**

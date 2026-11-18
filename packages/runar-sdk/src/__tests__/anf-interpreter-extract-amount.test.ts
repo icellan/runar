@@ -263,14 +263,14 @@ describe('extractAmount in the ANF simulator', () => {
     const { outputs } = computeNewStateAndDataOutputs(
       artifact.anf!, 'tick', { count: 0n }, {}, [], { inputAmount: 12_345n },
     );
-    expect(outputs).toEqual([{ kind: 'state', satoshis: 12_345n }]);
+    expect(outputs).toMatchObject([{ kind: 'state', satoshis: 12_345n }]);
   });
 
   it('answers the same through a private helper', () => {
     const { outputs } = computeNewStateAndDataOutputs(
       helperArtifact.anf!, 'tick', { count: 0n }, {}, [], { inputAmount: 12_345n },
     );
-    expect(outputs).toEqual([{ kind: 'state', satoshis: 12_345n }]);
+    expect(outputs).toMatchObject([{ kind: 'state', satoshis: 12_345n }]);
   });
 
   it('answers the same inside an if body', () => {
@@ -283,7 +283,7 @@ describe('extractAmount in the ANF simulator', () => {
     const { state, outputs } = computeNewStateAndDataOutputs(
       ifArtifact.anf!, 'tick', { count: 5n }, { big: true }, [], { inputAmount: 12_345n },
     );
-    expect(outputs).toEqual([{ kind: 'state', satoshis: 12_345n }]);
+    expect(outputs).toMatchObject([{ kind: 'state', satoshis: 12_345n }]);
     expect(state.count).toBe(12_350n);
   });
 
@@ -295,7 +295,7 @@ describe('extractAmount in the ANF simulator', () => {
     const { state, outputs } = computeNewStateAndDataOutputs(
       loopArtifact.anf!, 'tick', { count: 0n }, {}, [], { inputAmount: 12_345n },
     );
-    expect(outputs).toEqual([{ kind: 'state', satoshis: 12_345n }]);
+    expect(outputs).toMatchObject([{ kind: 'state', satoshis: 12_345n }]);
     expect(state.count).toBe(37_035n);
   });
 
@@ -332,7 +332,7 @@ class ScriptCodeViaHelper extends StatefulSmartContract {
     const { outputs } = computeNewStateAndDataOutputs(
       artifact.anf!, 'tick', { count: 0n }, {},
     );
-    expect(outputs).toEqual([{ kind: 'state', satoshis: 0n }]);
+    expect(outputs).toMatchObject([{ kind: 'state', satoshis: 0n }]);
   });
 });
 

@@ -12,6 +12,8 @@ export type {
   DeployOptions,
   CallOptions,
   PreparedCall,
+  CallResult,
+  CallContinuation,
 } from './types.js';
 
 // Providers
@@ -44,12 +46,18 @@ export {
 } from './contract.js';
 
 // Cross-artifact transaction assembly (N different-artifact covenant inputs in one tx)
-export { assembleMultiContractCall, dryRunMultiContractInput } from './multi-contract.js';
+export {
+  assembleMultiContractCall,
+  dryRunMultiContractInput,
+  buildContractUnlock,
+  buildContractUnlockSkeleton,
+} from './multi-contract.js';
 export type {
   MultiContractCallInput,
   MultiContractCallOutput,
   AssembleMultiContractCallOptions,
   AssembledMultiContractCall,
+  BuildContractUnlockOptions,
 } from './multi-contract.js';
 
 // Typed SDK errors
