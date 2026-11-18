@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### SDK ANF interpreters (all seven tiers): `addOutput` no longer writes the property (#197)
+
+- **TS, Go, Rust, Python, Ruby, Zig, Java SDK ANF interpreters:** `this.addOutput(sats, ...values)` serialises
+  its values into its own output and no longer overwrites the property that a later read of `this.<prop>`
+  loads; only `update_prop` changes a property, as on-chain. A method with `addOutput(.., this.count + 1n);
+  addOutput(.., this.count + 100n)` evaluated its second output from the first output's value, so the
+  off-chain post-state (and, in the TS SDK, the continuation it built) disagreed with the deployed
+  script. New conformance case `add-output-env` (fan-out and `addOutput; update_prop; addOutput`) pins the
+  last-write state in all seven interpreters, checked against the compiled script on a real Spend.
+
 ### SDK (TypeScript): `call()` with raw outputs interleaved with several continuations (#197)
 
 - **`runar-sdk`:** a stateful method that emits more than one `addOutput` continuation, interleaved

@@ -1182,7 +1182,8 @@ fn evalNode(
                     if (!prop.readonly and mut_idx < ao.state_values.len) {
                         const ref = ao.state_values[mut_idx];
                         const new_val = env.get(ref) orelse anf_none;
-                        try env.put(prop.name, new_val);
+                        // env is NOT written: only update_prop changes a property
+                        // (#197); a later load_prop must not see this output's value.
                         try state_delta.put(prop.name, new_val);
                         mut_idx += 1;
                     }

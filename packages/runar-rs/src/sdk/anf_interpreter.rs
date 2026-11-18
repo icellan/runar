@@ -1544,7 +1544,8 @@ fn eval_value(
                 for (i, sv_name) in state_values.iter().enumerate() {
                     if let Some(prop) = mutable_props.get(i) {
                         let val = env.get(sv_name).cloned().unwrap_or(Val::Undefined);
-                        env.insert(prop.name.clone(), val.clone());
+                        // env is NOT written: only update_prop changes a property
+                        // (#197); a later load_prop must not see this output's value.
                         state_delta.insert(prop.name.clone(), val);
                     }
                 }

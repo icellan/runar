@@ -1064,7 +1064,8 @@ func anfEvalValue(
 				for j, name := range stateNames {
 					if j < len(mutableProps) {
 						newVal := env[name]
-						env[mutableProps[j].Name] = newVal
+						// env is NOT written: only update_prop changes a property
+						// (#197); a later load_prop must not see this output's value.
 						stateDelta[mutableProps[j].Name] = newVal
 					}
 				}

@@ -1121,7 +1121,8 @@ def _eval_value(
                 if i < len(mutable_props):
                     resolved = env.get(sv)
                     prop_name = mutable_props[i]
-                    env[prop_name] = resolved
+                    # env is NOT written: only update_prop changes a property
+                    # (#197); a later load_prop must not see this output's value.
                     state_delta[prop_name] = resolved
                     resolved_state[prop_name] = resolved
         if state_outputs is not None:

@@ -1093,7 +1093,8 @@ public final class AnfInterpreter {
                     }
                     for (int i = 0; i < stateValues.size() && i < mutableProps.size(); i++) {
                         Object resolved = env.get(stateValues.get(i));
-                        env.put(mutableProps.get(i), resolved);
+                        // env is NOT written: only update_prop changes a property
+                        // (#197); a later load_prop must not see this output's value.
                         stateDelta.put(mutableProps.get(i), resolved);
                     }
                 }

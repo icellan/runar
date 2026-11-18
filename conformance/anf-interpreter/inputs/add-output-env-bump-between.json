@@ -1,0 +1,7 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/add-output-env.anf.json",
+  "methodName": "bumpBetween",
+  "currentState": { "count": "0n" },
+  "args": {},
+  "constructorArgs": ["0n"]
+}

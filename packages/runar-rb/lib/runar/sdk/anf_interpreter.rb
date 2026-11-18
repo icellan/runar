@@ -731,7 +731,8 @@ module Runar
 
               resolved  = env[sv]
               prop_name = mutable_props[i]
-              env[prop_name]         = resolved
+              # env is NOT written: only update_prop changes a property
+              # (#197); a later load_prop must not see this output's value.
               state_delta[prop_name] = resolved
             end
           end
