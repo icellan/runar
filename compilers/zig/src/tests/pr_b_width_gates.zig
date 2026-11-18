@@ -17,6 +17,7 @@ const LOCK_SRC =
     \\  public lock(p: Point) {
     \\    this.addRawOutput(1000n, cat(cat(toByteString('40'), p), toByteString('87')));
     \\    this.n = this.n + 1n;
+    \\    this.addOutput(100000n, this.n);
     \\  }
     \\}
     \\
@@ -31,6 +32,7 @@ const PAY_TO_KEY_SRC =
     \\  public pay(pk: PubKey) {
     \\    this.addRawOutput(1000n, cat(cat(toByteString('21'), pk), toByteString('ac')));
     \\    this.n = this.n + 1n;
+    \\    this.addOutput(100000n, this.n);
     \\  }
     \\}
     \\
@@ -74,6 +76,7 @@ const PICK_KEY_SRC =
     \\    const k = pick ? a : b;
     \\    this.addRawOutput(1000n, cat(cat(toByteString('21'), k), toByteString('ac')));
     \\    this.n = this.n + 1n;
+    \\    this.addOutput(100000n, this.n);
     \\  }
     \\}
     \\
@@ -89,6 +92,7 @@ const ID_KEY_SRC =
     \\  public pay(pk: PubKey) {
     \\    this.addRawOutput(1000n, cat(cat(toByteString('21'), this.id(pk)), toByteString('ac')));
     \\    this.n = this.n + 1n;
+    \\    this.addOutput(100000n, this.n);
     \\  }
     \\}
     \\

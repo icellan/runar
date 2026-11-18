@@ -71,6 +71,11 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 		if err := checkIRStatefulScaffolding(program); err != nil {
 			return err
 		}
+		// D18: IR input skips typecheck's dropped-continuation rule
+		// (see ir_continuation_rules.go).
+		if err := checkIRNoDroppedContinuation(program); err != nil {
+			return err
+		}
 	}
 	// D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
 	// diagnostics, 7 tiers; see ir/preimage_rules.go). After the scaffolding

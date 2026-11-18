@@ -11,6 +11,7 @@ require_relative "diagnostic"
 require_relative "sighash_validate"
 require_relative "reserved_names"
 require_relative "input_limits"
+require_relative "continuation_rules"
 
 module RunarCompiler
   module Frontend
@@ -112,6 +113,12 @@ module RunarCompiler
       SighashValidate.validate_sighash_usage(contract).each do |d|
         (d.severity == Severity::WARNING ? ctx.warnings : ctx.errors) << d
       end
+
+      # #199: a stateful contract none of whose public methods is terminal or
+      # sizes its own outputs can never release its satoshis (advisory only;
+      # see continuation_rules.rb).
+      release_trap = ContinuationRules.release_trap_warning(contract)
+      ctx.warnings << release_trap if release_trap
 
       ValidationResult.new(errors: ctx.errors, warnings: ctx.warnings)
     end

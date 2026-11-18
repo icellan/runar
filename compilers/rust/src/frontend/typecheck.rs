@@ -870,6 +870,14 @@ terminal (no state mutation)",
                     method.name
                 ));
             }
+            // D18: in a method that declares its own outputs, a path that
+            // writes state and reaches no addOutput drops its write (see
+            // continuation_rules.rs).
+            if method.visibility == Visibility::Public
+                && super::continuation_rules::drops_continuation(self.contract, method, &effects)
+            {
+                self.add_error(super::continuation_rules::dropped_continuation_message(&method.name));
+            }
         }
     }
 

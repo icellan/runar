@@ -1874,7 +1874,9 @@ function ensureEveryMutablePropertyIsWritten(
  *   - stateful only: `this.addDataOutput(sats, payloadBs)` and
  *     `this.addRawOutput(sats, scriptBs)`, each reading a `ByteString`
  *     parameter appended to a drawn public method and placed LAST (after any
- *     explicit `addOutput`, so declaration order is the draw order).
+ *     explicit `addOutput`, so declaration order is the draw order). A raw
+ *     output on a state-writing method with no `addOutput` gets one appended
+ *     after it, carrying every mutable property (D18).
  * Stateless contracts get no output intrinsic: both are stateful-only.
  */
 export function withExtraKinds(
@@ -1976,6 +1978,17 @@ export function withExtraKinds(
               satoshis: rawSats,
               script: { kind: 'var_ref', name: 'scriptBs' },
             });
+            // D18: a raw output removes the auto-continuation, so a method that
+            // writes state must carry it in an explicit addOutput (each mutable
+            // property's own post-mutation value, as arbAddOutputStmt does).
+            const mutableProps = contract.properties.filter((p) => !p.readonly);
+            if (m.mutatesState && mutableProps.length > 0 && !m.body.some((st) => st.kind === 'add_output')) {
+              m.body.push({
+                kind: 'add_output',
+                satoshis: rawSats,
+                values: mutableProps.map((p) => ({ kind: 'property_ref', name: p.name })),
+              });
+            }
           }
           let parentClass = contract.parentClass;
           if (!stateful && doAsm) {

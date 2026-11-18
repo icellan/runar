@@ -320,4 +320,129 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
       });
     }
   });
+
+  describe('#199: a stateful contract that can never release its satoshis warns', () => {
+    interface RtCase { name: string; file: string; src: string; warning?: string; warning_absent?: string }
+    const data = corpus<{ warn: RtCase[]; nowarn: RtCase[] }>('release-trap-cases.json');
+    // Pinned literally (the corpus could drift with it).
+    const WARN = (c: string): string =>
+      `contract '${c}' has no terminal method and no public method that calls addOutput/addRawOutput; ` +
+      `its satoshis can never leave instances of '${c}'`;
+    it('the corpus carries the pinned text', () => {
+      for (const c of data.warn) expect(c.warning, c.name).toBe(WARN(/class (\w+)/.exec(c.src)![1]!));
+    });
+    for (const c of data.warn) {
+      it(`every tier warns on ${c.name}, still compiling it to the same bytes`, () => {
+        const input = writeFile(c.file, c.src);
+        const hexes = new Set<string>();
+        for (const tier of TIERS) {
+          const { status, out, diag } = run(tier, input);
+          expect(status, `${tier.id} refused ${c.name}: ${diag.slice(0, 400)}`).toBe(0);
+          expect(diag, tier.id).toContain(c.warning);
+          hexes.add(out.split('\n').pop()!.trim());
+        }
+        expect([...hexes]).toHaveLength(1);
+      });
+    }
+    for (const c of data.nowarn) {
+      it(`no tier warns on ${c.name}`, () => {
+        const input = writeFile(c.file, c.src);
+        for (const tier of TIERS) {
+          const { status, diag } = run(tier, input);
+          expect(status, `${tier.id} refused ${c.name}: ${diag.slice(0, 400)}`).toBe(0);
+          expect(diag, tier.id).not.toContain(c.warning_absent);
+        }
+      });
+    }
+  });
+
+  describe('D18: a state write with no state continuation is refused', () => {
+    interface DcCase { name: string; file: string; src: string; error?: string }
+    const data = corpus<{ refuse: DcCase[]; accept: DcCase[] }>('dropped-continuation-cases.json');
+    // Pinned literally (the corpus could drift with it).
+    const D18 = (m: string): string =>
+      `method '${m}' writes contract state on a path that reaches no addOutput(): a method that declares ` +
+      'its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state ' +
+      "write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, " +
+      '...) on every path that writes state, or stop writing state on a path meant to end the contract';
+    it('the corpus carries the pinned text', () => {
+      for (const c of data.refuse) expect(c.error, c.name).toBe(D18(/^method '(\w+)'/.exec(c.error!)![1]!));
+    });
+    for (const c of data.refuse) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${c.name} with the shared diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(c.file, c.src));
+          expect(status, `${tier.id} accepted ${c.name} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(c.error);
+        });
+      }
+    }
+    for (const c of data.accept) {
+      it(`every tier compiles ${c.name} to the same bytes`, () => {
+        const input = writeFile(c.file, c.src);
+        const hexes = new Set(TIERS.map((t) => compileHex(t, input)));
+        expect([...hexes]).toHaveLength(1);
+      });
+    }
+    for (const [f, m] of [
+      ['N536-ts-raw-output-drops-state-write.runar.ts', 'lock'],
+      ['N537-ts-raw-output-helper-drops-state-write.runar.ts', 'pay'],
+      ['N538-py-raw-output-drops-state-write.runar.py', 'sendToScript'],
+    ] as const) {
+      const src = readFileSync(join(__dirname, f), 'utf8');
+      it(`${f} documents the pinned diagnostic`, () => {
+        expect(src.replace(/\n(\/\/|#) +/g, ' ')).toContain(D18(m));
+      });
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${f} with the pinned diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(f, src));
+          expect(status, `${tier.id} accepted ${f} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(D18(m));
+        });
+      }
+    }
+  });
+
+  // Follow-on of D18's FixedArray fix: validate / typecheck / sighash-validate
+  // see the UNEXPANDED contract, where a FixedArray element write is still an
+  // index_access. Before every tier counted it as a state write, a @sighash
+  // SINGLE method whose only write was an element took the mutate-only auto
+  // continuation unrefused (the value-skim shape sighash-validate exists for).
+  describe('SINGLE + FixedArray element write is a mutate-only continuation', () => {
+    const src = (write: string): string => `import { StatefulSmartContract, assert, FixedArray } from 'runar-lang';
+
+class Sg extends StatefulSmartContract {
+  slots: FixedArray<bigint, 2> = [0n, 0n];
+
+  constructor() {
+    super();
+  }
+
+  /** @sighash SINGLE|FORKID */
+  public bump(i: bigint) {
+    assert(i >= 0n && i < 2n);
+    ${write}
+  }
+}
+`;
+    const n539 = readFileSync(join(__dirname, 'N539-ts-single-fixedarray-element-mutate-only.runar.ts'), 'utf8');
+    for (const tier of TIERS) {
+      it(`${tier.id} refuses N539 (the rejection fixture of this shape)`, () => {
+        const { status, out, diag } = run(tier, writeFile('N539.runar.ts', n539));
+        expect(status, `${tier.id} accepted N539 (emitted "${out}")`).not.toBe(0);
+        expect(diag.toLowerCase()).toContain('mutate-only single continuation is unsound');
+      });
+    }
+    for (const write of ['this.slots[0] = 5n;', 'this.slots[i]++;']) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses \`${write}\` under SINGLE`, () => {
+          const { status, out, diag } = run(tier, writeFile('Sg.runar.ts', src(write)));
+          expect(status, `${tier.id} accepted (emitted "${out}")`).not.toBe(0);
+          // Case-insensitive: the Zig tier words the sentence break differently
+          // ("...; a mutate-only"), a pre-existing wording drift.
+          expect(diag.toLowerCase()).toContain('mutate-only single continuation is unsound');
+        });
+      }
+    }
+  });
 });

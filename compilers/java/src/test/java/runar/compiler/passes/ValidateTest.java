@@ -57,7 +57,9 @@ class ValidateTest {
     void acceptsValidStatefulCounter() {
         ContractNode c = JavaParser.parse(VALID_COUNTER, "Counter.runar.java");
         List<String> warnings = Validate.run(c);
-        assertTrue(warnings.isEmpty(), "expected no warnings, got " + warnings);
+        // #199: a perpetual counter (no terminal method, no addOutput) carries
+        // exactly the release-trap advisory, nothing else.
+        assertEquals(List.of(ContinuationRules.releaseTrapMessage("Counter")), warnings);
     }
 
     @Test

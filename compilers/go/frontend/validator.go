@@ -83,6 +83,13 @@ func Validate(contract *ContractNode) *ValidationResult {
 		ctx.addError(SP1FriNotImplementedError)
 	}
 
+	// #199: a stateful contract none of whose public methods is terminal or
+	// sizes its own outputs can never release its satoshis (advisory only;
+	// see continuation_rules.go).
+	if msg, ok := releaseTrapWarning(contract, ComputeSideEffectSummary(contract)); ok {
+		ctx.addWarning(msg)
+	}
+
 	return &ValidationResult{
 		Errors:   ctx.errors,
 		Warnings: ctx.warnings,

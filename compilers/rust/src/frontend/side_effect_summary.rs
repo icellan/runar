@@ -37,6 +37,9 @@ pub struct MethodEffects {
     pub mutates_state: bool,
     /// Calls `this.addOutput(...)` or `this.addRawOutput(...)`.
     pub has_state_output: bool,
+    /// Calls `this.addOutput(...)` itself (D18: the only output intrinsic
+    /// that carries state).
+    pub calls_add_output: bool,
     /// Calls `this.addDataOutput(...)`.
     pub has_data_output: bool,
     /// Calls `checkPreimage(...)` (manually, outside auto-injected one).
@@ -53,6 +56,7 @@ impl MethodEffects {
     fn union(&mut self, other: &MethodEffects) {
         self.mutates_state |= other.mutates_state;
         self.has_state_output |= other.has_state_output;
+        self.calls_add_output |= other.calls_add_output;
         self.has_data_output |= other.has_data_output;
         self.uses_preimage |= other.uses_preimage;
         self.calls_require_output_p2pkh |= other.calls_require_output_p2pkh;
@@ -227,6 +231,18 @@ fn callee_effects<'a>(
     Err(target)
 }
 
+/// A write target that is a mutable property, or an element of one
+/// (`this.arr[i]`, `this.grid[i][j]`). The element form matters before
+/// FixedArray expansion (validate / typecheck see the unexpanded contract,
+/// D18); after it, element writes are already plain property writes.
+fn writes_mutable_property(target: &Expression, mutable_props: &HashSet<String>) -> bool {
+    let mut t = target;
+    while let Expression::IndexAccess { object, .. } = t {
+        t = object.as_ref();
+    }
+    matches!(t, Expression::PropertyAccess { property, .. } if mutable_props.contains(property))
+}
+
 fn collect_stmt<'a>(
     stmt: &Statement,
     into: &mut MethodEffects,
@@ -237,10 +253,8 @@ fn collect_stmt<'a>(
 ) -> Result<(), &'a MethodNode> {
     match stmt {
         Statement::Assignment { target, value, .. } => {
-            if let Expression::PropertyAccess { property, .. } = target {
-                if mutable_props.contains(property) {
-                    into.mutates_state = true;
-                }
+            if writes_mutable_property(target, mutable_props) {
+                into.mutates_state = true;
             }
             // Both sides may still contain calls (output intrinsics could hide
             // in the target's index/object as well as the value).
@@ -298,10 +312,8 @@ fn collect_expr<'a>(
 ) -> Result<(), &'a MethodNode> {
     match expr {
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-            if let Expression::PropertyAccess { property, .. } = operand.as_ref() {
-                if mutable_props.contains(property) {
-                    into.mutates_state = true;
-                }
+            if writes_mutable_property(operand, mutable_props) {
+                into.mutates_state = true;
             }
         }
         Expression::CallExpr { callee, args, .. } => {
@@ -315,6 +327,9 @@ fn collect_expr<'a>(
             if let Some(name) = callee_name {
                 if STATE_OUTPUT_INTRINSICS.contains(&name) {
                     into.has_state_output = true;
+                }
+                if name == "addOutput" {
+                    into.calls_add_output = true;
                 }
                 if DATA_OUTPUT_INTRINSICS.contains(&name) {
                     into.has_data_output = true;

@@ -18,6 +18,7 @@ const types = @import("../ir/types.zig");
 const sighash_validate = @import("sighash_validate.zig");
 const reserved_names = @import("reserved_names.zig");
 const input_limits = @import("../frontend/input_limits.zig");
+const continuation_rules = @import("continuation_rules.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -104,6 +105,13 @@ fn validateWithMode(
                 try errors.append(allocator, d);
             }
         }
+    }
+
+    // #199: a stateful contract none of whose public methods is terminal or
+    // sizes its own outputs can never release its satoshis (advisory only;
+    // see continuation_rules.zig).
+    if (try continuation_rules.releaseTrapWarning(allocator, contract)) |w| {
+        try warnings.append(allocator, w);
     }
 
     return .{

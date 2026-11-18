@@ -440,12 +440,11 @@ class StackLowerTest {
      * fully controls the script content (unlike addOutput which
      * injects an OP_RETURN prefix at line 1969).
      *
-     * <p>Note: calling {@code addRawOutput} routes the auto-continuation
-     * through the computeStateOutput path (AnfLower line ~239-253 — the
-     * else branch, since {@code addOutputRefs.isEmpty()} when only
-     * raw-outputs are present), which itself does push one 0x6a for
-     * the contract's own state output. So the total 0x6a count in the
-     * method is exactly 1 — entirely from the auto-continuation.
+     * <p>Note: a method that calls {@code addRawOutput} declares its own
+     * outputs, so no state continuation is auto-injected (D18). The
+     * stateful preamble alone already emits OP_SIZE and well over 30 ops,
+     * so of the three assertions only OP_NUM2BIN (absent from that
+     * preamble) is specific to the raw output.
      */
     @Test
     void addRawOutputEmitsSizeAndNum2BinForSatoshis() {
@@ -460,7 +459,8 @@ class StackLowerTest {
                 R(Bigint count) { super(count); this.count = count; }
                 @Public
                 void send(ByteString scriptBytes) {
-                    this.count = this.count.plus(Bigint.ONE);
+                    // Terminal raw-output method: no state write (a state
+                    // write here without addOutput is the D18 refusal).
                     this.addRawOutput(1000L, scriptBytes);
                 }
             }
@@ -470,8 +470,7 @@ class StackLowerTest {
         List<StackOp> ops = m.ops();
 
         // OP_SIZE for the varint-length prefix; OP_NUM2BIN for the
-        // 8-byte satoshis prefix. Both paths sum at least 2 of each
-        // because the auto-continuation also uses them.
+        // 8-byte satoshis prefix.
         assertTrue(countOpcode(ops, "OP_SIZE") >= 1,
             "addRawOutput must emit OP_SIZE for scriptBytes length prefix");
         assertTrue(countOpcode(ops, "OP_NUM2BIN") >= 1,

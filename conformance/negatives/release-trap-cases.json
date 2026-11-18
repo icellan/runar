@@ -1,0 +1,99 @@
+{
+  "_comment": "#199. warn: a StatefulSmartContract none of whose public methods is terminal (continuationShape isTerminal: no state write, no addOutput/addRawOutput, no addDataOutput) and none of which calls addOutput/addRawOutput, directly or through an inlined private helper, keeps its value forever: every spend takes the default single-output continuation, whose F-024 floor (_newAmount >= input amount) lets the value grow but never shrink. Every tier emits the shared NON-FATAL warning (stderr, exit 0, same bytes as without it); the nowarn shapes must not carry it. A contract with zero mutable fields has only terminal methods; an accepted @sighash SINGLE stateful method always declares its own output (sighash-validate refuses the others), so it never warns.",
+  "warning_template": "contract '<contract>' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of '<contract>'",
+  "warn": [
+    {
+      "name": "perpetual-counter",
+      "contract": "RtCounter",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtCounter extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public increment() {\n    this.count = this.count + 1n;\n  }\n\n  public decrement() {\n    assert(this.count > 0n);\n    this.count = this.count - 1n;\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning": "contract 'RtCounter' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtCounter'"
+    },
+    {
+      "name": "data-output-only",
+      "contract": "RtData",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtData extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public log(note: ByteString) {\n    this.addDataOutput(0n, note);\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning": "contract 'RtData' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtData'"
+    },
+    {
+      "name": "data-output-and-write",
+      "contract": "RtDataWrite",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtDataWrite extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public log(note: ByteString) {\n    this.count = this.count + 1n;\n    this.addDataOutput(0n, note);\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning": "contract 'RtDataWrite' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtDataWrite'"
+    },
+    {
+      "name": "helper-write-only",
+      "contract": "RtHelperWrite",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtHelperWrite extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public increment() {\n    this.bump();\n  }\n\n  private bump(): void {\n    this.count = this.count + 1n;\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning": "contract 'RtHelperWrite' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtHelperWrite'"
+    },
+    {
+      "name": "fixedarray-element-write",
+      "contract": "RtSlots",
+      "src": "import { StatefulSmartContract, assert, ByteString, FixedArray } from 'runar-lang';\n\nclass RtSlots extends StatefulSmartContract {\n  slots: FixedArray<bigint, 2> = [0n, 0n];\n\n  constructor() {\n    super();\n  }\n\n  public bump() {\n    this.slots[0] = this.slots[0] + 1n;\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning": "contract 'RtSlots' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtSlots'"
+    },
+    {
+      "name": "fixedarray-element-increment-runtime-index",
+      "contract": "RtSlotsIdx",
+      "src": "import { StatefulSmartContract, assert, ByteString, FixedArray } from 'runar-lang';\n\nclass RtSlotsIdx extends StatefulSmartContract {\n  slots: FixedArray<bigint, 2> = [0n, 0n];\n\n  constructor() {\n    super();\n  }\n\n  public bump(i: bigint) {\n    assert(i >= 0n && i < 2n);\n    this.slots[i]++;\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning": "contract 'RtSlotsIdx' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtSlotsIdx'"
+    },
+    {
+      "name": "python-perpetual-counter",
+      "file": "RtPy.runar.py",
+      "contract": "RtPy",
+      "src": "from runar import StatefulSmartContract, Bigint, public\n\n\nclass RtPy(StatefulSmartContract):\n    count: Bigint\n\n    def __init__(self, count: Bigint):\n        super().__init__(count)\n        self.count = count\n\n    @public\n    def increment(self):\n        self.count = self.count + 1\n",
+      "warning": "contract 'RtPy' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtPy'"
+    }
+  ],
+  "nowarn": [
+    {
+      "name": "single-sighash-add-output",
+      "contract": "RtSingle",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtSingle extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public increment() {\n    this.count = this.count + 1n;\n  }\n\n  /** @sighash SINGLE|FORKID */\n  public step(sats: bigint) {\n    this.addOutput(sats, this.count + 1n);\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning_absent": "contract 'RtSingle' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtSingle'"
+    },
+    {
+      "name": "zero-mutable-fields",
+      "contract": "RtReadonly",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtReadonly extends StatefulSmartContract {\n  readonly owner: PubKey;\n\n  constructor(owner: PubKey) {\n    super(owner);\n    this.owner = owner;\n  }\n\n  public unlock(sig: Sig) {\n    assert(checkSig(sig, this.owner));\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning_absent": "contract 'RtReadonly' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtReadonly'"
+    },
+    {
+      "name": "terminal-release",
+      "contract": "RtEscrow",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtEscrow extends StatefulSmartContract {\n  readonly owner: PubKey;\n  count: bigint;\n\n  constructor(owner: PubKey, count: bigint) {\n    super(owner, count);\n    this.owner = owner;\n    this.count = count;\n  }\n\n  public bump() {\n    this.count = this.count + 1n;\n  }\n\n  public release(sig: Sig) {\n    assert(checkSig(sig, this.owner));\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning_absent": "contract 'RtEscrow' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtEscrow'"
+    },
+    {
+      "name": "add-output-method",
+      "contract": "RtAddOutput",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtAddOutput extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public increment() {\n    this.count = this.count + 1n;\n  }\n\n  public split(sats: bigint) {\n    this.addOutput(sats, this.count + 1n);\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning_absent": "contract 'RtAddOutput' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtAddOutput'"
+    },
+    {
+      "name": "raw-output-via-helper",
+      "contract": "RtRawHelper",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtRawHelper extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public increment() {\n    this.count = this.count + 1n;\n  }\n\n  public pay(script: ByteString, sats: bigint) {\n    this.emit(script, sats);\n  }\n\n  private emit(script: ByteString, sats: bigint): void {\n    this.addRawOutput(sats, script);\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning_absent": "contract 'RtRawHelper' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtRawHelper'"
+    },
+    {
+      "name": "stateless",
+      "contract": "RtStateless",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtStateless extends SmartContract {\n  readonly owner: PubKey;\n\n  constructor(owner: PubKey) {\n    super(owner);\n    this.owner = owner;\n  }\n\n  public unlock(sig: Sig) {\n    assert(checkSig(sig, this.owner));\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "warning_absent": "contract 'RtStateless' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'RtStateless'"
+    }
+  ]
+}
