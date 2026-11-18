@@ -134,9 +134,10 @@ func TestDroppedContinuationD18IR(t *testing.T) {
 			program, err := lowerToANFRecovering(expanded.Contract)
 			if err != nil {
 				// The lowerer itself refuses a write inside an output-declaring
-				// branch; that shape is hand-built below instead.
+				// branch: that refusal is this case's expected outcome here, and
+				// its IR shape is hand-built below instead.
 				if strings.Contains(err.Error(), "both declares outputs and assigns contract properties") {
-					t.Skip("lowerer refuses this branch shape; covered by ir-write-on-raw-branch-sibling-add-output")
+					return
 				}
 				t.Fatal(err)
 			}

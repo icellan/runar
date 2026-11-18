@@ -86,9 +86,10 @@ def test_d18_ir_refuses(case):
         program = lower_to_anf(expanded.contract)
     except Exception as e:  # noqa: BLE001
         # The lowerer itself refuses a write inside an output-declaring
-        # branch; that shape is hand-built in test_d18_ir_refuses_write_on_raw_branch.
+        # branch: that refusal is this case's expected outcome here; the IR
+        # shape is hand-built in test_d18_ir_refuses_write_on_raw_branch.
         if "both declares outputs and assigns contract properties" in str(e):
-            pytest.skip("lowerer refuses this branch shape")
+            return
         raise
     data = _ir_bytes(program)
     text = data.decode()
