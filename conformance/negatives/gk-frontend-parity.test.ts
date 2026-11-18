@@ -320,4 +320,39 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
       });
     }
   });
+
+  describe('#199: a stateful contract that can never release its satoshis warns', () => {
+    interface RtCase { name: string; file: string; src: string; warning?: string; warning_absent?: string }
+    const data = corpus<{ warn: RtCase[]; nowarn: RtCase[] }>('release-trap-cases.json');
+    // Pinned literally (the corpus could drift with it).
+    const WARN = (c: string): string =>
+      `contract '${c}' has no terminal method and no public method that calls addOutput/addRawOutput; ` +
+      `its satoshis can never leave instances of '${c}'`;
+    it('the corpus carries the pinned text', () => {
+      for (const c of data.warn) expect(c.warning, c.name).toBe(WARN(/class (\w+)/.exec(c.src)![1]!));
+    });
+    for (const c of data.warn) {
+      it(`every tier warns on ${c.name}, still compiling it to the same bytes`, () => {
+        const input = writeFile(c.file, c.src);
+        const hexes = new Set<string>();
+        for (const tier of TIERS) {
+          const { status, out, diag } = run(tier, input);
+          expect(status, `${tier.id} refused ${c.name}: ${diag.slice(0, 400)}`).toBe(0);
+          expect(diag, tier.id).toContain(c.warning);
+          hexes.add(out.split('\n').pop()!.trim());
+        }
+        expect([...hexes]).toHaveLength(1);
+      });
+    }
+    for (const c of data.nowarn) {
+      it(`no tier warns on ${c.name}`, () => {
+        const input = writeFile(c.file, c.src);
+        for (const tier of TIERS) {
+          const { status, diag } = run(tier, input);
+          expect(status, `${tier.id} refused ${c.name}: ${diag.slice(0, 400)}`).toBe(0);
+          expect(diag, tier.id).not.toContain(c.warning_absent);
+        }
+      });
+    }
+  });
 });

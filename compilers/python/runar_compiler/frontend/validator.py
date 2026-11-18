@@ -120,6 +120,15 @@ def validate(contract: ContractNode) -> ValidationResult:
     for d in validate_sighash_usage(contract):
         (ctx.warnings if d.severity == Severity.WARNING else ctx.errors).append(d)
 
+    # #199: a stateful contract none of whose public methods is terminal or
+    # sizes its own outputs can never release its satoshis (advisory only;
+    # see continuation_rules.py).
+    from runar_compiler.frontend.continuation_rules import release_trap_warning
+    from runar_compiler.frontend.side_effect_summary import compute_side_effect_summary
+    release_trap = release_trap_warning(contract, compute_side_effect_summary(contract))
+    if release_trap is not None:
+        ctx.warnings.append(Diagnostic(message=release_trap, severity=Severity.WARNING))
+
     return ValidationResult(errors=ctx.errors, warnings=ctx.warnings)
 
 

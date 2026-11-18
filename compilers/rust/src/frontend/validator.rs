@@ -62,6 +62,14 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
         }
     }
 
+    // #199: a stateful contract none of whose public methods is terminal or
+    // sizes its own outputs can never release its satoshis (advisory only;
+    // see continuation_rules.rs).
+    let summary = super::side_effect_summary::compute_side_effect_summary(contract);
+    if let Some(msg) = super::continuation_rules::release_trap_warning(contract, &summary) {
+        warnings.push(Diagnostic::warning(msg, None));
+    }
+
     ValidationResult { errors, warnings }
 }
 

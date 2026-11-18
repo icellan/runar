@@ -35,6 +35,12 @@ export interface MethodEffects {
   mutatesState: boolean;
   /** Calls `this.addOutput(...)` or `this.addRawOutput(...)`. */
   hasStateOutput: boolean;
+  /**
+   * Calls `this.addOutput(...)` itself (D18: the only output intrinsic that
+   * carries state). Always set by `computeSideEffectSummary`; optional only so
+   * effects literals built elsewhere need not spell it.
+   */
+  callsAddOutput?: boolean;
   /** Calls `this.addDataOutput(...)`. */
   hasDataOutput: boolean;
   /** Calls `checkPreimage(...)` (manually, outside the auto-injected one). */
@@ -57,6 +63,7 @@ function emptyEffects(): MethodEffects {
   return {
     mutatesState: false,
     hasStateOutput: false,
+    callsAddOutput: false,
     hasDataOutput: false,
     usesPreimage: false,
     callsRequireOutputP2PKH: false,
@@ -68,6 +75,7 @@ function emptyEffects(): MethodEffects {
 function unionInto(target: MethodEffects, source: MethodEffects): void {
   target.mutatesState ||= source.mutatesState;
   target.hasStateOutput ||= source.hasStateOutput;
+  target.callsAddOutput ||= source.callsAddOutput;
   target.hasDataOutput ||= source.hasDataOutput;
   target.usesPreimage ||= source.usesPreimage;
   target.callsRequireOutputP2PKH ||= source.callsRequireOutputP2PKH;
@@ -152,6 +160,18 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
     throw new NeedCallee(target.name, target.body);
   }
 
+  /**
+   * A write target that is a mutable property, or an element of one
+   * (`this.arr[i]`, `this.grid[i][j]`). The element form matters before pass 3b
+   * (validate / typecheck / sighash-validate see the unexpanded contract, D18);
+   * after it, element writes are already plain property writes.
+   */
+  function writesMutableProperty(target: Expression): boolean {
+    let t = target;
+    while (t.kind === 'index_access') t = t.object;
+    return t.kind === 'property_access' && mutablePropNames.has(t.property);
+  }
+
   function computeBodyEffects(stmts: Statement[]): MethodEffects {
     const effects = emptyEffects();
     for (const stmt of stmts) {
@@ -163,10 +183,7 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
   function collectStmt(stmt: Statement, into: MethodEffects): void {
     switch (stmt.kind) {
       case 'assignment':
-        if (
-          stmt.target.kind === 'property_access' &&
-          mutablePropNames.has(stmt.target.property)
-        ) {
+        if (writesMutableProperty(stmt.target)) {
           into.mutatesState = true;
         }
         // Both sides may still contain calls (output intrinsics could hide in
@@ -205,10 +222,7 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
     switch (expr.kind) {
       case 'increment_expr':
       case 'decrement_expr':
-        if (
-          expr.operand.kind === 'property_access' &&
-          mutablePropNames.has(expr.operand.property)
-        ) {
+        if (writesMutableProperty(expr.operand)) {
           into.mutatesState = true;
         }
         return;
@@ -219,6 +233,7 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
         if (callee.kind === 'property_access' || callee.kind === 'member_expr') {
           const name = callee.property;
           if (STATE_OUTPUT_INTRINSICS.has(name)) into.hasStateOutput = true;
+          if (name === 'addOutput') into.callsAddOutput = true;
           if (DATA_OUTPUT_INTRINSICS.has(name)) into.hasDataOutput = true;
           const target = privateMethodsByName.get(name);
           if (target) {

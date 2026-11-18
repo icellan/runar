@@ -66,6 +66,9 @@ class MethodEffects:
 
     mutates_state: bool = False
     has_state_output: bool = False
+    # Calls this.addOutput(...) itself (D18: the only output intrinsic that
+    # carries state).
+    calls_add_output: bool = False
     has_data_output: bool = False
     uses_preimage: bool = False
     # Calls requireOutputP2PKH(...) with any output index.
@@ -78,6 +81,7 @@ class MethodEffects:
     def union(self, other: "MethodEffects") -> None:
         self.mutates_state = self.mutates_state or other.mutates_state
         self.has_state_output = self.has_state_output or other.has_state_output
+        self.calls_add_output = self.calls_add_output or other.calls_add_output
         self.has_data_output = self.has_data_output or other.has_data_output
         self.uses_preimage = self.uses_preimage or other.uses_preimage
         self.calls_require_output_p2pkh = (
@@ -199,6 +203,17 @@ def compute_side_effect_summary(contract: ContractNode) -> dict[str, MethodEffec
     return summary
 
 
+def _writes_mutable_property(target, mutable_props: set[str]) -> bool:
+    """A write target that is a mutable property, or an element of one
+    (``this.arr[i]``, ``this.grid[i][j]``). The element form matters before
+    FixedArray expansion (validate / typecheck see the unexpanded contract,
+    D18); after it, element writes are already plain property writes."""
+    t = target
+    while isinstance(t, IndexAccessExpr):
+        t = t.object
+    return isinstance(t, PropertyAccessExpr) and t.property in mutable_props
+
+
 def _collect_stmt(
     stmt: Statement,
     into: MethodEffects,
@@ -207,9 +222,8 @@ def _collect_stmt(
     classify,
 ) -> None:
     if isinstance(stmt, AssignmentStmt):
-        if isinstance(stmt.target, PropertyAccessExpr):
-            if stmt.target.property in mutable_props:
-                into.mutates_state = True
+        if _writes_mutable_property(stmt.target, mutable_props):
+            into.mutates_state = True
         # Issue #123 F3: both sides may still contain calls (output intrinsics
         # could hide in the target's index/object as well as the value).
         if stmt.target is not None:
@@ -261,9 +275,8 @@ def _collect_expr(
     if expr is None:
         return
     if isinstance(expr, (IncrementExpr, DecrementExpr)):
-        if isinstance(expr.operand, PropertyAccessExpr):
-            if expr.operand.property in mutable_props:
-                into.mutates_state = True
+        if _writes_mutable_property(expr.operand, mutable_props):
+            into.mutates_state = True
         return
     if isinstance(expr, CallExpr):
         callee = expr.callee
@@ -276,6 +289,8 @@ def _collect_expr(
         if callee_name is not None:
             if callee_name in _STATE_OUTPUT_INTRINSICS:
                 into.has_state_output = True
+            if callee_name == "addOutput":
+                into.calls_add_output = True
             if callee_name in _DATA_OUTPUT_INTRINSICS:
                 into.has_data_output = True
             target = private_by_name.get(callee_name)
