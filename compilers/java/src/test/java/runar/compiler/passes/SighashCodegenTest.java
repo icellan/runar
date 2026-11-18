@@ -94,7 +94,7 @@ class SighashCodegenTest {
      */
     @Test
     void singleDiffersFromDefaultAtExactlyTheTwoSighashBytes() throws Exception {
-        String dflt = PipelineTestSupport.hex(counterOut(""), "Counter.runar.ts");
+        String dflt = stripChangePkhGate(PipelineTestSupport.hex(counterOut(""), "Counter.runar.ts"));
         String single = PipelineTestSupport.hex(
             counterOut("/** @sighash SINGLE|FORKID */"), "Counter.runar.ts");
         // N-038 (R64): the SINGLE continuation also drops the change segment and
@@ -117,5 +117,18 @@ class SighashCodegenTest {
         assertEquals("01419d", dflt.substring(2 * 514, 2 * 517));
         assertEquals("01439d", single.substring(2 * 514, 2 * 517),
             "the preimage-type assert const carries the declared mode");
+    }
+
+    /**
+     * #180 / #213: the default-mode script carries the {@code _changePKH} entry
+     * width gate ({@code <d> OP_PICK OP_SIZE 0x14 OP_NUMEQUALVERIFY OP_DROP},
+     * 7 bytes) right after the {@code 61ab} prologue; a SINGLE continuation
+     * drops {@code _changePKH}, so it has none. Remove it so the two prologues
+     * line up byte-for-byte again.
+     */
+    private static String stripChangePkhGate(String dflt) {
+        assertEquals("8201149d75", dflt.substring(8, 18),
+            "default script must open with the _changePKH width gate");
+        return dflt.substring(0, 4) + dflt.substring(18);
     }
 }

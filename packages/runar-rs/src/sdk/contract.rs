@@ -800,6 +800,12 @@ impl RunarContract {
         signer: &dyn Signer,
         options: Option<&CallOptions>,
     ) -> Result<PreparedCall, String> {
+        // The state this call starts from. prepare_call advances `self.state`
+        // to the post-call state before anything is broadcast; finalize_call
+        // restores this snapshot when the transaction never makes it onto the
+        // network.
+        let state_before = self.state.clone();
+
         // Validate method exists
         let method = self.find_method(method_name).ok_or_else(|| {
             format!(
@@ -1617,7 +1623,7 @@ impl RunarContract {
                 // Append change params (PKH + amount) for methods that need them
                 let mut change_hex = String::new();
                 if method_needs_change && !change_pkh_hex.is_empty() {
-                    change_hex.push_str(&encode_push_data(&change_pkh_hex));
+                    change_hex.push_str(&super::state::encode_change_pkh(&change_pkh_hex)?);
                     change_hex.push_str(&encode_arg(&SdkValue::Int(tx_change_amount)));
                 }
 
@@ -1964,6 +1970,8 @@ impl RunarContract {
             contract_outputs: prepared_contract_outputs,
             code_sep_idx,
             intent_witness_hex: witness_hex,
+            state_before: Some(state_before),
+            state_after: Some(self.state.clone()),
         })
     }
 
@@ -1973,6 +1981,35 @@ impl RunarContract {
     /// `signatures` — Map from arg index to DER signature hex (with sighash byte).
     ///                Each key must be one of `prepared.sig_indices`.
     pub fn finalize_call(
+        &mut self,
+        prepared: &PreparedCall,
+        signatures: &HashMap<usize, String>,
+        provider: &mut dyn Provider,
+    ) -> Result<(String, TransactionData), String> {
+        // Only a PreparedCall that still spends the tracked UTXO owns the
+        // state: a repeat of one that was already committed must not touch it.
+        let owns_state = self.current_utxo.as_ref().map_or(false, |u| {
+            u.txid == prepared.contract_utxo.txid && u.output_index == prepared.contract_utxo.output_index
+        });
+        let result = self.finalize_call_once(prepared, signatures, provider);
+        if !owns_state {
+            return result;
+        }
+        match (&result, &prepared.state_before, &prepared.state_after) {
+            // Nothing was broadcast (or the node refused it): the chain is
+            // still at the state this call started from, so the local state
+            // must be too. Before this, a refused call left the state advanced
+            // and the next call was built from a state the chain never reached.
+            (Err(_), Some(before), _) => self.state = before.clone(),
+            // A retry of a PreparedCall whose first finalize failed must commit
+            // the post-call state the transaction carries.
+            (Ok(_), _, Some(after)) => self.state = after.clone(),
+            _ => {}
+        }
+        result
+    }
+
+    fn finalize_call_once(
         &mut self,
         prepared: &PreparedCall,
         signatures: &HashMap<usize, String>,
@@ -2016,7 +2053,7 @@ impl RunarContract {
             }
             let mut change_hex = String::new();
             if prepared.method_needs_change && !prepared.change_pkh_hex.is_empty() {
-                change_hex.push_str(&encode_push_data(&prepared.change_pkh_hex));
+                change_hex.push_str(&super::state::encode_change_pkh(&prepared.change_pkh_hex)?);
                 change_hex.push_str(&encode_arg(&SdkValue::Int(prepared.change_amount)));
             }
             let mut new_amount_hex = String::new();
@@ -2244,7 +2281,7 @@ impl RunarContract {
                 // Terminal: 0 change
                 let mut change_hex = String::new();
                 if method_needs_change && !change_pkh_hex.is_empty() {
-                    change_hex.push_str(&encode_push_data(change_pkh_hex));
+                    change_hex.push_str(&super::state::encode_change_pkh(change_pkh_hex)?);
                     change_hex.push_str(&encode_arg(&SdkValue::Int(0)));
                 }
                 // Terminal never needs code part. BUG-100: no op_sig pushed —
@@ -2355,6 +2392,8 @@ impl RunarContract {
             contract_outputs: vec![],
             code_sep_idx: term_code_sep_idx,
             intent_witness_hex: witness_hex.to_string(),
+            state_before: None,
+            state_after: None,
         })
     }
 

@@ -542,6 +542,16 @@ def check_fixed_width_value(value, field_type: str, what: str) -> None:
 _NUM2BIN8_TYPES = ('int', 'bigint', 'RabinSig', 'RabinPubKey')
 
 
+
+def encode_change_pkh(change_pkh_hex: str) -> str:
+    """#213 (defence in depth): push-encode the compiler-injected ``_changePKH``
+    arg of a stateful method, refusing anything that is not exactly 20 bytes of
+    hex. Every change-PKH push site goes through it. The covenant gates the
+    width on chain; this is the off-chain refusal.
+    """
+    check_fixed_width_value(change_pkh_hex, 'Ripemd160', 'changePKH')
+    return encode_push_data(change_pkh_hex)
+
 def _encode_state_value(value, field_type: str, label: str = '?') -> str:
     if field_type in _NUM2BIN8_TYPES:
         # N-084: only an int (not a bool) or a decimal integer string, with the

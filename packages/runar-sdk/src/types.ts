@@ -120,6 +120,8 @@ export interface PreparedCall {
   /** @internal */ _newSatoshis: number;
   /** @internal */ _hasMultiOutput: boolean;
   /** @internal */ _contractOutputs: Array<{ script: string; satoshis: number }>;
+  /** @internal The local state before prepareCall advanced it; restored when finalizeCall fails. */
+  _stateBefore?: Record<string, unknown>;
   /**
    * @internal
    * Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded

@@ -379,6 +379,11 @@ module Runar
       # `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
       # Empty when the method has no auto-injected intent params.
       :intent_witness_hex,
+      # The local state before prepare_call advanced it (restored when
+      # finalize_call fails) and the post-call state it advanced to (re-applied
+      # when a retried finalize_call of the same PreparedCall succeeds).
+      :state_before,
+      :state_after,
       keyword_init: true
     ) do
       # rubocop:disable Metrics/ParameterLists
@@ -407,7 +412,9 @@ module Runar
         new_satoshis: 0,
         has_multi_output: false,
         contract_outputs: [],
-        code_sep_idx: -1
+        code_sep_idx: -1,
+        state_before: nil,
+        state_after: nil
       )
         super
       end

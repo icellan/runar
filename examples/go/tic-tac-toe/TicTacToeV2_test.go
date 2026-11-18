@@ -85,7 +85,8 @@ func TestTicTacToeV2_ByteIdenticalToV1(t *testing.T) {
 	// N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
 	// N-376 took it 7855 -> 7801: 18 identity ROT ROT ROT runs dropped by the peephole.
 	// N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
-	const expectedBytes = 7762 // Ports #170: -36 (six C=1 binding blobs); W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17; N-045: +8; N-216: -2; N-376: -54; N-397: -3
+	// PR B (#180/#213) took it 7762 -> 7804: six entry width gates (+7 each): Join and Move gate their PubKey (it reaches state/comparison, so it is not checkSig-only) and the injected _changePKH; MoveAndWin and MoveAndTie gate their PubKey (their changePKH is an explicit ByteString, no injected one); the two Cancel methods have no fixed-width params.
+	const expectedBytes = 7804 // Ports #170: -36 (six C=1 binding blobs); W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17; N-045: +8; N-216: -2; N-376: -54; N-397: -3; PR B: +42
 	if v1Bytes != expectedBytes {
 		t.Errorf("v1 script length = %d bytes, want %d", v1Bytes, expectedBytes)
 	}

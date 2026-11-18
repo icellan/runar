@@ -749,8 +749,12 @@ describe('Pass 6: Emit', () => {
       // runtime, so the tail carries the guard (`…547a547a 00787c9c9163` OP_IF
       // … OP_ELSE `67007b7577687e` OP_ENDIF) around the P2PKH change output
       // instead of catting it unconditionally.
+      // #213: the method opens with the entry width gate on the injected
+      // `_changePKH` (params [_changePKH, _changeAmount, txPreimage], so depth
+      // 2): `52 79` OP_2 OP_PICK, `82 01 14 9d` OP_SIZE 20 OP_NUMEQUALVERIFY,
+      // `75` OP_DROP.
       expect(result.scriptHex).toBe(
-        '61ab76' + CHECK_PREIMAGE_BINDING_HEX +
+        '61ab' + '52798201149d75' + '76' + CHECK_PREIMAGE_BINDING_HEX +
         '7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f776776'+
         '02ff009c6375587f776775527f7768686855798252947b7c7f82599d517f75016a880261ab7c'+
         '7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781'+
