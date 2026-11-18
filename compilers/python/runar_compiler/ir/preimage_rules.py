@@ -40,63 +40,89 @@ def _ref_target(v: ANFValue) -> str | None:
     return None
 
 
+_THEN, _ELSE, _BODY = -1, -2, -3
+
+
+def _visible(def_path: tuple[int, ...], from_path: tuple[int, ...]) -> bool:
+    """Is the binding at ``def_path`` in scope at ``from_path``? Only if it sits
+    earlier in the same list or in a list enclosing it: stack lowering resolves
+    names by position, so a binding after (or beside) a use never answers for
+    it."""
+    n = len(def_path)
+    if len(from_path) < n or def_path[: n - 1] != from_path[: n - 1]:
+        return False
+    return def_path[n - 1] < from_path[n - 1]
+
+
 class _View:
     def __init__(self, m: ANFMethod, implicit_tx: bool) -> None:
-        self.defs: dict[str, ANFValue] = {}
-        self.dup: set[str] = set()
+        self.defs: dict[str, tuple[ANFValue, tuple[int, ...]]] = {}
+        # A name bound more than once, or under a parameter's name (the
+        # parameter slot answers to it too), never resolves.
+        self.poisoned: set[str] = {p.name for p in m.params}
 
-        def collect(bs: list[ANFBinding] | None) -> None:
-            for b in bs or []:
+        def collect(bs: list[ANFBinding] | None, at: tuple[int, ...]) -> None:
+            for i, b in enumerate(bs or []):
+                path = at + (i,)
                 if b.name in self.defs:
-                    self.dup.add(b.name)
-                self.defs[b.name] = b.value
+                    self.poisoned.add(b.name)
+                self.defs[b.name] = (b.value, path)
                 if b.value.kind == "if":
-                    collect(b.value.then)
-                    collect(b.value.else_)
+                    collect(b.value.then, path + (_THEN,))
+                    collect(b.value.else_, path + (_ELSE,))
                 elif b.value.kind == "loop":
-                    collect(b.value.body)
+                    collect(b.value.body, path + (_BODY,))
 
-        collect(m.body)
+        collect(m.body, ())
         self.shp = {p.name for p in m.params if p.type == _SHP}
         own = any(p.name == "txPreimage" for p in m.params)
         self.implicit = (not m.is_public) and implicit_tx and not own
 
-    def resolve(self, name: str | None) -> str | None:
-        seen: set[str] = set()
-        while name is not None and name not in self.dup and name not in seen:
-            seen.add(name)
-            v = self.defs.get(name)
-            if v is None:
+    def lookup(self, name: str | None, from_path: tuple[int, ...]):
+        if name is None or name in self.poisoned:
+            return None
+        d = self.defs.get(name)
+        return d if d is not None and _visible(d[1], from_path) else None
+
+    def resolve(self, name: str | None, from_path: tuple[int, ...]) -> str | None:
+        for _ in range(len(self.defs) + 1):
+            d = self.lookup(name, from_path)
+            if d is None:
                 return None
+            v, path = d
             if v.kind == "load_param":
                 if v.name in self.shp:
                     return v.name
                 return v.name if self.implicit and v.name == "txPreimage" else None
             if v.kind == "load_prop":
                 return v.name if self.implicit and v.name == "txPreimage" else None
-            name = _ref_target(v)
+            name, from_path = _ref_target(v), path
         return None
 
-    def truth_checks(self, name: str | None, seen: set[str]):
-        if name is None or name in self.dup or name in seen:
-            return set()
-        seen.add(name)
-        v = self.defs.get(name)
-        if v is None:
+    def truth_of(self, name: str | None, from_path: tuple[int, ...], depth: int = 0):
+        d = self.lookup(name, from_path)
+        return set() if d is None else self.truth_value(d[0], d[1], depth)
+
+    def truth_value(self, v: ANFValue, path: tuple[int, ...], depth: int):
+        if depth > len(self.defs):
             return set()
         if v.kind == "check_preimage":
-            o = self.resolve(v.preimage)
+            o = self.resolve(v.preimage, path)
             return {o} if o is not None else set()
         if v.kind == "load_const":
             if v.const_bool is False:
                 return _ALL
             nxt = _ref_target(v)
-            return self.truth_checks(nxt, seen) if nxt is not None else set()
+            return self.truth_of(nxt, path, depth + 1) if nxt is not None else set()
         if v.kind == "if" and not v.results:
             if not v.then or not v.else_:
                 return set()
-            t = _union(self.truth_checks(v.cond, seen), self.truth_checks(v.then[-1].name, seen))
-            return _intersect(t, self.truth_checks(v.else_[-1].name, seen))
+            nt, ne = len(v.then) - 1, len(v.else_) - 1
+            t = _union(
+                self.truth_of(v.cond, path, depth + 1),
+                self.truth_value(v.then[nt].value, path + (_THEN, nt), depth + 1),
+            )
+            return _intersect(t, self.truth_value(v.else_[ne].value, path + (_ELSE, ne), depth + 1))
         return set()
 
 
@@ -122,29 +148,30 @@ def preimage_rule_errors(program: ANFProgram) -> list[str]:
         mv = _View(m, implicit_tx)
         inner = stack | {id(m)}
 
-        def walk(bs: list[ANFBinding] | None, done_in: set[str]) -> set[str]:
+        def walk(bs: list[ANFBinding] | None, at: tuple[int, ...], done_in: set[str]) -> set[str]:
             done = set(done_in)
-            for b in bs or []:
+            for i, b in enumerate(bs or []):
+                path = at + (i,)
                 v = b.value
                 if v.kind == "assert":
-                    c = mv.truth_checks(v.value_ref, set())
+                    c = mv.truth_of(v.value_ref, path)
                     if c is not None:
                         done |= c
                 elif v.kind == "if":
-                    done = walk(v.then, done) & walk(v.else_, done)
+                    done = walk(v.then, path + (_THEN,), done) & walk(v.else_, path + (_ELSE,), done)
                 elif v.kind == "method_call":
                     target = privates.get(v.method or "")
                     if target is not None:
                         checked = must_checked(target, inner)
                         args = v.args or []
-                        for i, p in enumerate(target.params):
-                            if p.name in checked and i < len(args):
-                                o = mv.resolve(args[i])
+                        for k, p in enumerate(target.params):
+                            if p.name in checked and k < len(args):
+                                o = mv.resolve(args[k], path)
                                 if o is not None:
                                     done.add(o)
             return done
 
-        result = walk(m.body, set())
+        result = walk(m.body, (), set())
         memo[id(m)] = result
         return result
 
@@ -153,27 +180,28 @@ def preimage_rule_errors(program: ANFProgram) -> list[str]:
             continue
         mv = _View(m, implicit_tx)
 
-        def visit(bs: list[ANFBinding] | None) -> None:
-            for b in bs or []:
+        def visit(bs: list[ANFBinding] | None, at: tuple[int, ...]) -> None:
+            for j, b in enumerate(bs or []):
+                path = at + (j,)
                 v = b.value
                 args = v.args or []
                 if v.kind == "call" and v.func in PREIMAGE_EXTRACTORS:
-                    if mv.resolve(args[0] if args else None) is None:
+                    if mv.resolve(args[0] if args else None, path) is None:
                         errors.append(unchecked_preimage_arg_message(v.func))
                 elif v.kind == "method_call":
                     target = privates.get(v.method or "")
                     if target is not None and any(
-                        p.type == _SHP and mv.resolve(args[i] if i < len(args) else None) is None
+                        p.type == _SHP and mv.resolve(args[i] if i < len(args) else None, path) is None
                         for i, p in enumerate(target.params)
                     ):
                         errors.append(unchecked_preimage_arg_message(target.name))
                 elif v.kind == "if":
-                    visit(v.then)
-                    visit(v.else_)
+                    visit(v.then, path + (_THEN,))
+                    visit(v.else_, path + (_ELSE,))
                 elif v.kind == "loop":
-                    visit(v.body)
+                    visit(v.body, path + (_BODY,))
 
-        visit(m.body)
+        visit(m.body, ())
         if m.is_public:
             done = must_checked(m, frozenset())
             for p in m.params:

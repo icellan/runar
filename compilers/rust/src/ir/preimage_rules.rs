@@ -43,17 +43,42 @@ fn ref_target(v: &ANFValue) -> Option<&str> {
     }
 }
 
+const THEN: i64 = -1;
+const ELSE: i64 = -2;
+const BODY: i64 = -3;
+
+fn child(p: &[i64], i: i64) -> Vec<i64> {
+    let mut out = p.to_vec();
+    out.push(i);
+    out
+}
+
+/// Is the binding at `def` in scope at `from`? Only if it sits earlier in the
+/// same list or in a list enclosing it: stack lowering resolves names by
+/// position, so a binding after (or beside) a use never answers for it.
+fn visible(def: &[i64], from: &[i64]) -> bool {
+    let n = def.len();
+    if n == 0 || from.len() < n || def[..n - 1] != from[..n - 1] {
+        return false;
+    }
+    def[n - 1] < from[n - 1]
+}
+
 struct View<'a> {
-    defs: HashMap<&'a str, &'a ANFValue>,
-    dup: HashSet<&'a str>,
+    defs: HashMap<&'a str, (&'a ANFValue, Vec<i64>)>,
+    /// Bound more than once, or under a parameter's name: never resolves.
+    poisoned: HashSet<&'a str>,
     shp: HashSet<&'a str>,
     implicit: bool,
 }
 
 impl<'a> View<'a> {
     fn new(m: &'a ANFMethod, implicit_tx: bool) -> Self {
-        let mut v = View { defs: HashMap::new(), dup: HashSet::new(), shp: HashSet::new(), implicit: false };
-        v.collect(&m.body);
+        let mut v = View { defs: HashMap::new(), poisoned: HashSet::new(), shp: HashSet::new(), implicit: false };
+        for p in &m.params {
+            v.poisoned.insert(p.name.as_str());
+        }
+        v.collect(&m.body, &[]);
         for p in &m.params {
             if p.param_type == SHP {
                 v.shp.insert(p.name.as_str());
@@ -64,31 +89,42 @@ impl<'a> View<'a> {
         v
     }
 
-    fn collect(&mut self, bindings: &'a [ANFBinding]) {
-        for b in bindings {
+    fn collect(&mut self, bindings: &'a [ANFBinding], at: &[i64]) {
+        for (i, b) in bindings.iter().enumerate() {
+            let path = child(at, i as i64);
             if self.defs.contains_key(b.name.as_str()) {
-                self.dup.insert(b.name.as_str());
+                self.poisoned.insert(b.name.as_str());
             }
-            self.defs.insert(b.name.as_str(), &b.value);
+            self.defs.insert(b.name.as_str(), (&b.value, path.clone()));
             match &b.value {
                 ANFValue::If { then, else_branch, .. } => {
-                    self.collect(then);
-                    self.collect(else_branch);
+                    self.collect(then, &child(&path, THEN));
+                    self.collect(else_branch, &child(&path, ELSE));
                 }
-                ANFValue::Loop { body, .. } => self.collect(body),
+                ANFValue::Loop { body, .. } => self.collect(body, &child(&path, BODY)),
                 _ => {}
             }
         }
     }
 
-    fn resolve(&self, start: Option<&str>) -> Option<String> {
-        let mut name = start?;
-        let mut seen = HashSet::new();
-        loop {
-            if self.dup.contains(name) || !seen.insert(name) {
-                return None;
-            }
-            let v = self.defs.get(name)?;
+    fn lookup(&self, name: Option<&str>, from: &[i64]) -> Option<(&'a ANFValue, Vec<i64>)> {
+        let name = name?;
+        if self.poisoned.contains(name) {
+            return None;
+        }
+        let (v, p) = self.defs.get(name)?;
+        if visible(p, from) {
+            Some((*v, p.clone()))
+        } else {
+            None
+        }
+    }
+
+    fn resolve(&self, start: Option<&str>, from: &[i64]) -> Option<String> {
+        let mut name = start?.to_string();
+        let mut from = from.to_vec();
+        for _ in 0..=self.defs.len() {
+            let (v, path) = self.lookup(Some(name.as_str()), &from)?;
             match v {
                 ANFValue::LoadParam { name: p } => {
                     if self.shp.contains(p.as_str()) || (self.implicit && p == "txPreimage") {
@@ -99,34 +135,49 @@ impl<'a> View<'a> {
                 ANFValue::LoadProp { name: p, .. } => {
                     return if self.implicit && p == "txPreimage" { Some(p.clone()) } else { None };
                 }
-                _ => name = ref_target(v)?,
+                _ => {
+                    name = ref_target(v)?.to_string();
+                    from = path;
+                }
             }
+        }
+        None
+    }
+
+    fn truth_of(&self, name: &str, from: &[i64], depth: usize) -> Checks {
+        match self.lookup(Some(name), from) {
+            Some((v, path)) => self.truth_value(v, &path, depth),
+            None => Some(HashSet::new()),
         }
     }
 
-    fn truth_checks(&self, name: &str, seen: &mut HashSet<String>) -> Checks {
-        if self.dup.contains(name) || !seen.insert(name.to_string()) {
+    fn truth_value(&self, v: &ANFValue, path: &[i64], depth: usize) -> Checks {
+        if depth > self.defs.len() {
             return Some(HashSet::new());
         }
-        let Some(v) = self.defs.get(name) else { return Some(HashSet::new()) };
         match v {
             ANFValue::CheckPreimage { preimage, .. } => {
-                Some(self.resolve(Some(preimage.as_str())).into_iter().collect())
+                Some(self.resolve(Some(preimage.as_str()), path).into_iter().collect())
             }
             ANFValue::LoadConst { value: serde_json::Value::Bool(false) } => None,
             ANFValue::LoadConst { .. } => match ref_target(v) {
-                Some(next) => self.truth_checks(next, seen),
+                Some(next) => self.truth_of(next, path, depth + 1),
                 None => Some(HashSet::new()),
             },
             ANFValue::If { cond, then, else_branch, results, .. } => {
                 if !results.is_empty() || then.is_empty() || else_branch.is_empty() {
                     return Some(HashSet::new());
                 }
+                let nt = then.len() - 1;
+                let ne = else_branch.len() - 1;
                 let t = union(
-                    self.truth_checks(cond, seen),
-                    self.truth_checks(&then[then.len() - 1].name, seen),
+                    self.truth_of(cond, path, depth + 1),
+                    self.truth_value(&then[nt].value, &child(&child(path, THEN), nt as i64), depth + 1),
                 );
-                intersect(t, self.truth_checks(&else_branch[else_branch.len() - 1].name, seen))
+                intersect(
+                    t,
+                    self.truth_value(&else_branch[ne].value, &child(&child(path, ELSE), ne as i64), depth + 1),
+                )
             }
             _ => Some(HashSet::new()),
         }
@@ -152,7 +203,7 @@ impl<'a> Rules<'a> {
         let mv = View::new(m, self.implicit_tx);
         let mut inner = stack.clone();
         inner.insert(key);
-        let result = self.walk(&mv, &m.body, HashSet::new(), &inner);
+        let result = self.walk(&mv, &m.body, &[], HashSet::new(), &inner);
         self.memo.insert(key, result.clone());
         result
     }
@@ -161,20 +212,22 @@ impl<'a> Rules<'a> {
         &mut self,
         mv: &View<'a>,
         bindings: &'a [ANFBinding],
+        at: &[i64],
         done_in: HashSet<String>,
         inner: &HashSet<*const ANFMethod>,
     ) -> HashSet<String> {
         let mut done = done_in;
-        for b in bindings {
+        for (bi, b) in bindings.iter().enumerate() {
+            let path = child(at, bi as i64);
             match &b.value {
                 ANFValue::Assert { value, .. } => {
-                    if let Some(c) = mv.truth_checks(value, &mut HashSet::new()) {
+                    if let Some(c) = mv.truth_of(value, &path, 0) {
                         done.extend(c);
                     }
                 }
                 ANFValue::If { then, else_branch, .. } => {
-                    let t = self.walk(mv, then, done.clone(), inner);
-                    let e = self.walk(mv, else_branch, done.clone(), inner);
+                    let t = self.walk(mv, then, &child(&path, THEN), done.clone(), inner);
+                    let e = self.walk(mv, else_branch, &child(&path, ELSE), done.clone(), inner);
                     done = t.intersection(&e).cloned().collect();
                 }
                 ANFValue::MethodCall { method, args, .. } => {
@@ -182,7 +235,7 @@ impl<'a> Rules<'a> {
                         let checked = self.must_checked(target, inner);
                         for (i, p) in target.params.iter().enumerate() {
                             if checked.contains(&p.name) {
-                                if let Some(o) = mv.resolve(args.get(i).map(|s| s.as_str())) {
+                                if let Some(o) = mv.resolve(args.get(i).map(|s| s.as_str()), &path) {
                                     done.insert(o);
                                 }
                             }
@@ -200,19 +253,21 @@ fn visit(
     mv: &View<'_>,
     privates: &HashMap<&str, &ANFMethod>,
     bindings: &[ANFBinding],
+    at: &[i64],
     errors: &mut Vec<String>,
 ) {
-    for b in bindings {
+    for (bi, b) in bindings.iter().enumerate() {
+        let path = child(at, bi as i64);
         match &b.value {
             ANFValue::Call { func, args } if PREIMAGE_EXTRACTORS.contains(&func.as_str()) => {
-                if mv.resolve(args.first().map(|s| s.as_str())).is_none() {
+                if mv.resolve(args.first().map(|s| s.as_str()), &path).is_none() {
                     errors.push(unchecked_preimage_arg_message(func));
                 }
             }
             ANFValue::MethodCall { method, args, .. } => {
                 if let Some(target) = privates.get(method.as_str()) {
                     if target.params.iter().enumerate().any(|(i, p)| {
-                            p.param_type == SHP && mv.resolve(args.get(i).map(|s| s.as_str())).is_none()
+                            p.param_type == SHP && mv.resolve(args.get(i).map(|s| s.as_str()), &path).is_none()
                         })
                     {
                         errors.push(unchecked_preimage_arg_message(&target.name));
@@ -220,10 +275,10 @@ fn visit(
                 }
             }
             ANFValue::If { then, else_branch, .. } => {
-                visit(mv, privates, then, errors);
-                visit(mv, privates, else_branch, errors);
+                visit(mv, privates, then, &child(&path, THEN), errors);
+                visit(mv, privates, else_branch, &child(&path, ELSE), errors);
             }
-            ANFValue::Loop { body, .. } => visit(mv, privates, body, errors),
+            ANFValue::Loop { body, .. } => visit(mv, privates, body, &child(&path, BODY), errors),
             _ => {}
         }
     }
@@ -256,7 +311,7 @@ pub fn preimage_rule_errors(program: &ANFProgram) -> Vec<String> {
             continue;
         }
         let mv = View::new(m, implicit_tx);
-        visit(&mv, &privates, &m.body, &mut errors);
+        visit(&mv, &privates, &m.body, &[], &mut errors);
         if m.is_public {
             let done = rules.must_checked(m, &HashSet::new());
             for p in &m.params {

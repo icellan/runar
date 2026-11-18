@@ -130,7 +130,50 @@ const withUncheckedTwin = (before: boolean): Ir =>
     ir.methods.splice(before ? at : at + 1, 0, twin);
   });
 
+/**
+ * Decoys: `assert ok` and `extractAmount(x)` name the PARAMETERS `ok` (boolean)
+ * and `x` (ByteString); bindings of those same names (a check_preimage and an
+ * alias of the checked preimage) sit AFTER the uses, in a loop body, or in an
+ * `if` arm. Stack lowering resolves names by position, so they vouch for
+ * nothing; an order-blind lookup took them at their word.
+ */
+const decoyProgram = (where: 'after' | 'loop' | 'if-arm'): Ir => {
+  const uses: Binding[] = [
+    { name: 'a1', value: { kind: 'assert', value: 'ok' } },
+    { name: 'e1', value: { kind: 'call', func: 'extractAmount', args: ['x'] } },
+    { name: 'm1', value: { kind: 'load_prop', name: 'minAmount' } },
+    { name: 'c1', value: { kind: 'bin_op', op: '>=', left: 'e1', right: 'm1' } },
+  ];
+  const decoys: Binding[] = [
+    { name: 't0', value: { kind: 'load_param', name: 'txPreimage' } },
+    { name: 'ok', value: { kind: 'check_preimage', preimage: 't0' } },
+    { name: 'x', value: { kind: 'load_const', value: '@ref:t0' } },
+  ];
+  const body: Binding[] =
+    where === 'after'
+      ? [...uses, ...decoys]
+      : where === 'loop'
+        ? [...uses, { name: 'l1', value: { kind: 'loop', count: 1, iterVar: 'i', start: 0, step: 1, body: decoys } }]
+        : [
+            { name: 'cc', value: { kind: 'load_const', value: true } },
+            ...uses,
+            { name: 'f1', value: { kind: 'if', cond: 'cc', then: decoys, else: [] } },
+          ];
+  return mutate(DIRECT, (ir) => {
+    const spend = method(ir, 'spend');
+    spend.params = [
+      { name: 'txPreimage', type: 'SigHashPreimage' },
+      { name: 'ok', type: 'boolean' },
+      { name: 'x', type: 'ByteString' },
+    ];
+    spend.body = [...body, { name: 'z1', value: { kind: 'assert', value: 'c1' } }];
+  });
+};
+
 const CASES: Array<{ name: string; ir: Ir; error: string }> = [
+  { name: 'decoy-bindings-after-the-uses', ir: decoyProgram('after'), error: D14('extractAmount') },
+  { name: 'decoy-bindings-in-a-loop-body', ir: decoyProgram('loop'), error: D14('extractAmount') },
+  { name: 'decoy-bindings-in-an-if-arm', ir: decoyProgram('if-arm'), error: D14('extractAmount') },
   // A duplicated method name lets a name-keyed lookup or memo answer for the
   // wrong body (the checked twin vouching for the one stack lowering inlines).
   { name: 'dup-helper-unchecked-twin-after', ir: withUncheckedTwin(false), error: DUP('check') },

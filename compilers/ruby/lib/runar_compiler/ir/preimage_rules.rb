@@ -32,39 +32,61 @@ module RunarCompiler
         v.kind == "load_const" && s.is_a?(String) && s.start_with?("@ref:") ? s[5..] : nil
       end
 
-      # Per-method view: bindings by name, names bound more than once.
-      class View
-        attr_reader :defs, :dup
+      THEN = -1
+      ELSE = -2
+      BODY = -3
 
+      # Is the binding at def_path in scope at from_path? Only if it sits
+      # earlier in the same list or in a list enclosing it: stack lowering
+      # resolves names by position, so a binding after (or beside) a use never
+      # answers for it.
+      def self.visible?(def_path, from_path)
+        n = def_path.length
+        return false if from_path.length < n || def_path[0...(n - 1)] != from_path[0...(n - 1)]
+
+        def_path[n - 1] < from_path[n - 1]
+      end
+
+      # Per-method view: bindings by name with their positions.
+      class View
         def initialize(method, implicit_tx)
           @defs = {}
-          @dup = Set.new
-          collect(method.body)
+          # A name bound more than once, or under a parameter's name (the
+          # parameter slot answers to it too), never resolves.
+          @poisoned = (method.params || []).map(&:name).to_set
+          collect(method.body, [])
           @shp = (method.params || []).select { |p| p.type == SHP }.map(&:name).to_set
           own = (method.params || []).any? { |p| p.name == "txPreimage" }
           @implicit = !method.is_public && implicit_tx && !own
         end
 
-        def collect(bindings)
-          (bindings || []).each do |b|
-            @dup << b.name if @defs.key?(b.name)
-            @defs[b.name] = b.value
+        def collect(bindings, at)
+          (bindings || []).each_with_index do |b, i|
+            path = at + [i]
+            @poisoned << b.name if @defs.key?(b.name)
+            @defs[b.name] = [b.value, path]
             if b.value.kind == "if"
-              collect(b.value.then)
-              collect(b.value.else_)
+              collect(b.value.then, path + [THEN])
+              collect(b.value.else_, path + [ELSE])
             elsif b.value.kind == "loop"
-              collect(b.value.body)
+              collect(b.value.body, path + [BODY])
             end
           end
         end
 
-        def resolve(name)
-          seen = Set.new
-          until name.nil? || @dup.include?(name) || seen.include?(name)
-            seen << name
-            v = @defs[name]
-            return nil if v.nil?
+        def lookup(name, from_path)
+          return nil if name.nil? || @poisoned.include?(name)
 
+          d = @defs[name]
+          d && PreimageRules.visible?(d[1], from_path) ? d : nil
+        end
+
+        def resolve(name, from_path)
+          (@defs.size + 1).times do
+            d = lookup(name, from_path)
+            return nil if d.nil?
+
+            v, path = d
             case v.kind
             when "load_param"
               return v.name if @shp.include?(v.name)
@@ -74,31 +96,36 @@ module RunarCompiler
               return @implicit && v.name == "txPreimage" ? v.name : nil
             end
             name = PreimageRules.ref_target(v)
+            from_path = path
           end
           nil
         end
 
-        def truth_checks(name, seen)
-          return Set.new if name.nil? || @dup.include?(name) || seen.include?(name)
+        def truth_of(name, from_path, depth = 0)
+          d = lookup(name, from_path)
+          d.nil? ? Set.new : truth_value(d[0], d[1], depth)
+        end
 
-          seen << name
-          v = @defs[name]
-          return Set.new if v.nil?
+        def truth_value(v, path, depth)
+          return Set.new if depth > @defs.size
 
           case v.kind
           when "check_preimage"
-            o = resolve(v.preimage)
+            o = resolve(v.preimage, path)
             o.nil? ? Set.new : Set[o]
           when "load_const"
             return nil if v.const_bool == false
 
             nxt = PreimageRules.ref_target(v)
-            nxt.nil? ? Set.new : truth_checks(nxt, seen)
+            nxt.nil? ? Set.new : truth_of(nxt, path, depth + 1)
           when "if"
             return Set.new if (v.results || []).any? || (v.then || []).empty? || (v.else_ || []).empty?
 
-            t = PreimageRules.union(truth_checks(v.cond, seen), truth_checks(v.then.last.name, seen))
-            PreimageRules.intersect(t, truth_checks(v.else_.last.name, seen))
+            nt = v.then.length - 1
+            ne = v.else_.length - 1
+            t = PreimageRules.union(truth_of(v.cond, path, depth + 1),
+                                    truth_value(v.then[nt].value, path + [THEN, nt], depth + 1))
+            PreimageRules.intersect(t, truth_value(v.else_[ne].value, path + [ELSE, ne], depth + 1))
           else
             Set.new
           end
@@ -127,16 +154,17 @@ module RunarCompiler
           mv = View.new(m, implicit_tx)
           inner = stack + [m]
           walk = nil
-          walk = lambda do |bindings, done_in|
+          walk = lambda do |bindings, at, done_in|
             done = done_in.dup
-            (bindings || []).each do |b|
+            (bindings || []).each_with_index do |b, bi|
+              path = at + [bi]
               v = b.value
               case v.kind
               when "assert"
-                c = mv.truth_checks(v.value_ref, Set.new)
+                c = mv.truth_of(v.value_ref, path)
                 done |= c unless c.nil?
               when "if"
-                done = walk.call(v.then, done) & walk.call(v.else_, done)
+                done = walk.call(v.then, path + [THEN], done) & walk.call(v.else_, path + [ELSE], done)
               when "method_call"
                 target = privates[v.method]
                 next if target.nil?
@@ -146,14 +174,14 @@ module RunarCompiler
                 (target.params || []).each_with_index do |p, i|
                   next unless checked.include?(p.name) && i < args.length
 
-                  o = mv.resolve(args[i])
+                  o = mv.resolve(args[i], path)
                   done << o unless o.nil?
                 end
               end
             end
             done
           end
-          memo[m] = walk.call(m.body, Set.new)
+          memo[m] = walk.call(m.body, [], Set.new)
         end
 
         program.methods.each do |m|
@@ -161,30 +189,31 @@ module RunarCompiler
 
           mv = View.new(m, implicit_tx)
           visit = nil
-          visit = lambda do |bindings|
-            (bindings || []).each do |b|
+          visit = lambda do |bindings, at|
+            (bindings || []).each_with_index do |b, bi|
+              path = at + [bi]
               v = b.value
               args = v.args || []
               case v.kind
               when "call"
-                if Frontend::PREIMAGE_EXTRACTORS.include?(v.func) && mv.resolve(args[0]).nil?
+                if Frontend::PREIMAGE_EXTRACTORS.include?(v.func) && mv.resolve(args[0], path).nil?
                   errors << Frontend.unchecked_preimage_arg_message(v.func)
                 end
               when "method_call"
                 target = privates[v.method]
                 if !target.nil? &&
-                   (target.params || []).each_with_index.any? { |p, i| p.type == SHP && mv.resolve(args[i]).nil? }
+                   (target.params || []).each_with_index.any? { |p, i| p.type == SHP && mv.resolve(args[i], path).nil? }
                   errors << Frontend.unchecked_preimage_arg_message(target.name)
                 end
               when "if"
-                visit.call(v.then)
-                visit.call(v.else_)
+                visit.call(v.then, path + [THEN])
+                visit.call(v.else_, path + [ELSE])
               when "loop"
-                visit.call(v.body)
+                visit.call(v.body, path + [BODY])
               end
             end
           end
-          visit.call(m.body)
+          visit.call(m.body, [])
           next unless m.is_public
 
           done = must_checked.call(m, [])
