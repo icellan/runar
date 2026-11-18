@@ -23,10 +23,8 @@ compiled with ``--ir`` so the artifact carries the ANF the call path needs.
 
 Every test runs on the DEFAULT validating MockProvider with a real LocalSigner, so
 each broadcast goes through the fail-closed gate and each call spends the
-continuation the previous call built. The Python tier's script layer records a
-Rúnar covenant input as UNVALIDATABLE (a pre-existing runar-py <-> bsv-sdk
-OP_PUSH_TX incompatibility, pinned by ``test_mock_broadcast_validation.py``), so the
-load-bearing assertion here is the continuation BYTES: the 32-byte state section
+continuation the previous call built, covenant inputs included (bsv-sdk >= 2.5.0).
+The load-bearing assertion here is still the continuation BYTES: the 32-byte state section
 the next spend is bound to.
 """
 

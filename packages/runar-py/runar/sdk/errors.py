@@ -49,7 +49,9 @@ class BroadcastRejected(Exception):
 class BroadcastValidationUnavailable(Exception):
     """Raised when :class:`~runar.sdk.provider.MockProvider` is asked to
     validate a broadcast but the optional ``bsv-sdk`` dependency that provides
-    the script interpreter is not installed.
+    the script interpreter is not installed, or is older than 2.5.0 (older
+    releases sighash the wrong scriptCode after OP_RETURN,
+    bsv-blockchain/py-sdk#247), or its version cannot be read.
 
     This is deliberately an ERROR, not a silent skip. Quietly degrading to
     "validated nothing, returned a fake txid" is exactly the fail-open bug
@@ -57,7 +59,7 @@ class BroadcastValidationUnavailable(Exception):
     while every transaction it built was unspendable.
 
     ``runar`` itself stays zero-dependency at RUNTIME; ``bsv-sdk`` is a TEST
-    dependency (``pip install 'runar[dev]'`` or ``pip install bsv-sdk``) and CI
+    dependency (``pip install 'runar[dev]'`` or ``pip install 'bsv-sdk>=2.5.0'``) and CI
     installs it for the ``packages/runar-py`` job.
     """
 

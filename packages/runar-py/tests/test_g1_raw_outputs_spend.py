@@ -134,32 +134,12 @@ def test_send_to_script_outputs_are_raw_state_change_in_order():
     assert outs[2]["satoshis"] > 0
 
 
-@pytest.mark.xfail(
-    reason=(
-        "bsv-sdk upstream defect (2.4.0, latest release; filed as "
-        "https://github.com/bsv-blockchain/py-sdk/issues/247), not a runar-py bug and "
-        "independent of finding G1: Script.from_chunks re-encodes the top-level "
-        "OP_RETURN chunk (opcode 0x6a + trailing state) as a data push, and "
-        "Spend.subscript_after_code_separator builds the BIP-143 scriptCode with "
-        "from_chunks, so bsv-sdk sighashes '<len> <state>' where the locking script "
-        "(and the node, and runar-py) has '6a <state>'. Input 0 therefore aborts at "
-        "the OP_PUSH_TX OP_CHECKSIGVERIFY under both bsv-sdk VM paths (native + "
-        "pure-python), before the hashOutputs OP_VERIFY G1 concerns is reached. "
-        "Pinned field by field in test_gk_gap_008_covenant_carveout.py (one "
-        "differing preimage byte, the OP_RETURN). With from_chunks patched to keep "
-        "the opcode, this test passes. The authoritative G1 proof is the "
-        "deterministic output-order test above."
-    ),
-    # GK-GAP-008: strict, so an XPASS fails the run instead of passing quietly;
-    # when bsv-sdk is fixed, delete this marker, the provider.py carve-out and
-    # the R2-GAP008 pins in test_gk_gap_008_covenant_carveout.py together.
-    strict=True,
-)
 def test_send_to_script_covenant_input0_validates_through_spend():
     """Strongest attempted proof: replay input 0 through bsv-sdk's Spend
     interpreter and assert the covenant OP_PUSH_TX + hashOutputs OP_VERIFY
-    passes. Skipped when bsv-sdk (the optional ScriptVM dependency) is absent;
-    xfail while the bsv-sdk scriptCode defect (see marker) holds."""
+    passes. Skipped when bsv-sdk (the optional ScriptVM dependency) is absent.
+    Needs bsv-sdk >= 2.5.0: older releases sighash the wrong scriptCode after
+    OP_RETURN (bsv-blockchain/py-sdk#247)."""
     pytest.importorskip("bsv")
     from bsv.script.spend import Spend
     from bsv.transaction import Transaction
