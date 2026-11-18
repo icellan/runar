@@ -209,11 +209,17 @@ func EcOnCurve(p Point) bool {
 
 // EcModReduce computes non-negative modular reduction: ((value % m) + m) % m.
 func EcModReduce(value, m Bigint) Bigint {
-	r := value % m
-	if r < 0 {
-		r += m
+	// D12 SECP-F1: the compiled script computes ((v tmod m) + m) tmod m
+	// (ec-codegen.ts emitEcModReduce) and aborts on m == 0 (OP_MOD by zero).
+	// Computed in big.Int so v tmod m + m cannot overflow int64.
+	if m == 0 {
+		panic("ecModReduce: modulus is zero (OP_MOD by zero aborts the script)")
 	}
-	return r
+	bm := big.NewInt(m)
+	r := new(big.Int).Rem(big.NewInt(value), bm)
+	r.Add(r, bm)
+	r.Rem(r, bm)
+	return r.Int64()
 }
 
 // EcEncodeCompressed encodes a point as a 33-byte compressed public key.
