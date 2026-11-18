@@ -83,6 +83,18 @@ cd packages/runar-java && ./gradlew test        # Run Java SDK + package tests
 cd examples/java && ./gradlew test              # Run Java contract tests (business logic + Rúnar compile check)
 ```
 
+**Fast local loop (default for fixes).** Run only what a change can break, and let CI run the full suite:
+
+```bash
+scripts/dev/affected-tests.py          # print the tests that cover the changed files (vs origin/main)
+scripts/dev/affected-tests.py --run    # run them, stop at the first failure
+scripts/dev/warm-worktree.sh status    # pool of pre-built worktrees (.worktrees/warm-N)
+scripts/dev/warm-worktree.sh claim <branch>   # reset a free one to origin/main on <branch>, rebuild incrementally
+scripts/dev/warm-worktree.sh release <warm-N>
+```
+
+Batch several fixes into one PR and watch CI. Run the full battery locally only for byte-moving codegen changes, where the golden sweep has to happen before CI (CI cannot restamp goldens); `affected-tests.py` flags those.
+
 **No build order is required — each tier's suite stands alone.** One Zig test,
 `compilers/zig/src/tests/n086_cross_tier_sighash_fixed_array.zig`, additionally shells
 out to whichever peer compilers happen to be built and asserts every one of them emits a
