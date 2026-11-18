@@ -12,9 +12,9 @@ input-0 unlocking bytes to the TS reference (which conformance/sdk-call/
 sdk-call.test.ts replays through @bsv/sdk Spend: accept, and tampered output[0]
 reject), builds the same continuation output, keeps a change output, and
 advances the state to count == 1.
-Does not prove: script execution in this tier — runar-py's MockProvider records
-every covenant input as unvalidatable (see provider.py ``_COVENANT_PUSHTX_MARKER``),
-so on-chain acceptance rests on the TS Spend replay of the identical bytes.
+Does not prove: script execution in this tier — this test asserts nothing about
+MockProvider's validation report, so on-chain acceptance rests on the TS Spend
+replay of the identical bytes.
 """
 from __future__ import annotations
 

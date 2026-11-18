@@ -13,7 +13,7 @@ from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 _BSV_SDK_HINT = (
     "MockProvider's SCRIPT-EXECUTION layer needs the upstream bsv-sdk "
     "interpreter (bsv.script.spend.Spend), which is not installed.\n"
-    "  Install it:  pip install bsv-sdk        (or: pip install 'runar[dev]')\n"
+    "  Install it:  pip install 'bsv-sdk>=2.5.0'   (or: pip install 'runar[dev]')\n"
     "runar itself stays zero-dependency at RUNTIME; bsv-sdk is a TEST "
     "dependency, and CI installs it for the packages/runar-py job "
     "(.github/workflows/ci.yml: `pip install pytest slh-dsa bsv-sdk`).\n"
@@ -86,68 +86,38 @@ _EMPTY_VALIDATION_REPORT = {
     'script_vm_available': False,
 }
 
-# The ONE tolerated failure class, and only because this tier can currently
-# validate NO Rúnar covenant at all — correct or broken alike.
-#
-# bsv-sdk (2.4.0, the latest release) sighashes the wrong scriptCode for any
-# script carrying a top-level ``OP_RETURN <data>``: ``Script.from_chunks``
-# re-encodes the OP_RETURN chunk as a data push (dropping the 0x6a), and
-# ``Spend.subscript_after_code_separator`` builds the scriptCode with it. Every
-# stateful Rúnar contract ends in ``OP_RETURN <state>``, so its covenant input
-# always aborts at the covenant's OP_CHECKSIGVERIFY, under both bsv-sdk VM
-# paths. runar-py's preimage is the node's (the real bytes); the two differ in
-# that one byte only. Pinned by the R2-GAP008 tests in
-# ``tests/test_gk_gap_008_covenant_carveout.py`` and the strict xfail in
-# ``tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend``.
-# Such an input is recorded as UNVALIDATABLE — never as validated.
-#
-# GK-GAP-008: the carve-out used to match ANY Spend error mentioning
-# OP_CHECKSIGVERIFY, so a wrong-key checkSig in any contract (stateless
-# included) was waved through whenever it compiled to OP_CHECKSIGVERIFY. It
-# is now confined to the covenant check itself: the failing opcode must be an
-# OP_CHECKSIGVERIFY in the LOCKING script whose immediately preceding chunk
-# pushes one of the fixed OP_PUSH_TX verification keys below. And an input
-# that is unvalidatable no longer counts toward non-vacuity: a transaction
-# whose every known input is unvalidatable is rejected (see
-# ``_validate_broadcast``), so value conservation alone never stands in for a
-# script check when the script layer is available.
-#
-# ``tests/test_mock_broadcast_validation.py`` pins the incompatibility so this
-# carve-out goes RED the moment bsv-sdk is fixed and can then be deleted.
-# ``tests/test_gk_gap_008_covenant_carveout.py`` pins its scope.
-_COVENANT_PUSHTX_MARKER = 'OP_CHECKSIGVERIFY'
-
-# The keys an OP_PUSH_TX covenant verifies its synthetic signature against
-# (packages/runar-compiler/src/passes/oppushtx-codegen.ts): the Any-S C=1 key
-# (ANYS_PUBKEY_C1_HEX, the default construction) and compressed G (the legacy
-# and `@bindingVariant all` constructions).
-_PUSHTX_VERIFY_KEYS = frozenset({
-    bytes.fromhex('038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218'),
-    bytes.fromhex('0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'),
-})
+# bsv-sdk releases before 2.5.0 sighash the wrong scriptCode for any script
+# carrying a top-level ``OP_RETURN <data>`` (bsv-blockchain/py-sdk#247:
+# ``Script.from_chunks`` dropped the 0x6a, and Spend builds the BIP-143
+# scriptCode with it), so they reject every stateful Rúnar covenant input.
+# MockProvider used to tolerate that as "unvalidatable"; it now validates
+# covenant inputs like any other and refuses to run under an older bsv-sdk.
+# Pinned by tests/test_gk_gap_008_covenant_carveout.py.
+_MIN_BSV_SDK = (2, 5, 0)
 
 
-def _is_covenant_pushtx_failure(message: str, locking_script) -> bool:
-    """True only when a Spend error is the OP_PUSH_TX covenant's CHECKSIGVERIFY.
+def _bsv_sdk_version() -> str | None:
+    """The installed bsv-sdk distribution version, or None if unreadable."""
+    try:
+        from importlib.metadata import version
+        return version('bsv-sdk')
+    except Exception:
+        return None
 
-    bsv-sdk's ``script_evaluation_error`` reports ``Context`` and ``Program
-    counter`` (the index of the failing chunk). The failure qualifies only if
-    it happened in the locking script, at an OP_CHECKSIGVERIFY chunk, right
-    after a push of one of ``_PUSHTX_VERIFY_KEYS``.
-    """
+
+def _require_fixed_bsv_sdk() -> None:
+    """Raise unless the installed bsv-sdk is >= 2.5.0 (py-sdk#247 fixed)."""
     import re
 
-    if _COVENANT_PUSHTX_MARKER not in message:
-        return False
-    ctx = re.search(r'Context: (\w+)', message)
-    pc = re.search(r'Program counter: (\d+)', message)
-    if ctx is None or pc is None or ctx.group(1) != 'LockingScript':
-        return False
-    i = int(pc.group(1))
-    chunks = locking_script.chunks
-    if i < 1 or i >= len(chunks) or chunks[i].op != b'\xad':
-        return False
-    return chunks[i - 1].data in _PUSHTX_VERIFY_KEYS
+    v = _bsv_sdk_version()
+    m = re.match(r'(\d+)\.(\d+)\.(\d+)', v or '')
+    if m is None or tuple(int(x) for x in m.groups()) < _MIN_BSV_SDK:
+        raise BroadcastValidationUnavailable(
+            f'MockProvider needs bsv-sdk >= 2.5.0 to validate broadcasts; found '
+            f'{v or "an unreadable version"}. Older releases sighash the wrong '
+            'scriptCode after OP_RETURN (bsv-blockchain/py-sdk#247) and reject '
+            "every stateful Rúnar covenant input. Run: pip install -U 'bsv-sdk>=2.5.0'"
+        )
 
 
 class MockProvider(Provider):
@@ -345,8 +315,8 @@ class MockProvider(Provider):
         # --- layer 2: script execution (needs bsv-sdk) -----------------------
         parsed = None
         validated = 0
-        unvalidatable = 0
         if script_vm:
+            _require_fixed_bsv_sdk()
             from bsv.script.script import Script as _BsvScript
             from bsv.script.spend import Spend as _BsvSpend
             from bsv.transaction import Transaction as _BsvTransaction
@@ -375,9 +345,6 @@ class MockProvider(Provider):
                     })
                     ok = spend.validate()
                 except Exception as exc:
-                    if _is_covenant_pushtx_failure(str(exc), locking):
-                        unvalidatable += 1
-                        continue
                     raise BroadcastRejected(
                         f'MockProvider: refusing to broadcast invalid transaction: '
                         f'input {i}: script REJECTED by bsv-sdk Spend: {exc}'
@@ -392,7 +359,8 @@ class MockProvider(Provider):
         self._last_report = {
             'validated': validated,
             'unknown': unknown,
-            'unvalidatable': unvalidatable,
+            # Always 0 since bsv-sdk 2.5.0: kept so the report keeps its shape.
+            'unvalidatable': 0,
             'total': len(structural['inputs']),
             'value_conserved': all_inputs_known,
             'script_vm_available': script_vm,
@@ -410,18 +378,6 @@ class MockProvider(Provider):
                 'the spent outpoints via add_utxo/add_contract_utxo/add_transaction, '
                 'or use MockProvider.always_ack() (allowlisted) if this test '
                 'genuinely needs always-ack'
-            )
-
-        # GK-GAP-008: with the script layer available, at least one known input
-        # must actually have executed. Unvalidatable inputs are not checks, and
-        # value conservation is not a substitute for one: a lone covenant input
-        # used to pass here on `outputs <= inputs` alone.
-        if script_vm and validated == 0:
-            raise BroadcastRejected(
-                'MockProvider: refusing to broadcast — no input was validated: '
-                f'{unvalidatable} known input(s) are unvalidatable OP_PUSH_TX '
-                'covenant inputs (see _COVENANT_PUSHTX_MARKER) and none executed '
-                'for real, so script validation would pass vacuously'
             )
 
         if all_inputs_known:

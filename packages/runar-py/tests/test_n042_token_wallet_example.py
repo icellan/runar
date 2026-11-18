@@ -3,13 +3,12 @@ fixture inlined in the F-045 test. This compiles
 ``examples/ts/token-wallet-naive-INSECURE/WalletToken.runar.ts`` with the
 Python compiler and runs ``transfer`` / ``merge`` against it.
 
-Oracle: the F-045 one, reused. bsv-sdk's ``Spend`` cannot replay a Rúnar
-OP_PUSH_TX covenant in this tier, so MockProvider's default broadcast
-validation records the token inputs as unvalidatable (it still executes the
-P2PKH funding input and checks value conservation). Each token-input
-signature must therefore have been computed over a tx whose BIP-143 fields
-equal the broadcast tx's. Script execution of this same example is proven by
-the TS and Go N-042 tests.
+Oracle: the F-045 one, reused. Each token-input signature must have been
+computed over a tx whose BIP-143 fields equal the broadcast tx's. MockProvider's
+default broadcast validation runs every known input through bsv-sdk's
+``Spend`` (covenant inputs too, since bsv-sdk 2.5.0 fixed py-sdk#247), but this
+test asserts nothing about which inputs it executed. Script execution of this
+same example is proven by the TS and Go N-042 tests.
 
 Proves: the shipped example compiles in the Python tier; transfer and merge
 sign the tx they broadcast; merge spends both token outpoints once into a

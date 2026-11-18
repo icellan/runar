@@ -1,37 +1,35 @@
-"""GK-GAP-008: MockProvider's OP_PUSH_TX carve-out was far wider than disclosed.
+"""GK-GAP-008: MockProvider validates OP_PUSH_TX covenant inputs like any other.
 
-``_validate_broadcast`` bucketed ANY ``Spend`` exception whose text contained
-``OP_CHECKSIGVERIFY`` as "unvalidatable" and carried on. That covers a plain
-wrong-key ``checkSig`` in any contract (stateless included) whenever the check
-is compiled as ``OP_CHECKSIGVERIFY``. And non-vacuity was satisfied by
-``known_inputs > 0`` alone, so a SINGLE-input transaction spending such a
-contract UTXO was accepted as long as the outputs did not exceed the input —
-no other validated input needed.
+History. ``_validate_broadcast`` used to bucket a failing OP_PUSH_TX covenant
+check as "unvalidatable" instead of rejecting it, because bsv-sdk <= 2.4.0
+sighashed the wrong scriptCode for any script carrying a top-level
+``OP_RETURN <data>``: ``Script.from_chunks`` re-encoded the OP_RETURN chunk as
+a data push (dropping the 0x6a) and ``Spend.subscript_after_code_separator``
+built the scriptCode with it, so no stateful Rúnar covenant input could be
+validated (bsv-blockchain/py-sdk#247, R2-GAP008). The first carve-out matched
+any OP_CHECKSIGVERIFY failure (GK-GAP-008); it was later narrowed to the
+covenant check. bsv-sdk 2.5.0 fixed #247, the carve-out is gone, and
+MockProvider refuses to validate with an older bsv-sdk.
 
-The carve-out exists for one thing only: the OP_PUSH_TX covenant check, whose
-``OP_CHECKSIGVERIFY`` verifies against a fixed public key (compressed G, or the
-Any-S C=1 key) pushed immediately before it. bsv-sdk recomputes a different
-sighash than runar-py signs (see the strict xfail in
-``test_g1_raw_outputs_spend.py``), so those inputs cannot be validated here.
-The cause is an upstream bsv-sdk defect, pinned by the R2-GAP008 tests at the
-end of this module.
-
-Proves: a wrong signature at a CHECKSIGVERIFY against any other key is a
-rejection, alone or next to a valid input; a covenant-shaped failure is still
-recorded as unvalidatable next to a validated input; and a transaction whose
-every known input is unvalidatable is rejected as validating nothing.
-R2-GAP008 pins prove: bsv-sdk's Spend sighashes a scriptCode whose OP_RETURN
-was re-encoded as a push (rejecting a signature over the real bytes, on every
-VM path available); and for a real Counter.inc call runar-py's preimage equals
-bsv-sdk's in every field but that one byte, with runar-py's scriptCode being
-the locking script's real bytes after OP_CODESEPARATOR.
+Proves: a wrong signature at an OP_CHECKSIGVERIFY is a rejection whatever key
+it checks against, including the fixed OP_PUSH_TX keys, alone or next to a
+valid input; the installed bsv-sdk round-trips a top-level OP_RETURN through
+``from_chunks`` and accepts a signature over the real scriptCode on every VM
+path present; for a real Counter.inc call runar-py's OP_PUSH_TX preimage is
+byte-identical to the one bsv-sdk's Spend recomputes, the covenant input is
+counted as validated, and a call whose covenant preimage is tampered with is
+rejected at input 0; MockProvider refuses to validate under a bsv-sdk older
+than 2.5.0 or of unknown version, in CI and out of it.
 Does not prove: that a node accepts runar-py's preimage (that is the regtest
 integration suite's job), or anything about the other six SDKs.
 """
 
+import json
+
 import pytest
 
-from runar.sdk.errors import BroadcastRejected
+import runar.sdk.provider as provider_mod
+from runar.sdk.errors import BroadcastRejected, BroadcastValidationUnavailable
 from runar.sdk.provider import MockProvider, _bsv_sdk_available
 from runar.sdk.types import Utxo
 
@@ -85,16 +83,23 @@ def _seed(p: MockProvider, txid: str, sats: int, script: str) -> None:
     p.add_utxo('addr', Utxo(txid=txid, output_index=0, satoshis=sats, script=script))
 
 
-def test_single_input_wrong_sig_at_user_checksigverify_is_rejected():
+ALL_KEYS = pytest.mark.parametrize(
+    'pk', [USER_PK, ANYS_C1_PK, G_PK], ids=['user', 'anys-c1', 'generator'],
+)
+
+
+@ALL_KEYS
+def test_single_input_wrong_sig_at_checksigverify_is_rejected(pk):
     p = MockProvider()
-    _seed(p, 'a1' * 32, 10_000, _checksigverify_script(USER_PK))
+    _seed(p, 'a1' * 32, 10_000, _checksigverify_script(pk))
     with pytest.raises(BroadcastRejected, match='input 0'):
         p.broadcast(_tx([('a1' * 32, _push(WRONG_SIG))], [(9_000, ANYONE_CAN_SPEND)]))
 
 
-def test_wrong_sig_at_user_checksigverify_is_rejected_next_to_a_valid_input():
+@ALL_KEYS
+def test_wrong_sig_at_checksigverify_is_rejected_next_to_a_valid_input(pk):
     p = MockProvider()
-    _seed(p, 'a2' * 32, 10_000, _checksigverify_script(USER_PK))
+    _seed(p, 'a2' * 32, 10_000, _checksigverify_script(pk))
     _seed(p, 'a3' * 32, 10_000, ANYONE_CAN_SPEND)
     with pytest.raises(BroadcastRejected, match='input 0'):
         p.broadcast(_tx(
@@ -103,59 +108,13 @@ def test_wrong_sig_at_user_checksigverify_is_rejected_next_to_a_valid_input():
         ))
 
 
-@pytest.mark.parametrize('pk', [ANYS_C1_PK, G_PK], ids=['anys-c1', 'generator'])
-def test_covenant_shaped_failure_next_to_a_validated_input_is_still_unvalidatable(pk):
-    p = MockProvider()
-    _seed(p, 'b1' * 32, 10_000, _checksigverify_script(pk))
-    _seed(p, 'b2' * 32, 10_000, ANYONE_CAN_SPEND)
-    p.broadcast(_tx([('b1' * 32, _push(WRONG_SIG)), ('b2' * 32, '')], [(19_000, ANYONE_CAN_SPEND)]))
-    report = p.last_validation_report
-    assert report['unvalidatable'] == 1
-    assert report['validated'] == 1
+# --- the installed bsv-sdk has the py-sdk#247 fix -----------------------------
 
+def test_bsv_sdk_spend_sighashes_the_real_script_code_after_op_return():
+    """No Rúnar code: ``<pk> OP_CHECKSIG OP_RETURN <8 bytes>``.
 
-def test_a_tx_whose_every_known_input_is_unvalidatable_is_rejected():
-    p = MockProvider()
-    _seed(p, 'b3' * 32, 10_000, _checksigverify_script(ANYS_C1_PK))
-    with pytest.raises(BroadcastRejected, match='no input was validated'):
-        p.broadcast(_tx([('b3' * 32, _push(WRONG_SIG))], [(9_000, ANYONE_CAN_SPEND)]))
-
-
-# --- R2-GAP008: root cause of the incompatibility the carve-out tolerates ------
-#
-# bsv-sdk (2.4.0, the latest release) parses a top-level OP_RETURN as ONE chunk
-# whose ``data`` is every byte after it, and ``Script.from_chunks`` re-encodes
-# any chunk that has ``data`` as a data PUSH, dropping the 0x6a opcode.
-# ``Spend.subscript_after_code_separator`` builds the BIP-143 scriptCode with
-# ``from_chunks``, so for a script carrying ``OP_RETURN <state>`` (every
-# stateful Rúnar contract) bsv-sdk sighashes ``... <len> <state>`` instead of
-# the locking script's real bytes ``... 6a <state>``. The node, and runar-py,
-# use the real bytes. These two tests pin that, and fail once bsv-sdk is fixed:
-# then delete the strict xfail in test_g1_raw_outputs_spend.py, the
-# carve-out in runar/sdk/provider.py, and these pins.
-
-COUNTER_SRC = '''from runar import StatefulSmartContract, Bigint, public
-
-
-class Counter(StatefulSmartContract):
-    count: Bigint
-
-    def __init__(self, count: Bigint):
-        super().__init__(count)
-        self.count = count
-
-    @public
-    def inc(self):
-        self.count = self.count + 1
-'''
-
-
-def test_bsv_sdk_spend_sighashes_a_reencoded_script_code_after_op_return():
-    """Upstream defect, no Rúnar code involved: ``<pk> OP_CHECKSIG OP_RETURN <8 bytes>``.
-
-    A signature over the TRUE scriptCode (the raw locking-script bytes) is
-    rejected; one over the ``from_chunks``-re-encoded scriptCode is accepted,
-    under every bsv-sdk VM path available here.
+    ``from_chunks`` keeps the 0x6a, and Spend accepts a signature over the
+    locking script's real bytes, under every bsv-sdk VM path available here.
     """
     import importlib
 
@@ -173,55 +132,54 @@ def test_bsv_sdk_spend_sighashes_a_reencoded_script_code_after_op_return():
     state = bytes.fromhex('0500000000000000')
     raw = bytes([len(pk)]) + pk + b'\xac' + b'\x6a' + state
 
-    reencoded = Script.from_chunks(Script(raw).chunks).serialize()
-    # The opcode byte 0x6a is replaced by a push length (8): same size, one byte off.
-    assert reencoded == raw[:-len(state) - 1] + bytes([len(state)]) + state
+    assert Script.from_chunks(Script(raw).chunks).serialize() == raw
 
     src_txid = 'aa' * 32
     outputs = [TransactionOutput(locking_script=Script('51'), satoshis=900)]
 
-    def sig_over(script_code: bytes) -> bytes:
-        inp = TransactionInput(source_txid=src_txid, source_output_index=0,
-                               sequence=0xFFFFFFFF, sighash=SIGHASH.ALL_FORKID)
-        inp.locking_script = Script(script_code)
-        inp.satoshis = 1000
-        return key.sign(tx_preimage(0, [inp], outputs, 1, 0)) + bytes([SIGHASH.ALL_FORKID])
+    inp = TransactionInput(source_txid=src_txid, source_output_index=0,
+                           sequence=0xFFFFFFFF, sighash=SIGHASH.ALL_FORKID)
+    inp.locking_script = Script(raw)
+    inp.satoshis = 1000
+    sig = key.sign(tx_preimage(0, [inp], outputs, 1, 0)) + bytes([SIGHASH.ALL_FORKID])
 
-    def spend(sig: bytes):
-        return spend_mod.Spend({
-            'sourceTXID': src_txid, 'sourceOutputIndex': 0, 'sourceSatoshis': 1000,
-            'lockingScript': Script(raw), 'transactionVersion': 1, 'otherInputs': [],
-            'outputs': outputs, 'inputIndex': 0,
-            'unlockingScript': Script(bytes([len(sig)]) + sig),
-            'inputSequence': 0xFFFFFFFF, 'lockTime': 0,
-        })
-
-    true_sig, reencoded_sig = sig_over(raw), sig_over(reencoded)
     vms = [False, True] if NATIVE_AVAILABLE else [False]
     for native in vms:
         original = spend_mod._USE_NATIVE_VM
         spend_mod._USE_NATIVE_VM = native
         try:
-            with pytest.raises(RuntimeError, match='OP_CHECKSIG failed to verify the signature'):
-                spend(true_sig).validate()
-            assert spend(reencoded_sig).validate() is True
+            assert spend_mod.Spend({
+                'sourceTXID': src_txid, 'sourceOutputIndex': 0, 'sourceSatoshis': 1000,
+                'lockingScript': Script(raw), 'transactionVersion': 1, 'otherInputs': [],
+                'outputs': outputs, 'inputIndex': 0,
+                'unlockingScript': Script(bytes([len(sig)]) + sig),
+                'inputSequence': 0xFFFFFFFF, 'lockTime': 0,
+            }).validate() is True
         finally:
             spend_mod._USE_NATIVE_VM = original
 
 
-def test_runar_py_covenant_preimage_differs_from_bsv_sdk_only_at_the_op_return_byte(monkeypatch):
-    """The real Counter.inc call: runar-py's OP_PUSH_TX preimage and the one
-    bsv-sdk's Spend recomputes for the same input agree on every BIP-143 field
-    except ONE byte of scriptCode, the OP_RETURN before the state. runar-py's
-    scriptCode is the locking script's real bytes after OP_CODESEPARATOR (what
-    the node signs); bsv-sdk's has the state's push length there instead.
-    """
-    import importlib
-    import json
+# --- a real covenant spend ----------------------------------------------------
 
+COUNTER_SRC = '''from runar import StatefulSmartContract, Bigint, public
+
+
+class Counter(StatefulSmartContract):
+    count: Bigint
+
+    def __init__(self, count: Bigint):
+        super().__init__(count)
+        self.count = count
+
+    @public
+    def inc(self):
+        self.count = self.count + 1
+'''
+
+
+def _deployed_counter():
     from runar_compiler import compiler
 
-    import runar.sdk.contract as contract_mod
     from runar.sdk.contract import RunarContract
     from runar.sdk.deployment import build_p2pkh_script
     from runar.sdk.local_signer import LocalSigner
@@ -239,15 +197,35 @@ def test_runar_py_covenant_preimage_differs_from_bsv_sdk_only_at_the_op_return_b
     ))
     c = RunarContract(artifact, [5])
     c.deploy(p, signer, DeployOptions(satoshis=1_000))
-    contract_script = bytes.fromhex(c._current_utxo.script)
+    return c, p, signer
+
+
+def _capture_ours(monkeypatch) -> list:
+    """Record every OP_PUSH_TX preimage runar-py computes, with its codesep index."""
+    import runar.sdk.contract as contract_mod
 
     ours: list[tuple[bytes, int]] = []
     real_compute = contract_mod.compute_op_push_tx_preimage
 
-    def capture_ours(tx, idx, subscript, sats, code_sep_idx=-1, *rest):
+    def capture(tx, idx, subscript, sats, code_sep_idx=-1, *rest):
         pre = real_compute(tx, idx, subscript, sats, code_sep_idx, *rest)
         ours.append((bytes.fromhex(pre), code_sep_idx))
         return pre
+
+    monkeypatch.setattr(contract_mod, 'compute_op_push_tx_preimage', capture)
+    return ours
+
+
+def test_covenant_input_is_validated_and_its_preimage_matches_bsv_sdk(monkeypatch):
+    """The real Counter.inc call: runar-py's OP_PUSH_TX preimage equals the one
+    bsv-sdk's Spend recomputes for the covenant input byte for byte, its
+    scriptCode is the locking script's real bytes after OP_CODESEPARATOR, and
+    MockProvider counts the covenant input as validated."""
+    import importlib
+
+    c, p, signer = _deployed_counter()
+    contract_script = bytes.fromhex(c._current_utxo.script)
+    ours = _capture_ours(monkeypatch)
 
     spend_mod = importlib.import_module('bsv.script.spend')
     theirs: list[bytes] = []
@@ -258,31 +236,74 @@ def test_runar_py_covenant_preimage_differs_from_bsv_sdk_only_at_the_op_return_b
         theirs.append(pre)
         return pre
 
-    monkeypatch.setattr(contract_mod, 'compute_op_push_tx_preimage', capture_ours)
     monkeypatch.setattr(spend_mod, 'tx_preimage', capture_theirs)
     # Only the pure-Python VM exposes the preimage it computes.
     monkeypatch.setattr(spend_mod, '_USE_NATIVE_VM', False)
 
     c.call('inc', [], p, signer)
-    assert p.last_validation_report['unvalidatable'] == 1, p.last_validation_report
+    report = p.last_validation_report
+    assert report['unvalidatable'] == 0, report
+    assert report['unknown'] == 0, report
+    # Every input ran through Spend: the covenant input AND the funding input.
+    assert report['validated'] == report['total'] == 2, report
 
     final, code_sep_idx = ours[-1]
     # bsv-sdk's preimage for the SAME input: same outpoint (bytes 68..104).
     same_input = [t for t in theirs if t[68:104] == final[68:104]]
     assert len(same_input) == 1, f'{len(theirs)} bsv-sdk preimages, {len(same_input)} for the covenant input'
-    theirs_final = same_input[0]
+    assert same_input[0] == final
 
-    # runar-py's scriptCode is exactly the node's: the real bytes after OP_CODESEPARATOR.
     script_code = contract_script[code_sep_idx + 1:]
     assert code_sep_idx >= 0
     assert final[104:104 + 3] == b'\xfd' + len(script_code).to_bytes(2, 'little')
     assert final[107:107 + len(script_code)] == script_code
 
-    assert len(theirs_final) == len(final)
-    diff = [i for i in range(len(final)) if final[i] != theirs_final[i]]
-    assert len(diff) == 1, f'expected one differing byte, got {len(diff)} at {diff[:8]}'
-    i = diff[0]
-    state_len = (len(final) - 52) - (i + 1)  # 52 = amount..sighashType trailer
-    assert final[i] == 0x6A
-    assert theirs_final[i] == state_len
-    assert contract_script.endswith(b'\x6a' + final[i + 1:len(final) - 52])
+
+def test_tampered_covenant_preimage_is_rejected_at_input_0(monkeypatch):
+    """Flip one byte of the OP_PUSH_TX preimage inside input 0's unlocking
+    script. Only the covenant input changes (BIP-143 does not sign other
+    inputs' scriptSigs, so the P2PKH funding input stays valid), and
+    MockProvider must reject the call at input 0."""
+    c, p, signer = _deployed_counter()
+    ours = _capture_ours(monkeypatch)
+
+    c.call('inc', [], p, signer)
+    good = p.get_broadcasted_txs()[-1]
+    preimage = ours[-1][0].hex()
+    assert good.count(preimage) == 1
+
+    # Flip a byte inside hashPrevouts (preimage bytes 4..36).
+    at = good.index(preimage) + 2 * 10
+    flipped = f'{int(good[at:at + 2], 16) ^ 0x01:02x}'
+    tampered = good[:at] + flipped + good[at + 2:]
+    assert tampered != good and len(tampered) == len(good)
+
+    with pytest.raises(BroadcastRejected, match='input 0'):
+        p.broadcast(tampered)
+
+
+# --- fail closed on a bsv-sdk without the fix --------------------------------
+
+@pytest.mark.parametrize('version', ['2.4.0', '1.0.0', '2.4.99', None, 'garbage'])
+@pytest.mark.parametrize('ci', [True, False], ids=['ci', 'local'])
+def test_validation_refuses_a_bsv_sdk_older_than_2_5_0(monkeypatch, version, ci):
+    if ci:
+        monkeypatch.setenv('CI', '1')
+    else:
+        monkeypatch.delenv('CI', raising=False)
+    monkeypatch.setattr(provider_mod, '_bsv_sdk_version', lambda: version)
+
+    p = MockProvider()
+    _seed(p, 'd1' * 32, 10_000, ANYONE_CAN_SPEND)
+    with pytest.raises(BroadcastValidationUnavailable, match=r'2\.5\.0'):
+        p.broadcast(_tx([('d1' * 32, '')], [(9_000, ANYONE_CAN_SPEND)]))
+    assert p.get_broadcasted_txs() == []
+
+
+@pytest.mark.parametrize('version', ['2.5.0', '2.5.1', '2.10.0', '3.0.0'])
+def test_validation_accepts_bsv_sdk_2_5_0_and_later(monkeypatch, version):
+    monkeypatch.setattr(provider_mod, '_bsv_sdk_version', lambda: version)
+    p = MockProvider()
+    _seed(p, 'd2' * 32, 10_000, ANYONE_CAN_SPEND)
+    p.broadcast(_tx([('d2' * 32, '')], [(9_000, ANYONE_CAN_SPEND)]))
+    assert p.last_validated_input_count == 1
