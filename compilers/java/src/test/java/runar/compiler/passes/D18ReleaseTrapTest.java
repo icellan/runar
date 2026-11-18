@@ -125,4 +125,30 @@ class D18ReleaseTrapTest {
         assertFalse(r.diag().contains("Exception in thread"), r.diag());
         assertTrue(r.diag().contains(error), r.diag());
     }
+
+    /**
+     * Per path: the TS ANF of terminal-branch-writes-nothing with an update_prop
+     * added to its raw-output {@code if} arm (the IR ir-release-trap.test.ts hand-builds).
+     */
+    @Test
+    void irPathRefusesWriteOnRawBranch() throws Exception {
+        Path ir = repo().resolve("compilers/java/src/test/java/runar/compiler/passes/d18_write_on_raw_branch.ir.json");
+        String error = null;
+        for (Map<String, Object> c : list(corpus("dropped-continuation-cases.json"), "refuse")) {
+            if ("write-on-raw-branch-sibling-add-output".equals(c.get("name"))) error = (String) c.get("error");
+        }
+        Result r = run("--ir", ir.toString(), "--hex");
+        assertNotEquals(0, r.exit(), "accepted the write-on-raw-branch IR: " + r.stdout());
+        assertFalse(r.diag().contains("Exception in thread"), r.diag());
+        assertTrue(r.diag().contains(error), r.diag());
+    }
+
+    @Test
+    void irPathAcceptsTerminalBranchWritesNothing() throws Exception {
+        Path ir = repo().resolve(
+            "compilers/java/src/test/java/runar/compiler/passes/d18_terminal_branch_writes_nothing.ir.json");
+        Result r = run("--ir", ir.toString(), "--hex");
+        assertEquals(0, r.exit(), r.diag());
+        assertFalse(r.stdout().isBlank());
+    }
 }

@@ -47,9 +47,9 @@ import runar.compiler.ir.ast.Visibility;
  * continuation predicates {@link AnfLower} injects the continuation from
  * ({@code methodMutatesState}, {@code methodHasAddOutput} = addOutput OR
  * addRawOutput, {@code methodHasAddDataOutput}). AnfLower is wire-format gated
- * and its AST descent helpers are private, so the one new predicate (calls
- * {@code addOutput} itself) lives here with a copy of that descent and of
- * {@code exprHasAddOutput}'s callee matching, restricted to addOutput.
+ * and its AST descent helpers are private, so D18's per-path analysis
+ * ({@link SourcePaths}) lives here, with {@code exprHasAddOutput}'s callee
+ * matching restricted to addOutput.
  */
 public final class ContinuationRules {
 
@@ -63,18 +63,219 @@ public final class ContinuationRules {
 
     /** D18: the shared error text. */
     public static String droppedContinuationMessage(String method) {
-        return "method '" + method + "' writes contract state but emits no state continuation: it calls "
-            + "addRawOutput() without addOutput(), and a method that declares its own outputs gets no "
-            + "auto-injected continuation, so the state write would be lost and the contract's satoshis "
-            + "would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or "
-            + "stop writing state in a method meant to end the contract";
+        return "method '" + method + "' writes contract state on a path that reaches no addOutput(): a method "
+            + "that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, "
+            + "so on that path the state write would be lost and the contract's satoshis would leave with "
+            + "the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop "
+            + "writing state on a path meant to end the contract";
     }
 
-    /** D18: the method writes state and only raw outputs replace its continuation. */
+    /**
+     * D18, per path: the method declares a state output somewhere (any
+     * addOutput / addRawOutput, so it gets no auto-continuation) and some path
+     * through it writes state without reaching an addOutput.
+     */
     static boolean dropsContinuation(MethodNode m, ContractNode contract) {
-        return mutatesState(m, contract)
-            && AnfLower.methodHasAddOutput(m, contract)
-            && !callsAddOutput(m, contract);
+        if (!AnfLower.methodHasAddOutput(m, contract)) return false;
+        SourcePaths p = new SourcePaths(contract);
+        p.prepare(m.body());
+        return dropped(p.exits(m.body()));
+    }
+
+    // ------------------------------------------------------------------
+    // Path states
+    // ------------------------------------------------------------------
+    //
+    // A path state is two bits, W (state written) and A (addOutput reached);
+    // a set of the four possible states is a 4-bit mask (bit x set iff state x
+    // is live). Every call in an expression runs; if unions its arms; a loop
+    // unions skipping it; a private helper call composes the caller's states
+    // with the helper's exit states (fallthrough + return).
+
+    static final int W = 1;
+    static final int A = 2;
+    /** The single fresh path {0}. */
+    static final int ZERO = 1;
+
+    /** Every live state x becomes x | bits. */
+    static int orAll(int states, int bits) {
+        int out = 0;
+        for (int x = 0; x < 4; x++) if ((states >> x & 1) != 0) out |= 1 << (x | bits);
+        return out;
+    }
+
+    /** {x | y : x in states, y in exits}. */
+    static int compose(int states, int exits) {
+        int out = 0;
+        for (int y = 0; y < 4; y++) if ((exits >> y & 1) != 0) out |= orAll(states, y);
+        return out;
+    }
+
+    /** Some path wrote state (W) and reached no addOutput (not A): state 1. */
+    static boolean dropped(int states) {
+        return (states & (1 << W)) != 0;
+    }
+
+    /** Port of continuation-rules.ts SourcePaths over this tier's AST. */
+    private static final class SourcePaths {
+        private record Flow(int live, int returned) {}
+
+        private final ContractNode contract;
+        private final Set<String> mutable = new HashSet<>();
+        private final Map<String, Integer> exits = new HashMap<>();
+        /** Non-null while collecting the helpers a body calls whose exits are unknown. */
+        private List<MethodNode> missing;
+
+        SourcePaths(ContractNode contract) {
+            this.contract = contract;
+            for (PropertyNode p : contract.properties()) if (!p.readonly()) mutable.add(p.name());
+        }
+
+        /** Exit states (fallthrough and return) of a body entered with a fresh path. */
+        int exits(List<Statement> body) {
+            Flow f = stmts(body, ZERO);
+            return f.live() | f.returned();
+        }
+
+        /**
+         * Compute the exits of every helper reachable from {@code body},
+         * bottom-up by an explicit post-order over the call graph (N-264: no
+         * host recursion across helper chains). A helper on the open path (a
+         * cycle; the validator refuses recursion) stays unresolved and
+         * contributes {0}.
+         */
+        void prepare(List<Statement> body) {
+            record Frame(MethodNode helper, List<Statement> body) {}
+            Set<String> open = new HashSet<>();
+            ArrayDeque<Frame> stack = new ArrayDeque<>();
+            stack.push(new Frame(null, body));
+            while (!stack.isEmpty()) {
+                Frame top = stack.peek();
+                MethodNode next = null;
+                for (MethodNode m : unresolved(top.body())) {
+                    if (!open.contains(m.name())) {
+                        next = m;
+                        break;
+                    }
+                }
+                if (next != null) {
+                    open.add(next.name());
+                    stack.push(new Frame(next, next.body()));
+                } else {
+                    stack.pop();
+                    if (top.helper() != null) {
+                        exits.put(top.helper().name(), exits(top.helper().body()));
+                        open.remove(top.helper().name());
+                    }
+                }
+            }
+        }
+
+        private List<MethodNode> unresolved(List<Statement> body) {
+            missing = new ArrayList<>();
+            try {
+                exits(body);
+                return missing;
+            } finally {
+                missing = null;
+            }
+        }
+
+        private Flow stmts(List<Statement> list, int states) {
+            int live = states;
+            int returned = 0;
+            if (list == null) return new Flow(live, 0);
+            for (Statement st : list) {
+                if (live == 0) break;
+                Flow f = stmt(st, live);
+                returned |= f.returned();
+                live = f.live();
+            }
+            return new Flow(live, returned);
+        }
+
+        private Flow stmt(Statement st, int states) {
+            if (st instanceof AssignmentStatement a) {
+                int s = expr(a.value(), expr(a.target(), states));
+                if (writesMutable(a.target())) s = orAll(s, W);
+                return new Flow(s, 0);
+            }
+            if (st instanceof ExpressionStatement es) return new Flow(expr(es.expression(), states), 0);
+            if (st instanceof VariableDeclStatement vd) return new Flow(expr(vd.init(), states), 0);
+            if (st instanceof ReturnStatement r) {
+                return new Flow(0, r.value() != null ? expr(r.value(), states) : states);
+            }
+            if (st instanceof IfStatement i) {
+                int c = expr(i.condition(), states);
+                Flow t = stmts(i.thenBody(), c);
+                Flow e = i.elseBody() != null ? stmts(i.elseBody(), c) : new Flow(c, 0);
+                return new Flow(t.live() | e.live(), t.returned() | e.returned());
+            }
+            if (st instanceof ForStatement f) {
+                Flow init = f.init() != null ? stmt(f.init(), states) : new Flow(states, 0);
+                int c = expr(f.condition(), init.live());
+                Flow body = stmts(f.body(), c);
+                Flow upd = f.update() != null ? stmt(f.update(), body.live()) : new Flow(body.live(), 0);
+                return new Flow(c | upd.live(), init.returned() | body.returned() | upd.returned());
+            }
+            return new Flow(states, 0);
+        }
+
+        private boolean writesMutable(Expression target) {
+            Expression t = target;
+            while (t instanceof IndexAccessExpr ia) t = ia.object();
+            return t instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
+        }
+
+        /** Every call in {@code e} runs, in evaluation order. */
+        private int expr(Expression e, int states) {
+            if (e == null) return states;
+            if (e instanceof IncrementExpr ie) {
+                int s = expr(ie.operand(), states);
+                return writesMutable(ie.operand()) ? orAll(s, W) : s;
+            }
+            if (e instanceof DecrementExpr de) {
+                int s = expr(de.operand(), states);
+                return writesMutable(de.operand()) ? orAll(s, W) : s;
+            }
+            if (e instanceof CallExpr call) {
+                int s = states;
+                if (call.callee() != null && !(call.callee() instanceof Identifier)) s = expr(call.callee(), s);
+                for (Expression a : call.args()) s = expr(a, s);
+                if (isAddOutputCallee(call.callee())) return orAll(s, A);
+                MethodNode helper = AnfLower.lookupPrivateMethod(contract, calleeName(call.callee()));
+                if (helper == null) return s;
+                Integer ex = exits.get(helper.name());
+                if (ex == null) {
+                    if (missing != null) missing.add(helper);
+                    ex = ZERO;
+                }
+                return compose(s, ex);
+            }
+            if (e instanceof BinaryExpr b) return expr(b.right(), expr(b.left(), states));
+            if (e instanceof UnaryExpr u) return expr(u.operand(), states);
+            if (e instanceof TernaryExpr t) {
+                int c = expr(t.condition(), states);
+                return expr(t.consequent(), c) | expr(t.alternate(), c);
+            }
+            if (e instanceof IndexAccessExpr ia) return expr(ia.index(), expr(ia.object(), states));
+            if (e instanceof MemberExpr me) return expr(me.object(), states);
+            if (e instanceof ArrayLiteralExpr al) {
+                int s = states;
+                for (Expression el : al.elements()) s = expr(el, s);
+                return s;
+            }
+            return states;
+        }
+
+        /** {@code AnfLower.exprHasAddOutput}'s callee forms, addOutput only. */
+        private static boolean isAddOutputCallee(Expression callee) {
+            if (callee instanceof PropertyAccessExpr pa && pa.property().equals("addOutput")) return true;
+            return callee instanceof MemberExpr me
+                && me.object() instanceof Identifier id
+                && "this".equals(id.name())
+                && me.property().equals("addOutput");
+        }
     }
 
     /** #199: the contract-level warning text, or null when it does not apply. */
@@ -156,41 +357,8 @@ public final class ContinuationRules {
     }
 
     // ------------------------------------------------------------------
-    // addOutput-only walk (mirrors AnfLower.exprHasAddOutput)
+    // AST descent shared by the element-write walk
     // ------------------------------------------------------------------
-
-    /** Calls {@code this.addOutput(...)} itself, directly or through a private helper. */
-    static boolean callsAddOutput(MethodNode m, ContractNode contract) {
-        Set<String> visited = new HashSet<>();
-        ArrayDeque<List<Statement>> pending = new ArrayDeque<>();
-        for (List<Statement> next = m.body(); next != null; next = pending.poll()) {
-            for (Statement s : next) if (stmt(s, contract, visited, pending)) return true;
-        }
-        return false;
-    }
-
-    private static boolean stmt(Statement s, ContractNode c, Set<String> v, ArrayDeque<List<Statement>> q) {
-        for (Expression e : statementExpressions(s)) if (expr(e, c, v, q)) return true;
-        for (Statement inner : childStatements(s)) if (stmt(inner, c, v, q)) return true;
-        return false;
-    }
-
-    private static boolean expr(Expression e, ContractNode c, Set<String> v, ArrayDeque<List<Statement>> q) {
-        if (e == null) return false;
-        if (e instanceof CallExpr call) {
-            if (call.callee() instanceof PropertyAccessExpr pa && pa.property().equals("addOutput")) return true;
-            if (call.callee() instanceof MemberExpr me
-                && me.object() instanceof Identifier id
-                && "this".equals(id.name())
-                && me.property().equals("addOutput")) {
-                return true;
-            }
-            MethodNode target = AnfLower.lookupPrivateMethod(c, calleeName(call.callee()));
-            if (target != null && v.add(target.name())) q.add(target.body());
-        }
-        for (Expression child : childExpressions(e)) if (expr(child, c, v, q)) return true;
-        return false;
-    }
 
     private static String calleeName(Expression callee) {
         if (callee instanceof PropertyAccessExpr pa) return pa.property();
@@ -262,11 +430,12 @@ public final class ContinuationRules {
     // ------------------------------------------------------------------
 
     /**
-     * --ir skips typecheck, so the rule is re-derived from the ANF: a public
-     * method whose bindings reach an update_prop and an add_raw_output but no
-     * add_output, at any depth and through method_calls to private methods, is
-     * refused with the source path's text. Called for StatefulSmartContract
-     * programs after the N-101 scaffolding check.
+     * --ir skips typecheck, so the rule is re-derived from the ANF, per path:
+     * a public method that declares an output (add_output / add_raw_output, at
+     * any depth and through method_calls to private methods) and has a path
+     * that reaches an update_prop but no add_output is refused with the source
+     * path's text. Called for StatefulSmartContract programs after the N-101
+     * scaffolding check.
      */
     static void checkIr(List<AnfMethod> methods) {
         Map<String, AnfMethod> privates = new HashMap<>();
@@ -282,29 +451,107 @@ public final class ContinuationRules {
     }
 
     private static boolean irDropsContinuation(AnfMethod method, Map<String, AnfMethod> privates) {
-        boolean writes = false;
-        boolean raw = false;
-        boolean add = false;
+        if (!irDeclaresOutput(method, privates)) return false;
+        Map<String, Integer> exits = irHelperExits(method, privates);
+        return dropped(irRun(method.body(), ZERO, privates, exits));
+    }
+
+    /** Any add_output / add_raw_output at any depth, through method_calls (explicit work list). */
+    private static boolean irDeclaresOutput(AnfMethod method, Map<String, AnfMethod> privates) {
         Set<String> visited = new HashSet<>();
         ArrayDeque<List<AnfBinding>> work = new ArrayDeque<>();
         work.push(method.body());
         while (!work.isEmpty()) {
             for (AnfBinding b : work.pop()) {
                 Object v = b.value();
-                if (v instanceof UpdateProp) writes = true;
-                else if (v instanceof AddRawOutput) raw = true;
-                else if (v instanceof AddOutput) add = true;
-                else if (v instanceof MethodCall mc) {
+                if (v instanceof AddOutput || v instanceof AddRawOutput) return true;
+                if (v instanceof MethodCall mc) {
                     AnfMethod target = privates.get(mc.method());
                     if (target != null && visited.add(target.name())) work.push(target.body());
-                } else if (v instanceof If iff) {
-                    if (iff.thenBranch() != null) work.push(iff.thenBranch());
-                    if (iff.elseBranch() != null) work.push(iff.elseBranch());
-                } else if (v instanceof Loop lp) {
-                    if (lp.body() != null) work.push(lp.body());
+                }
+                pushArms(v, work);
+            }
+        }
+        return false;
+    }
+
+    private static void pushArms(Object v, ArrayDeque<List<AnfBinding>> work) {
+        if (v instanceof If iff) {
+            if (iff.thenBranch() != null) work.push(iff.thenBranch());
+            if (iff.elseBranch() != null) work.push(iff.elseBranch());
+        } else if (v instanceof Loop lp && lp.body() != null) {
+            work.push(lp.body());
+        }
+    }
+
+    /** The private methods a binding list calls, at any depth. */
+    private static List<AnfMethod> irCallees(List<AnfBinding> body, Map<String, AnfMethod> privates) {
+        List<AnfMethod> out = new ArrayList<>();
+        ArrayDeque<List<AnfBinding>> work = new ArrayDeque<>();
+        if (body != null) work.push(body);
+        while (!work.isEmpty()) {
+            for (AnfBinding b : work.pop()) {
+                Object v = b.value();
+                if (v instanceof MethodCall mc && privates.containsKey(mc.method())) out.add(privates.get(mc.method()));
+                pushArms(v, work);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Exit states of every private method reachable from {@code method},
+     * bottom-up by an explicit post-order (N-264: no host recursion across
+     * helper chains). A helper on the open path (a cycle) stays unresolved and
+     * contributes {0}.
+     */
+    private static Map<String, Integer> irHelperExits(AnfMethod method, Map<String, AnfMethod> privates) {
+        record Frame(AnfMethod helper, List<AnfMethod> todo) {}
+        Map<String, Integer> exits = new HashMap<>();
+        Set<String> open = new HashSet<>();
+        ArrayDeque<Frame> stack = new ArrayDeque<>();
+        stack.push(new Frame(null, irCallees(method.body(), privates)));
+        while (!stack.isEmpty()) {
+            Frame top = stack.peek();
+            AnfMethod next = null;
+            for (AnfMethod t : top.todo()) {
+                if (!exits.containsKey(t.name()) && !open.contains(t.name())) {
+                    next = t;
+                    break;
+                }
+            }
+            if (next != null) {
+                open.add(next.name());
+                stack.push(new Frame(next, irCallees(next.body(), privates)));
+            } else {
+                stack.pop();
+                if (top.helper() != null) {
+                    exits.put(top.helper().name(), irRun(top.helper().body(), ZERO, privates, exits));
+                    open.remove(top.helper().name());
                 }
             }
         }
-        return writes && raw && !add;
+        return exits;
+    }
+
+    private static int irRun(
+            List<AnfBinding> bindings, int states, Map<String, AnfMethod> privates, Map<String, Integer> exits) {
+        int s = states;
+        if (bindings == null) return s;
+        for (AnfBinding b : bindings) {
+            Object v = b.value();
+            if (v instanceof UpdateProp) s = orAll(s, W);
+            else if (v instanceof AddOutput) s = orAll(s, A);
+            else if (v instanceof MethodCall mc) {
+                if (privates.containsKey(mc.method())) s = compose(s, exits.getOrDefault(mc.method(), ZERO));
+            } else if (v instanceof If iff) {
+                int t = iff.thenBranch() != null ? irRun(iff.thenBranch(), s, privates, exits) : s;
+                int e = iff.elseBranch() != null ? irRun(iff.elseBranch(), s, privates, exits) : s;
+                s = t | e;
+            } else if (v instanceof Loop lp) {
+                if (lp.body() != null) s |= irRun(lp.body(), s, privates, exits);
+            }
+        }
+        return s;
     }
 }

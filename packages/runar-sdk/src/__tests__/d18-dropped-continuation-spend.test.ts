@@ -45,8 +45,8 @@ vi.mock('../../../runar-compiler/src/passes/continuation-rules.js', async (impor
   const real = await importOriginal<typeof import('../../../runar-compiler/src/passes/continuation-rules.js')>();
   return {
     ...real,
-    dropsContinuation: (e: Parameters<typeof real.dropsContinuation>[0]) =>
-      gate.bypassD18 ? false : real.dropsContinuation(e),
+    dropsContinuation: (...a: Parameters<typeof real.dropsContinuation>) =>
+      gate.bypassD18 ? false : real.dropsContinuation(...a),
   };
 });
 
@@ -87,8 +87,7 @@ ${RAW}  }
 }
 `;
 
-const D18 =
-  "method 'lock' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput()";
+const D18 = "method 'lock' writes contract state on a path that reaches no addOutput()";
 
 function artifactOf(src: string): RunarArtifact {
   const r = compile(src, { fileName: 'Lock.runar.ts' });

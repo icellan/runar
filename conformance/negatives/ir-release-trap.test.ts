@@ -15,14 +15,18 @@ import { isCiEnv } from '../env.js';
  * state and declares raw outputs but no `addOutput` (its state write would be
  * dropped and the contract's satoshis would leave with the spend). Every IR
  * loader re-derives the rule from the ANF: a public method of a
- * StatefulSmartContract program that reaches an `update_prop` and an
- * `add_raw_output` but no `add_output`, at any depth and through
- * `method_call`s to private methods, is refused with the source path's text.
+ * StatefulSmartContract program that declares an output and has a path that
+ * reaches an `update_prop` but no `add_output` (through `if` arms, loop bodies
+ * and `method_call`s to private methods) is refused with the source path's text.
  *
  * Corpus: conformance/negatives/dropped-continuation-cases.json. Each `refuse` source
  * is lowered by the TS lowerer with validate / typecheck skipped (exactly the
- * IR the pre-D18 frontend emitted); each `accept` source is the frontend's own
- * fold-OFF ANF and must compile to the TS bytes in every tier.
+ * IR the pre-D18 frontend emitted); the one refuse shape the lowerer itself
+ * refuses (a write inside an output-declaring branch) is hand-built from an
+ * accepted program instead. Each `accept` source is the frontend's own fold-OFF
+ * ANF and must compile to the TS bytes in every tier. The rule is per path:
+ * in a method declaring any add_output / add_raw_output, every path reaching an
+ * update_prop must reach an add_output.
  *
  * Does not prove: the source path (gk-frontend-parity.test.ts), or that the
  * accepted shapes are spendable (packages/runar-sdk d18-dropped-continuation-spend).
@@ -94,8 +98,46 @@ function runIr(tier: Tier, input: string): { status: number; out: string; diag: 
   return { status: res.status, out: (res.stdout ?? '').trim(), diag: `${res.stderr ?? ''}\n${res.stdout ?? ''}` };
 }
 
-const REFUSE = corpus.refuse.map((c) => ({ name: c.name, ir: loweredUnchecked(c.src, c.file), error: c.error! }));
 const ACCEPT = corpus.accept.map((c) => ({ name: c.name, ir: irOf(c.src, c.file) }));
+
+/** The lowerer itself refuses a write inside an output-declaring branch, so that refuse shape gets no ANF. */
+const lowerable = (c: Case): boolean => {
+  try {
+    loweredUnchecked(c.src, c.file);
+    return true;
+  } catch (e) {
+    return !String(e).includes('both declares outputs and assigns contract properties');
+  }
+};
+
+/**
+ * The per-path shape only a hand-written IR can carry: the accepted
+ * terminal-branch-writes-nothing program with an update_prop added to its
+ * raw-output branch (the source lowerer refuses that branch shape itself).
+ */
+function writeOnRawBranchIr(): Ir {
+  const ir = JSON.parse(JSON.stringify(ACCEPT.find((a) => a.name === 'terminal-branch-writes-nothing')!.ir)) as {
+    methods: Array<{ name: string; body: Array<{ name: string; value: Record<string, unknown> }> }>;
+  };
+  const pay = ir.methods.find((m) => m.name === 'pay')!;
+  type B = { name: string; value: Record<string, unknown> };
+  const hasRaw = (bs: B[]): boolean => bs.some((b) => b.value.kind === 'add_raw_output');
+  const ifb = pay.body.find((b) => b.value.kind === 'if' && hasRaw((b.value.then as B[]) ?? []))!;
+  (ifb.value.then as B[]).unshift(
+    { name: 'd18w0', value: { kind: 'load_const', value: 7 } },
+    { name: 'd18w1', value: { kind: 'update_prop', name: 'count', value: 'd18w0' } },
+  );
+  return ir as unknown as Ir;
+}
+
+const REFUSE = [
+  ...corpus.refuse.filter(lowerable).map((c) => ({ name: c.name, ir: loweredUnchecked(c.src, c.file), error: c.error! })),
+  {
+    name: 'ir-write-on-raw-branch-sibling-add-output',
+    ir: writeOnRawBranchIr(),
+    error: corpus.refuse.find((c) => c.name === 'write-on-raw-branch-sibling-add-output')!.error!,
+  },
+];
 
 describe('D18: --ir refuses a state write with no state continuation (all 7 tiers)', () => {
   it('the matrix names all IR-capable tiers', () => {
@@ -114,8 +156,7 @@ describe('D18: --ir refuses a state write with no state continuation (all 7 tier
     for (const c of REFUSE) {
       const s = JSON.stringify(c.ir);
       expect(s, c.name).toContain('"update_prop"');
-      expect(s, c.name).toContain('"add_raw_output"');
-      expect(s, c.name).not.toContain('"add_output"');
+      expect(s.includes('"add_raw_output"') || s.includes('"add_output"'), c.name).toBe(true);
     }
   });
 

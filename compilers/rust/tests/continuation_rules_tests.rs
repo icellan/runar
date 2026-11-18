@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use runar_compiler_rust::frontend::anf_lower::lower_to_anf;
+use runar_compiler_rust::frontend::anf_lower::try_lower_to_anf;
 use runar_compiler_rust::frontend::diagnostic::Severity;
 use runar_compiler_rust::frontend::expand_fixed_arrays::expand_fixed_arrays;
 use runar_compiler_rust::frontend::parser::parse_source;
@@ -98,11 +98,41 @@ fn d18_ir_path_refuses_dropped_continuation() {
         // Pass 3b, as the real pipeline runs it before ANF lowering.
         let expanded = expand_fixed_arrays(&contract);
         assert!(expanded.errors.is_empty(), "{} expand failed", s(case, "name"));
-        let json = serde_json::to_string(&lower_to_anf(&expanded.contract)).unwrap();
-        assert!(json.contains("\"update_prop\"") && json.contains("\"add_raw_output\""), "{}", s(case, "name"));
-        assert!(!json.contains("\"add_output\""), "{}", s(case, "name"));
+        let program = match try_lower_to_anf(&expanded.contract) {
+            Ok(p) => p,
+            // The lowerer itself refuses a write inside an output-declaring
+            // branch; that shape is hand-built below instead.
+            Err(e) if e.message.contains("both declares outputs and assigns contract properties") => continue,
+            Err(e) => panic!("{} lowering failed: {e}", s(case, "name")),
+        };
+        let json = serde_json::to_string(&program).unwrap();
+        assert!(json.contains("\"update_prop\""), "{}", s(case, "name"));
+        assert!(json.contains("\"add_raw_output\"") || json.contains("\"add_output\""), "{}", s(case, "name"));
         let err = compile_from_ir_str(&json).err().unwrap_or_else(|| panic!("{} --ir accepted", s(case, "name")));
         assert!(err.contains(s(case, "error")), "{}: {err}", s(case, "name"));
+    }
+    // The per-path shape only a hand-written IR can carry: the accepted
+    // terminal-branch-writes-nothing program with an update_prop added to its
+    // raw-output branch (mirrors writeOnRawBranchIr in ir-release-trap.test.ts).
+    {
+        let base = cases(&c, "accept").iter().find(|x| s(x, "name") == "terminal-branch-writes-nothing").unwrap();
+        let want = cases(&c, "refuse").iter().find(|x| s(x, "name") == "write-on-raw-branch-sibling-add-output").unwrap();
+        let r = compile_from_source_str_with_result(s(base, "src"), Some(s(base, "file")), &opts());
+        let anf = r.anf.expect("terminal-branch-writes-nothing source refused");
+        let mut ir: Value = serde_json::to_value(&anf).unwrap();
+        let pay = ir["methods"].as_array_mut().unwrap().iter_mut().find(|m| m["name"] == "pay").unwrap();
+        let has_raw = |bs: &Value| bs.as_array().is_some_and(|a| a.iter().any(|b| b["value"]["kind"] == "add_raw_output"));
+        let ifb = pay["body"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|b| b["value"]["kind"] == "if" && has_raw(&b["value"]["then"]))
+            .expect("no raw-output if arm to patch");
+        let then = ifb["value"]["then"].as_array_mut().unwrap();
+        then.insert(0, serde_json::json!({"name": "d18w1", "value": {"kind": "update_prop", "name": "count", "value": "d18w0"}}));
+        then.insert(0, serde_json::json!({"name": "d18w0", "value": {"kind": "load_const", "value": 7}}));
+        let err = compile_from_ir_str(&ir.to_string()).err().expect("ir-write-on-raw-branch-sibling-add-output --ir accepted");
+        assert!(err.contains(s(want, "error")), "ir-write-on-raw-branch-sibling-add-output: {err}");
     }
     for case in cases(&c, "accept") {
         let r = compile_from_source_str_with_result(s(case, "src"), Some(s(case, "file")), &opts());

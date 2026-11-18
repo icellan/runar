@@ -1,83 +1,104 @@
 {
-  "_comment": "D18. refuse: a public stateful method that writes state (a mutable property, directly or through a private helper) and calls addRawOutput but never addOutput (directly or through a helper) gets no auto-injected continuation (any addOutput/addRawOutput replaces it), so its state write is silently dropped and the contract's satoshis go to the spender's change; every tier refuses it with the shared diagnostic, on the source path (typecheck) and on the --ir path (ir-release-trap.test.ts). addDataOutput does not suppress the continuation and is no trigger. accept: a method that writes nothing and emits raw outputs (terminal by design), and a write carried by an addOutput (direct or in a helper), compile in every tier to the same bytes. The rule is per method, not per path: a write on a branch whose sibling calls addOutput is not refused (documented residual).",
-  "error_template": "method '<method>' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract",
+  "_comment": "D18. refuse: a public stateful method that writes state (a mutable property, directly or through a private helper) and calls addRawOutput but never addOutput (directly or through a helper) gets no auto-injected continuation (any addOutput/addRawOutput replaces it), so its state write is silently dropped and the contract's satoshis go to the spender's change; every tier refuses it with the shared diagnostic, on the source path (typecheck) and on the --ir path (ir-release-trap.test.ts). addDataOutput does not suppress the continuation and is no trigger. accept: a method that writes nothing and emits raw outputs (terminal by design), and a write carried by an addOutput (direct or in a helper), compile in every tier to the same bytes. The rule is PER PATH: in a method that declares any addOutput/addRawOutput (which removes the auto-continuation for the whole method), every path that writes state must reach an addOutput; a write on a raw-output branch beside an addOutput branch, and a write before an addOutput only one branch reaches (directly or in a helper), are refused; a path that writes nothing ends the contract by design and is accepted.",
+  "error_template": "method '<method>' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract",
   "refuse": [
     {
       "name": "issue-180-lock",
       "method": "lock",
       "src": "import { StatefulSmartContract, cat, toByteString } from 'runar-lang';\nimport type { Point } from 'runar-lang';\n\nclass Lock extends StatefulSmartContract {\n  n: bigint;\n  constructor(n: bigint) { super(n); this.n = n; }\n\n  public lock(p: Point) {\n    this.addRawOutput(1000n, cat(cat(toByteString('40'), p), toByteString('87')));\n    this.n = this.n + 1n;\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'lock' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'lock' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "raw-output-in-helper",
       "method": "pay",
       "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtRawInHelper extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString) {\n    this.count = this.count + 1n;\n    this.emit(script);\n  }\n\n  private emit(script: ByteString): void {\n    this.addRawOutput(1000n, script);\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "write-in-helper",
       "method": "pay",
       "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtWriteInHelper extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString) {\n    this.bump();\n    this.addRawOutput(1000n, script);\n  }\n\n  private bump(): void {\n    this.count = this.count + 1n;\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "raw-and-data-output",
       "method": "pay",
       "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtRawData extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString, note: ByteString) {\n    this.count = this.count + 1n;\n    this.addRawOutput(1000n, script);\n    this.addDataOutput(0n, note);\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "raw-output-in-branch",
       "method": "pay",
       "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtRawBranch extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString, flag: bigint) {\n    this.count = this.count + 1n;\n    if (flag > 0n) {\n      this.addRawOutput(1000n, script);\n    }\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "increment-operator",
       "method": "pay",
       "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtIncr extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString) {\n    this.count++;\n    this.addRawOutput(1000n, script);\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "single-sighash-raw-output",
       "method": "pay",
       "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtSingleRaw extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  /** @sighash SINGLE|FORKID */\n  public pay(script: ByteString) {\n    this.count = this.count + 1n;\n    this.addRawOutput(1000n, script);\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "fixedarray-element-write",
       "method": "pay",
       "src": "import { StatefulSmartContract, assert, ByteString, FixedArray } from 'runar-lang';\n\nclass RtSlotsRaw extends StatefulSmartContract {\n  slots: FixedArray<bigint, 2> = [0n, 0n];\n\n  constructor() {\n    super();\n  }\n\n  public pay(script: ByteString) {\n    this.slots[0] = this.slots[0] + 1n;\n    this.addRawOutput(1000n, script);\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "fixedarray-element-runtime-index",
       "method": "pay",
       "src": "import { StatefulSmartContract, assert, ByteString, FixedArray } from 'runar-lang';\n\nclass RtSlotsRawIdx extends StatefulSmartContract {\n  slots: FixedArray<bigint, 2> = [0n, 0n];\n\n  constructor() {\n    super();\n  }\n\n  public pay(script: ByteString, i: bigint) {\n    assert(i >= 0n && i < 2n);\n    this.slots[i] = 7n;\n    this.addRawOutput(1000n, script);\n  }\n}\n",
       "file": "Rt.runar.ts",
-      "error": "method 'pay' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
+    },
+    {
+      "name": "write-on-raw-branch-sibling-add-output",
+      "method": "pay",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtSiblingAdd extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString, flag: bigint) {\n    if (flag > 0n) {\n      this.addOutput(1000n, this.count + 1n);\n    } else {\n      this.count = this.count + 1n;\n      this.addRawOutput(1000n, script);\n    }\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
+    },
+    {
+      "name": "write-before-conditional-add-output",
+      "method": "pay",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtCondAdd extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(flag: bigint) {\n    this.count = this.count + 1n;\n    if (flag > 0n) {\n      this.addOutput(1000n, this.count);\n    }\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
+    },
+    {
+      "name": "conditional-add-output-in-helper",
+      "method": "pay",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtCondAddHelper extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(flag: bigint) {\n    this.count = this.count + 1n;\n    this.cont(flag);\n  }\n\n  private cont(flag: bigint): void {\n    if (flag > 0n) {\n      this.addOutput(1000n, this.count);\n    }\n  }\n}\n",
+      "file": "Rt.runar.ts",
+      "error": "method 'pay' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "python-raw-output",
       "file": "RtPyRaw.runar.py",
       "method": "sendToScript",
       "src": "from runar import StatefulSmartContract, Bigint, ByteString, public\n\n\nclass RtPyRaw(StatefulSmartContract):\n    count: Bigint\n\n    def __init__(self, count: Bigint):\n        super().__init__(count)\n        self.count = count\n\n    @public\n    def send_to_script(self, script_bytes: ByteString):\n        self.add_raw_output(1000, script_bytes)\n        self.count = self.count + 1\n",
-      "error": "method 'sendToScript' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'sendToScript' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     },
     {
       "name": "go-raw-output",
       "file": "RtGoRaw.runar.go",
       "method": "sendToScript",
       "src": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype RtGoRaw struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n\nfunc (c *RtGoRaw) SendToScript(scriptBytes runar.ByteString) {\n\tc.AddRawOutput(1000, scriptBytes)\n\tc.Count = c.Count + 1\n}\n",
-      "error": "method 'sendToScript' writes contract state but emits no state continuation: it calls addRawOutput() without addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or stop writing state in a method meant to end the contract"
+      "error": "method 'sendToScript' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract"
     }
   ],
   "accept": [
@@ -99,6 +120,16 @@
     {
       "name": "fixedarray-element-with-add-output",
       "src": "import { StatefulSmartContract, assert, ByteString, FixedArray } from 'runar-lang';\n\nclass RtSlotsAdd extends StatefulSmartContract {\n  slots: FixedArray<bigint, 2> = [0n, 0n];\n\n  constructor() {\n    super();\n  }\n\n  public pay(script: ByteString) {\n    this.addRawOutput(1000n, script);\n    this.slots[0] = this.slots[0] + 1n;\n    this.addOutput(0n, this.slots[0], this.slots[1]);\n  }\n}\n",
+      "file": "Rt.runar.ts"
+    },
+    {
+      "name": "every-branch-add-output",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtEveryBranch extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString, flag: bigint) {\n    this.count = this.count + 1n;\n    if (flag > 0n) {\n      this.addRawOutput(1000n, script);\n      this.addOutput(0n, this.count);\n    } else {\n      this.addOutput(1000n, this.count);\n    }\n  }\n}\n",
+      "file": "Rt.runar.ts"
+    },
+    {
+      "name": "terminal-branch-writes-nothing",
+      "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtTerminalBranch extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString, flag: bigint) {\n    if (flag > 0n) {\n      this.addRawOutput(1000n, script);\n    } else {\n      this.addOutput(1000n, this.count + 1n);\n    }\n  }\n}\n",
       "file": "Rt.runar.ts"
     },
     {

@@ -1,11 +1,10 @@
 """D18 on the --ir path.
 
 ``--ir`` skips typecheck, where the source path refuses a public stateful
-method that writes state and declares raw outputs but no ``addOutput`` (its
-state write would be dropped and the contract's satoshis would leave with the
-spend). Re-derived from the ANF: ``update_prop`` = state write,
-``add_output`` / ``add_raw_output`` = declared outputs, at any depth (if
-then/else, loop body) and through ``method_call`` to private methods. Mirrors
+method that declares its own outputs and has a path that writes state but
+reaches no ``addOutput`` (that write would be dropped and the contract's
+satoshis would leave with the spend). Re-derived from the ANF, per path,
+through ``if`` arms, loop bodies and ``method_call``s to private methods. Mirrors
 ``assertIrNoDroppedContinuation`` in
 packages/runar-compiler/src/passes/continuation-rules.ts. Run for
 StatefulSmartContract programs after the N-101 scaffolding check.
@@ -13,7 +12,14 @@ StatefulSmartContract programs after the N-101 scaffolding check.
 
 from __future__ import annotations
 
-from runar_compiler.frontend.continuation_rules import dropped_continuation_message
+from runar_compiler.frontend.continuation_rules import (
+    PATH_A,
+    PATH_W,
+    compose,
+    dropped_continuation_message,
+    or_all,
+    paths_dropped,
+)
 from runar_compiler.ir.types import ANFBinding, ANFMethod, ANFProgram
 
 
@@ -28,26 +34,60 @@ def dropped_continuation_error(program: ANFProgram) -> str | None:
 
 
 def _drops(method: ANFMethod, privates: dict[str, ANFMethod]) -> bool:
-    seen = {"writes": False, "raw": False, "add": False}
-    visited: set[str] = set()
+    """The per-path rule on ANF: update_prop = state write, add_output =
+    addOutput, add_raw_output / add_output = a declared output (suppresses the
+    auto-continuation). ``if`` unions its arms, a loop body unions with
+    skipping it, a method_call to a private method composes with that method's
+    exits."""
 
-    def walk(bindings: list[ANFBinding] | None) -> None:
+    def declares(bindings, seen: set[str]) -> bool:
+        for b in bindings or []:
+            v = b.value
+            if v.kind in ("add_output", "add_raw_output"):
+                return True
+            if v.kind == "method_call":
+                t = privates.get(v.method or "")
+                if t is not None and t.name not in seen:
+                    seen.add(t.name)
+                    if declares(t.body, seen):
+                        return True
+            if any(isinstance(x, list) and declares(x, seen) for x in (v.then, v.else_, v.body)):
+                return True
+        return False
+
+    if not declares(method.body, set()):
+        return False
+
+    exits_of: dict[str, frozenset[int]] = {}
+    in_progress: set[str] = set()
+
+    def run(bindings, states: frozenset[int]) -> frozenset[int]:
+        s = states
         for b in bindings or []:
             v = b.value
             if v.kind == "update_prop":
-                seen["writes"] = True
-            elif v.kind == "add_raw_output":
-                seen["raw"] = True
+                s = or_all(s, PATH_W)
             elif v.kind == "add_output":
-                seen["add"] = True
+                s = or_all(s, PATH_A)
             elif v.kind == "method_call":
-                target = privates.get(v.method or "")
-                if target is not None and target.name not in visited:
-                    visited.add(target.name)
-                    walk(target.body)
-            walk(v.then)
-            walk(v.else_)
-            walk(v.body)
+                t = privates.get(v.method or "")
+                if t is not None:
+                    ex = exits_of.get(t.name)
+                    if ex is None:
+                        if t.name in in_progress:
+                            ex = frozenset({0})
+                        else:
+                            in_progress.add(t.name)
+                            ex = run(t.body, frozenset({0}))
+                            in_progress.discard(t.name)
+                            exits_of[t.name] = ex
+                    s = compose(s, ex)
+            elif isinstance(v.then, list) or isinstance(v.else_, list):
+                t_ = run(v.then, s) if isinstance(v.then, list) else s
+                e_ = run(v.else_, s) if isinstance(v.else_, list) else s
+                s = t_ | e_
+            elif isinstance(v.body, list):
+                s = s | run(v.body, s)
+        return s
 
-    walk(method.body)
-    return seen["writes"] and seen["raw"] and not seen["add"]
+    return paths_dropped(run(method.body, frozenset({0})))

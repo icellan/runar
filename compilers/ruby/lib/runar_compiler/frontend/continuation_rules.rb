@@ -5,9 +5,8 @@
 # its header for the full rationale). Both rules read the method effects
 # anf_lower.rb's transitive continuation predicates compute, so they see
 # exactly the effects the continuation is injected from. anf_lower.rb is
-# wire-format gated, so the one new predicate (calls addOutput, as opposed to
-# addOutput OR addRawOutput) lives here, mirroring _expr_has_add_output's
-# callee matching exactly.
+# wire-format gated, so D18's per-path analysis (SourcePaths below) lives
+# here, mirroring _expr_has_add_output's callee matching exactly.
 #
 # Like typecheck.rb, this file reaches anf_lower.rb's private predicates via
 # +send+ and requires anf_lower.rb lazily (anf_lower.rb requires validator.rb
@@ -28,50 +27,16 @@ module RunarCompiler
 
       # D18: the shared error text.
       def self.dropped_continuation_message(method)
-        "method '#{method}' writes contract state but emits no state continuation: it calls " \
-          "addRawOutput() without addOutput(), and a method that declares its own outputs gets no " \
-          "auto-injected continuation, so the state write would be lost and the contract's satoshis " \
-          "would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or " \
-          "stop writing state in a method meant to end the contract"
+        "method '#{method}' writes contract state on a path that reaches no addOutput(): a method " \
+          "that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, " \
+          "so on that path the state write would be lost and the contract's satoshis would leave with " \
+          "the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop " \
+          "writing state on a path meant to end the contract"
       end
 
       def self.fe
         require_relative "anf_lower"
         RunarCompiler::Frontend
-      end
-
-      # Calls this.addOutput(...) itself, directly or through a private helper.
-      def self.calls_add_output?(method, contract)
-        q = fe.const_get(:CalleeQueue).new(Set.new)
-        nxt = method.body || []
-        until nxt.nil?
-          return true if nxt.any? { |s| stmt_calls_add_output?(s, contract, q) }
-
-          nxt = q.pending.shift
-        end
-        false
-      end
-
-      def self.stmt_calls_add_output?(stmt, contract, q)
-        return true if fe.send(:_statement_expressions, stmt).any? { |e| expr_calls_add_output?(e, contract, q) }
-
-        fe.send(:_child_statements, stmt).any? { |s| stmt_calls_add_output?(s, contract, q) }
-      end
-
-      def self.expr_calls_add_output?(expr, contract, q)
-        return false if expr.nil?
-
-        if expr.is_a?(CallExpr)
-          callee = expr.callee
-          return true if callee.is_a?(PropertyAccessExpr) && callee.property == "addOutput"
-          if callee.is_a?(MemberExpr) && callee.object.is_a?(Identifier) &&
-             callee.object.name == "this" && callee.property == "addOutput"
-            return true
-          end
-
-          q.enqueue(fe.send(:_resolve_private_method, callee, contract))
-        end
-        fe.send(:_child_expressions, expr).any? { |e| expr_calls_add_output?(e, contract, q) }
       end
 
       # _method_mutates_state OR a write to an element of a mutable property
@@ -125,11 +90,174 @@ module RunarCompiler
         fe.send(:_child_expressions, expr).any? { |e| expr_writes_element?(e, mutable_props, contract, q) }
       end
 
-      # D18: the method writes state and only raw outputs replace its continuation.
+      # D18, per path: the method declares a state output somewhere (any
+      # addOutput / addRawOutput, so it gets no auto-continuation) and some path
+      # through it writes state without reaching an addOutput.
       def self.drops_continuation?(method, contract)
-        mutates_state?(method, contract) &&
-          fe.send(:_method_has_add_output, method, contract) &&
-          !calls_add_output?(method, contract)
+        return false unless fe.send(:_method_has_add_output, method, contract)
+
+        SourcePaths.new(contract).dropped?(method.body || [])
+      end
+
+      W = 1 # path wrote state
+      A = 2 # path reached addOutput
+      ZERO = Set[0].freeze
+
+      # True iff some path state wrote state and reached no addOutput.
+      def self.dropped_state?(states)
+        states.any? { |x| (x & W) != 0 && (x & A).zero? }
+      end
+
+      # Port of continuation-rules.ts SourcePaths. A path state is two bits
+      # {W, A}; a set of at most four flows through a body. Every call in an
+      # expression runs; +if+ unions its arms; a loop unions skipping it; a
+      # private helper call composes the caller's states with the helper's
+      # exit states (fallthrough + return). Callee matching mirrors
+      # anf_lower.rb's _expr_has_add_output (addOutput) and
+      # _resolve_private_method (helpers). Helper exits are computed bottom-up
+      # by an explicit post-order over the call graph (N-264: no host recursion
+      # across helper chains); an unresolved (cyclic) helper contributes {0}.
+      class SourcePaths
+        def initialize(contract)
+          @contract = contract
+          @mutable = Set.new
+          contract.properties.each { |p| @mutable.add(p.name) unless p.readonly }
+          @exits = {}
+          @missing = nil
+        end
+
+        def dropped?(body)
+          prepare(body)
+          ContinuationRules.dropped_state?(exits(body))
+        end
+
+        # Exit states of a body entered with a fresh path.
+        def exits(body)
+          live, returned = stmts(body, ZERO)
+          live | returned
+        end
+
+        private
+
+        def prepare(body)
+          open = Set.new
+          stack = [[nil, body]]
+          until stack.empty?
+            helper, b = stack.last
+            todo = unresolved(b).reject { |m| open.include?(m.name) }
+            if todo.empty?
+              stack.pop
+              next if helper.nil?
+
+              @exits[helper.name] = exits(b)
+              open.delete(helper.name)
+            else
+              open.add(todo.first.name)
+              stack << [todo.first, todo.first.body || []]
+            end
+          end
+        end
+
+        # Private helpers called in +body+ whose exits are not computed yet.
+        def unresolved(body)
+          @missing = []
+          exits(body)
+          @missing.uniq(&:name)
+        ensure
+          @missing = nil
+        end
+
+        def stmts(list, states)
+          live = states
+          returned = Set.new
+          (list || []).each do |st|
+            break if live.empty?
+
+            l, r = stmt(st, live)
+            returned |= r
+            live = l
+          end
+          [live, returned]
+        end
+
+        def stmt(st, states)
+          none = Set.new
+          case st
+          when AssignmentStmt
+            s = expr(st.value, expr(st.target, states))
+            s = or_all(s, W) if writes_mutable?(st.target)
+            [s, none]
+          when ExpressionStmt then [expr(st.expr, states), none]
+          when VariableDeclStmt then [expr(st.init, states), none]
+          when ReturnStmt then [none, st.value ? expr(st.value, states) : states]
+          when IfStmt
+            c = expr(st.condition, states)
+            tl, tr = stmts(st.then, c)
+            el, er = st.else_ ? stmts(st.else_, c) : [c, none]
+            [tl | el, tr | er]
+          when ForStmt
+            il, ir = st.init ? stmt(st.init, states) : [states, none]
+            c = expr(st.condition, il)
+            bl, br = stmts(st.body, c)
+            ul, ur = st.update ? stmt(st.update, bl) : [bl, none]
+            [c | ul, ir | br | ur]
+          else [states, none]
+          end
+        end
+
+        def writes_mutable?(target)
+          t = target
+          t = t.object while t.is_a?(IndexAccessExpr)
+          t.is_a?(PropertyAccessExpr) && @mutable.include?(t.property)
+        end
+
+        def or_all(states, bits)
+          states.map { |x| x | bits }.to_set
+        end
+
+        def expr(e, states)
+          case e
+          when IncrementExpr, DecrementExpr
+            s = expr(e.operand, states)
+            writes_mutable?(e.operand) ? or_all(s, W) : s
+          when CallExpr
+            s = states
+            s = expr(e.callee, s) if e.callee && !e.callee.is_a?(Identifier)
+            (e.args || []).each { |a| s = expr(a, s) }
+            return or_all(s, A) if add_output_callee?(e.callee)
+
+            helper = ContinuationRules.fe.send(:_resolve_private_method, e.callee, @contract)
+            return s if helper.nil?
+
+            ex = @exits[helper.name]
+            if ex.nil?
+              @missing << helper if @missing
+              ex = ZERO
+            end
+            out = Set.new
+            s.each { |x| ex.each { |y| out.add(x | y) } }
+            out
+          when BinaryExpr then expr(e.right, expr(e.left, states))
+          when UnaryExpr then expr(e.operand, states)
+          when TernaryExpr
+            c = expr(e.condition, states)
+            expr(e.consequent, c) | expr(e.alternate, c)
+          when IndexAccessExpr then expr(e.index, expr(e.object, states))
+          when MemberExpr then expr(e.object, states)
+          when ArrayLiteralExpr
+            s = states
+            (e.elements || []).each { |el| s = expr(el, s) }
+            s
+          else states
+          end
+        end
+
+        def add_output_callee?(callee)
+          return true if callee.is_a?(PropertyAccessExpr) && callee.property == "addOutput"
+
+          callee.is_a?(MemberExpr) && callee.object.is_a?(Identifier) &&
+            callee.object.name == "this" && callee.property == "addOutput"
+        end
       end
 
       # #199: the contract-level warning, when it applies (stateful contracts only).

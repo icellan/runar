@@ -76,4 +76,20 @@ class D18ReleaseTrapTest < Minitest::Test
     refute_match(/Traceback|\.rb:\d+:in /, diag)
     assert_includes diag, DROPPED['refuse'].find { |c| c['name'] == 'issue-180-lock' }['error']
   end
+
+  # Per path: the TS ANF of terminal-branch-writes-nothing with an update_prop
+  # added to its raw-output `if` arm (the IR ir-release-trap.test.ts hand-builds).
+  def test_d18_ir_path_refuses_write_on_raw_branch
+    ok, out, err = run_cli('--ir', File.expand_path('fixtures/d18_write_on_raw_branch.ir.json', __dir__), '--hex')
+    refute ok, "accepted the write-on-raw-branch IR: #{out[0, 120]}"
+    diag = "#{out}\n#{err}"
+    refute_match(/Traceback|\.rb:\d+:in /, diag)
+    assert_includes diag, DROPPED['refuse'].find { |c| c['name'] == 'write-on-raw-branch-sibling-add-output' }['error']
+  end
+
+  def test_d18_ir_path_accepts_terminal_branch_writes_nothing
+    ok, out, err = run_cli('--ir', File.expand_path('fixtures/d18_terminal_branch_writes_nothing.ir.json', __dir__), '--hex')
+    assert ok, err
+    refute_empty out.strip
+  end
 end

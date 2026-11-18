@@ -1107,13 +1107,13 @@ class TypeChecker {
       // D18: a state write whose only declared outputs are raw ones is dropped
       // (see continuation-rules.ts). Same text as droppedContinuationMessage,
       // spelled out here so the R-101 extractor can read the template.
-      if (method.visibility === 'public' && dropsContinuation(effects)) {
+      if (method.visibility === 'public' && dropsContinuation(this.contract, method, effects)) {
         this.errors.push(makeDiagnostic(
-          `method '${method.name}' writes contract state but emits no state continuation: it calls ` +
-            `addRawOutput() without addOutput(), and a method that declares its own outputs gets no ` +
-            `auto-injected continuation, so the state write would be lost and the contract's satoshis ` +
-            `would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or ` +
-            `stop writing state in a method meant to end the contract`,
+          `method '${method.name}' writes contract state on a path that reaches no addOutput(): a method ` +
+            `that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, ` +
+            `so on that path the state write would be lost and the contract's satoshis would leave with ` +
+            `the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop ` +
+            `writing state on a path meant to end the contract`,
           'error',
           method.sourceLocation,
         ));

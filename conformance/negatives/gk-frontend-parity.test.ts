@@ -361,10 +361,10 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
     const data = corpus<{ refuse: DcCase[]; accept: DcCase[] }>('dropped-continuation-cases.json');
     // Pinned literally (the corpus could drift with it).
     const D18 = (m: string): string =>
-      `method '${m}' writes contract state but emits no state continuation: it calls addRawOutput() without ` +
-      'addOutput(), and a method that declares its own outputs gets no auto-injected continuation, so the state ' +
+      `method '${m}' writes contract state on a path that reaches no addOutput(): a method that declares ` +
+      'its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state ' +
       "write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, " +
-      '...) to carry the new state, or stop writing state in a method meant to end the contract';
+      '...) on every path that writes state, or stop writing state on a path meant to end the contract';
     it('the corpus carries the pinned text', () => {
       for (const c of data.refuse) expect(c.error, c.name).toBe(D18(/^method '(\w+)'/.exec(c.error!)![1]!));
     });

@@ -131,12 +131,21 @@ func TestDroppedContinuationD18IR(t *testing.T) {
 			if len(expanded.Errors) > 0 {
 				t.Fatalf("expand-fixed-arrays: %v", expanded.Errors)
 			}
-			data, err := json.Marshal(frontend.LowerToANF(expanded.Contract))
+			program, err := lowerToANFRecovering(expanded.Contract)
+			if err != nil {
+				// The lowerer itself refuses a write inside an output-declaring
+				// branch; that shape is hand-built below instead.
+				if strings.Contains(err.Error(), "both declares outputs and assigns contract properties") {
+					t.Skip("lowerer refuses this branch shape; covered by ir-write-on-raw-branch-sibling-add-output")
+				}
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(program)
 			if err != nil {
 				t.Fatal(err)
 			}
 			s := string(data)
-			if !strings.Contains(s, `"update_prop"`) || !strings.Contains(s, `"add_raw_output"`) || strings.Contains(s, `"add_output"`) {
+			if !strings.Contains(s, `"update_prop"`) || !(strings.Contains(s, `"add_raw_output"`) || strings.Contains(s, `"add_output"`)) {
 				t.Fatalf("lowered IR is not a dropped-continuation shape")
 			}
 			_, err = CompileFromIRBytes(data)
@@ -148,6 +157,78 @@ func TestDroppedContinuationD18IR(t *testing.T) {
 			}
 		})
 	}
+	// The per-path shape only a hand-written IR can carry: the accepted
+	// terminal-branch-writes-nothing program with an update_prop added to its
+	// raw-output branch (mirrors writeOnRawBranchIr in ir-release-trap.test.ts).
+	t.Run("refuse/ir-write-on-raw-branch-sibling-add-output", func(t *testing.T) {
+		var base, want continuationCase
+		for _, c := range corpus["accept"] {
+			if c.Name == "terminal-branch-writes-nothing" {
+				base = c
+			}
+		}
+		for _, c := range corpus["refuse"] {
+			if c.Name == "write-on-raw-branch-sibling-add-output" {
+				want = c
+			}
+		}
+		if base.Src == "" || want.Error == "" {
+			t.Fatal("corpus cases missing")
+		}
+		r := CompileFromSourceStrWithResult(base.Src, base.File, CompileOptions{DisableConstantFolding: true})
+		if !r.Success || r.ANF == nil {
+			t.Fatalf("source refused: %v", contDiags(r.Diagnostics, frontend.SeverityError))
+		}
+		raw, err := json.Marshal(r.ANF)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var prog map[string]any
+		if err := json.Unmarshal(raw, &prog); err != nil {
+			t.Fatal(err)
+		}
+		hasRaw := func(bs []any) bool {
+			for _, b := range bs {
+				if b.(map[string]any)["value"].(map[string]any)["kind"] == "add_raw_output" {
+					return true
+				}
+			}
+			return false
+		}
+		patched := false
+		for _, m := range prog["methods"].([]any) {
+			mm := m.(map[string]any)
+			if mm["name"] != "pay" {
+				continue
+			}
+			for _, b := range mm["body"].([]any) {
+				v := b.(map[string]any)["value"].(map[string]any)
+				then, _ := v["then"].([]any)
+				if patched || v["kind"] != "if" || !hasRaw(then) {
+					continue
+				}
+				v["then"] = append([]any{
+					map[string]any{"name": "d18w0", "value": map[string]any{"kind": "load_const", "value": 7}},
+					map[string]any{"name": "d18w1", "value": map[string]any{"kind": "update_prop", "name": "count", "value": "d18w0"}},
+				}, then...)
+				patched = true
+			}
+		}
+		if !patched {
+			t.Fatal("no raw-output if arm to patch")
+		}
+		data, err := json.Marshal(prog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = CompileFromIRBytes(data)
+		if err == nil {
+			t.Fatal("--ir accepted")
+		}
+		if !strings.Contains(err.Error(), want.Error) {
+			t.Fatalf("want %q, got %v", want.Error, err)
+		}
+	})
 	for _, c := range corpus["accept"] {
 		t.Run("accept/"+c.Name, func(t *testing.T) {
 			r := CompileFromSourceStrWithResult(c.Src, c.File, CompileOptions{DisableConstantFolding: true})

@@ -643,8 +643,9 @@ public final class Typecheck {
                     ));
                 }
 
-                // D18: a state write whose only declared outputs are raw ones
-                // is dropped (see ContinuationRules).
+                // D18: in a method that declares its own outputs, a path that
+                // writes state and reaches no addOutput drops its write (see
+                // ContinuationRules).
                 if (m.visibility() == Visibility.PUBLIC && ContinuationRules.dropsContinuation(m, contract)) {
                     errors.add(format(ContinuationRules.droppedContinuationMessage(m.name()), m.sourceLocation()));
                 }

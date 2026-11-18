@@ -1408,8 +1408,9 @@ const TypeChecker = struct {
                 );
             }
 
-            // D18: a state write whose only declared outputs are raw ones is
-            // dropped (see continuation_rules.zig).
+            // D18: in a method that declares its own outputs, a path that
+            // writes state and reaches no addOutput drops its write (see
+            // continuation_rules.zig).
             if (method.is_public and continuation_rules.dropsContinuation(method, self.contract)) {
                 self.addError(continuation_rules.DROPPED_CONTINUATION_FMT, .{method.name});
             }

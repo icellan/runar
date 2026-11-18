@@ -9,14 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Release-trap warning and dropped state continuation (PR C)
 
-- **All seven compilers — breaking (D18):** a public `StatefulSmartContract` method that writes
-  state and calls `addRawOutput` but never `addOutput` (directly or through a private helper) is
-  refused (`method '<m>' writes contract state but emits no state continuation: ...`). Any
-  declared output replaces the auto-injected continuation and a raw output never carries state,
-  so the write was silently dropped and the contract's remaining value went to the spender's
-  change, with the SDK then tracking the raw output as the contract's UTXO (issue #180's `Lock`).
-  The `--ir` / `compileFromANF` path of every tier re-derives the same rule from the ANF.
-  `addDataOutput` is no trigger; a method that writes nothing and emits raw outputs still compiles.
+- **All seven compilers — breaking (D18):** in a public `StatefulSmartContract` method that declares
+  any `addOutput` / `addRawOutput` (which removes the auto-injected continuation for the whole
+  method), every path that writes state must reach an `addOutput`; a path that does not is refused
+  (`method '<m>' writes contract state on a path that reaches no addOutput(): ...`). Before, such a
+  write was silently dropped and the contract's remaining value went to the spender's change, with
+  the SDK then tracking a raw output as the contract's UTXO (issue #180's `Lock`). Refused shapes:
+  a write with only raw outputs, a write on a raw-output branch beside an `addOutput` branch, a
+  write before an `addOutput` only one branch reaches (directly or in a helper). The `--ir` /
+  `compileFromANF` path of every tier re-derives the same rule from the ANF. `addDataOutput` is no
+  trigger; a path that writes nothing still compiles. A write to a FixedArray element now counts
+  as a state write everywhere before pass 3b, which also makes a mutate-only `@sighash SINGLE`
+  method writing only an element a refused value skim (it compiled in all seven tiers before).
 - **All seven compilers (#199):** a non-fatal warning (`contract 'X' has no terminal method and no
   public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'X'`)
   for a stateful contract whose every public method takes the default continuation, whose F-024

@@ -120,6 +120,41 @@ test "D18: every accept shape compiles" {
     }
 }
 
+fn refusedIr(fixture: []const u8, case_name: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try corpus(a, "dropped-continuation-cases.json");
+    var want: []const u8 = "";
+    for (c.object.get("refuse").?.array.items) |case| {
+        if (std.mem.eql(u8, str(case, "name"), case_name)) want = str(case, "error");
+    }
+    try std.testing.expect(want.len > 0);
+    const ir = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, fixture, a, .limited(1 << 20));
+    if (json.parseANFProgram(a, ir)) |_| {
+        return error.TestUnexpectedlyAccepted;
+    } else |_| {}
+    const diag = required_fields.lastDiagnostic() orelse "<none>";
+    if (std.mem.indexOf(u8, diag, want) == null) {
+        std.debug.print("diag: {s}\n", .{diag});
+        return error.TestWrongDiagnostic;
+    }
+}
+
+// Per path: the TS ANF of terminal-branch-writes-nothing with an update_prop
+// added to its raw-output `if` arm (the IR ir-release-trap.test.ts hand-builds).
+test "D18: the IR loader refuses a write on the raw-output branch" {
+    try refusedIr("src/tests/d18_write_on_raw_branch.ir.json", "write-on-raw-branch-sibling-add-output");
+}
+
+test "D18: the IR loader accepts terminal-branch-writes-nothing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ir = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/tests/d18_terminal_branch_writes_nothing.ir.json", a, .limited(1 << 20));
+    _ = try json.parseANFProgram(a, ir);
+}
+
 test "D18: the IR loader refuses the issue #180 Lock ANF" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

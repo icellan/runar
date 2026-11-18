@@ -905,8 +905,8 @@ module RunarCompiler
             )
           end
 
-          # D18: a state write whose only declared outputs are raw ones is
-          # dropped (see continuation_rules.rb).
+          # D18: in a method that declares its own outputs, a path that writes
+          # state and reaches no addOutput drops its write (see continuation_rules.rb).
           if method.visibility == "public" && ContinuationRules.drops_continuation?(method, @contract)
             add_error(ContinuationRules.dropped_continuation_message(method.name))
           end

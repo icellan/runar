@@ -82,12 +82,44 @@ def test_d18_ir_refuses(case):
     # Pass 3b, as the real pipeline runs it before ANF lowering.
     expanded = expand_fixed_arrays(parsed.contract)
     assert not expanded.errors, expanded.errors
-    data = _ir_bytes(lower_to_anf(expanded.contract))
+    try:
+        program = lower_to_anf(expanded.contract)
+    except Exception as e:  # noqa: BLE001
+        # The lowerer itself refuses a write inside an output-declaring
+        # branch; that shape is hand-built in test_d18_ir_refuses_write_on_raw_branch.
+        if "both declares outputs and assigns contract properties" in str(e):
+            pytest.skip("lowerer refuses this branch shape")
+        raise
+    data = _ir_bytes(program)
     text = data.decode()
-    assert '"update_prop"' in text and '"add_raw_output"' in text and '"add_output"' not in text
+    assert '"update_prop"' in text
+    assert '"add_raw_output"' in text or '"add_output"' in text
     with pytest.raises(Exception) as exc:
         compile_from_ir_bytes(data)
     assert case["error"] in str(exc.value)
+
+
+def test_d18_ir_refuses_write_on_raw_branch(tmp_path):
+    """The per-path shape only a hand-written IR can carry: the accepted
+    terminal-branch-writes-nothing program with an update_prop added to its
+    raw-output branch (mirrors writeOnRawBranchIr in ir-release-trap.test.ts)."""
+    base = next(c for c in _D18["accept"] if c["name"] == "terminal-branch-writes-nothing")
+    want = next(c for c in _D18["refuse"] if c["name"] == "write-on-raw-branch-sibling-add-output")
+    program = compile_source_to_ir(_write(tmp_path, base), disable_constant_folding=True)
+    ir = json.loads(_ir_bytes(program))
+    pay = next(m for m in ir["methods"] if m["name"] == "pay")
+    ifb = next(
+        b for b in pay["body"]
+        if b["value"]["kind"] == "if"
+        and any(x["value"]["kind"] == "add_raw_output" for x in b["value"].get("then") or [])
+    )
+    ifb["value"]["then"][:0] = [
+        {"name": "d18w0", "value": {"kind": "load_const", "value": 7}},
+        {"name": "d18w1", "value": {"kind": "update_prop", "name": "count", "value": "d18w0"}},
+    ]
+    with pytest.raises(Exception) as exc:
+        compile_from_ir_bytes(json.dumps(ir).encode())
+    assert want["error"] in str(exc.value)
 
 
 @pytest.mark.parametrize("case", _D18["accept"], ids=[c["name"] for c in _D18["accept"]])

@@ -3,12 +3,11 @@
 //! (see its header for the full rationale). Both rules read the transitive
 //! continuation predicates anf_lower.zig injects the continuation from
 //! (`methodMutatesState`, `methodHasAddOutput` = addOutput OR addRawOutput,
-//! `methodHasAddDataOutput`). anf_lower.zig is wire-format gated, so the one
-//! new predicate -- calls addOutput itself -- lives here, mirroring
-//! anf_lower's `exprHasIntrinsicCallRec` callee matching exactly (a
-//! method_call on `this` / `self` / a StatefulContext parameter; bareword and
-//! receiver calls to a private helper are followed, each helper once, within
-//! MAX_CALL_DEPTH hops, breadth first).
+//! `methodHasAddDataOutput`). anf_lower.zig is wire-format gated, so D18's
+//! per-path analysis (`Paths` below) lives here. Its addOutput match mirrors
+//! anf_lower's `exprHasIntrinsicCallRec` (a method_call on `this` / `self` /
+//! a StatefulContext parameter); private helpers resolve by name, bareword or
+//! any receiver, as `methodMutatesState` follows them.
 
 const std = @import("std");
 const types = @import("../ir/types.zig");
@@ -30,100 +29,19 @@ pub const RELEASE_TRAP_FMT =
 
 /// D18: the shared error text (method name).
 pub const DROPPED_CONTINUATION_FMT =
-    "method '{s}' writes contract state but emits no state continuation: it calls " ++
-    "addRawOutput() without addOutput(), and a method that declares its own outputs gets no " ++
-    "auto-injected continuation, so the state write would be lost and the contract's satoshis " ++
-    "would leave with the spend. Add this.addOutput(satoshis, ...) to carry the new state, or " ++
-    "stop writing state in a method meant to end the contract";
+    "method '{s}' writes contract state on a path that reaches no addOutput(): a method " ++
+    "that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, " ++
+    "so on that path the state write would be lost and the contract's satoshis would leave with " ++
+    "the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop " ++
+    "writing state on a path meant to end the contract";
 
 const MAX_DEPTH: u32 = @intCast(input_limits.MAX_CALL_DEPTH);
 
 const Pending = struct { stmts: []const Statement, params: []const ParamNode, depth: u32 };
 
-const Walk = struct {
-    allocator: Allocator,
-    contract: ContractNode,
-    depth: u32 = 0,
-    pending: std.ArrayListUnmanaged(Pending) = .empty,
-    visited: std.StringHashMapUnmanaged(void) = .empty,
-
-    fn enqueue(w: *Walk, name: []const u8) void {
-        if (w.depth + 1 > MAX_DEPTH) return;
-        for (w.contract.methods) |m| {
-            if (m.is_public or !std.mem.eql(u8, m.name, name)) continue;
-            const gop = w.visited.getOrPut(w.allocator, m.name) catch @panic("out of memory");
-            if (gop.found_existing) return;
-            w.pending.append(w.allocator, .{ .stmts = m.body, .params = m.params, .depth = w.depth + 1 }) catch @panic("out of memory");
-            return;
-        }
-    }
-
-    fn body(w: *Walk, stmts: []const Statement, params: []const ParamNode) bool {
-        for (stmts) |s| if (w.stmt(s, params)) return true;
-        return false;
-    }
-
-    fn stmt(w: *Walk, s: Statement, params: []const ParamNode) bool {
-        return switch (s) {
-            .expr_stmt => |e| w.expr(e.expr, params),
-            .const_decl => |cd| w.expr(cd.value, params),
-            .let_decl => |ld| if (ld.value) |v| w.expr(v, params) else false,
-            .assign => |as_| w.expr(as_.value, params),
-            .assert_stmt => |as_s| w.expr(as_s.condition, params),
-            .if_stmt => |if_s| w.expr(if_s.condition, params) or w.body(if_s.then_body, params) or
-                (if (if_s.else_body) |eb| w.body(eb, params) else false),
-            .for_stmt => |for_s| w.body(for_s.body, params),
-            .return_stmt => |r| if (r.value) |v| w.expr(v, params) else false,
-        };
-    }
-
-    fn expr(w: *Walk, e: Expression, params: []const ParamNode) bool {
-        switch (e) {
-            .method_call => |mc| {
-                if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self") or isStatefulContext(params, mc.object)) {
-                    if (std.mem.eql(u8, mc.method, "addOutput")) return true;
-                    w.enqueue(mc.method);
-                }
-                for (mc.args) |arg| if (w.expr(arg, params)) return true;
-            },
-            .call => |call| {
-                w.enqueue(call.callee);
-                for (call.args) |arg| if (w.expr(arg, params)) return true;
-            },
-            .binary_op => |bin| return w.expr(bin.left, params) or w.expr(bin.right, params),
-            .unary_op => |un| return w.expr(un.operand, params),
-            .ternary => |t| return w.expr(t.condition, params) or w.expr(t.then_expr, params) or w.expr(t.else_expr, params),
-            .index_access => |idx| return w.expr(idx.object, params) or w.expr(idx.index, params),
-            .array_literal => |elems| {
-                for (elems) |el| if (w.expr(el, params)) return true;
-            },
-            else => {},
-        }
-        return false;
-    }
-};
-
 fn isStatefulContext(params: []const ParamNode, name: []const u8) bool {
     for (params) |p| {
         if (std.mem.eql(u8, p.name, name) and std.mem.eql(u8, p.type_name, "StatefulContext")) return true;
-    }
-    return false;
-}
-
-/// Calls this.addOutput(...) itself, directly or through a private helper.
-pub fn methodCallsAddOutput(method: MethodNode, contract: ContractNode) bool {
-    var fallback = std.heap.stackFallback(4096, std.heap.page_allocator);
-    var w: Walk = .{ .allocator = fallback.get(), .contract = contract };
-    defer {
-        w.pending.deinit(w.allocator);
-        w.visited.deinit(w.allocator);
-    }
-    w.pending.append(w.allocator, .{ .stmts = method.body, .params = method.params, .depth = 0 }) catch @panic("out of memory");
-    var next: usize = 0;
-    while (next < w.pending.items.len) : (next += 1) {
-        const p = w.pending.items[next];
-        w.depth = p.depth;
-        if (w.body(p.stmts, p.params)) return true;
     }
     return false;
 }
@@ -234,11 +152,225 @@ pub fn mutatesState(method: MethodNode, contract: ContractNode) bool {
     return anf_lower.methodMutatesState(method, contract) or incrementsMutableElement(method, contract);
 }
 
-/// D18: the method writes state and only raw outputs replace its continuation.
+// ---------------------------------------------------------------------------
+// D18, per path
+// ---------------------------------------------------------------------------
+//
+// A path state is two bits, W (state written) and A (addOutput reached); a
+// set of the four possible states is a u4 mask (bit x set iff state x is
+// live). Every call in an expression runs; `if` unions its arms; a loop
+// unions skipping it; a private helper call composes the caller's states
+// with the helper's exit states (fallthrough + return).
+
+pub const W: u2 = 1;
+pub const A: u2 = 2;
+/// The single fresh path {0}.
+pub const ZERO: u4 = 1;
+
+/// Every live state `x` becomes `x | bits`.
+pub fn orAll(states: u4, bits: u2) u4 {
+    var out: u4 = 0;
+    for (0..4) |x| {
+        if ((states >> @intCast(x)) & 1 != 0) out |= @as(u4, 1) << (@as(u2, @intCast(x)) | bits);
+    }
+    return out;
+}
+
+/// {x | y : x in states, y in exits}.
+pub fn compose(states: u4, exits: u4) u4 {
+    var out: u4 = 0;
+    for (0..4) |y| {
+        if ((exits >> @intCast(y)) & 1 != 0) out |= orAll(states, @intCast(y));
+    }
+    return out;
+}
+
+/// Some path wrote state (W) and reached no addOutput (not A): state 1.
+pub fn droppedState(states: u4) bool {
+    return states & (@as(u4, 1) << W) != 0;
+}
+
+const Flow = struct { live: u4, returned: u4 };
+
+const Paths = struct {
+    allocator: Allocator,
+    contract: ContractNode,
+    exits: std.StringHashMapUnmanaged(u4) = .empty,
+    /// Set while collecting the helpers a body calls whose exits are unknown.
+    missing: ?*std.ArrayListUnmanaged(MethodNode) = null,
+
+    fn lookupPrivate(p: *Paths, name: []const u8) ?MethodNode {
+        for (p.contract.methods) |m| {
+            if (!m.is_public and std.mem.eql(u8, m.name, name)) return m;
+        }
+        return null;
+    }
+
+    fn isMutable(p: *Paths, name: []const u8) bool {
+        for (p.contract.properties) |prop| {
+            if (!prop.readonly and std.mem.eql(u8, prop.name, name)) return true;
+        }
+        return false;
+    }
+
+    /// `this.p` or `this.p[i]...` on a mutable property `p`.
+    fn writesMutable(p: *Paths, target: Expression) bool {
+        var node = target;
+        while (node == .index_access) node = node.index_access.object;
+        return node == .property_access and p.isMutable(node.property_access.property);
+    }
+
+    /// Exit states (fallthrough and return) of a body entered with a fresh path.
+    fn bodyExits(p: *Paths, body: []const Statement, params: []const ParamNode) u4 {
+        const f = p.stmts(body, params, ZERO);
+        return f.live | f.returned;
+    }
+
+    fn stmts(p: *Paths, list: []const Statement, params: []const ParamNode, states: u4) Flow {
+        var live = states;
+        var returned: u4 = 0;
+        for (list) |st| {
+            if (live == 0) break;
+            const f = p.stmt(st, params, live);
+            returned |= f.returned;
+            live = f.live;
+        }
+        return .{ .live = live, .returned = returned };
+    }
+
+    fn stmt(p: *Paths, st: Statement, params: []const ParamNode, states: u4) Flow {
+        switch (st) {
+            .assign => |as_| {
+                var s = states;
+                // `target` is the bare base name; an element write keeps its
+                // index chain in `index_target`.
+                if (as_.index_target) |it| s = p.expr(it.index, params, p.expr(it.object, params, s));
+                s = p.expr(as_.value, params, s);
+                if (as_.target_is_property and p.isMutable(as_.target)) s = orAll(s, W);
+                return .{ .live = s, .returned = 0 };
+            },
+            .expr_stmt => |e| return .{ .live = p.expr(e.expr, params, states), .returned = 0 },
+            .const_decl => |cd| return .{ .live = p.expr(cd.value, params, states), .returned = 0 },
+            .let_decl => |ld| return .{ .live = if (ld.value) |v| p.expr(v, params, states) else states, .returned = 0 },
+            .assert_stmt => |as_s| return .{ .live = p.expr(as_s.condition, params, states), .returned = 0 },
+            .return_stmt => |r| return .{ .live = 0, .returned = if (r.value) |v| p.expr(v, params, states) else states },
+            .if_stmt => |if_s| {
+                const c = p.expr(if_s.condition, params, states);
+                const t = p.stmts(if_s.then_body, params, c);
+                const e: Flow = if (if_s.else_body) |eb| p.stmts(eb, params, c) else .{ .live = c, .returned = 0 };
+                return .{ .live = t.live | e.live, .returned = t.returned | e.returned };
+            },
+            // The header's init / bound are integers: nothing to walk there.
+            .for_stmt => |for_s| {
+                const b = p.stmts(for_s.body, params, states);
+                const u: Flow = if (for_s.update) |up| p.stmt(up.*, params, b.live) else .{ .live = b.live, .returned = 0 };
+                return .{ .live = states | u.live, .returned = b.returned | u.returned };
+            },
+        }
+    }
+
+    fn helper(p: *Paths, m: MethodNode, states: u4) u4 {
+        const ex = p.exits.get(m.name) orelse blk: {
+            if (p.missing) |list| list.append(p.allocator, m) catch @panic("out of memory");
+            break :blk ZERO;
+        };
+        return compose(states, ex);
+    }
+
+    fn expr(p: *Paths, e: Expression, params: []const ParamNode, states: u4) u4 {
+        switch (e) {
+            .increment => |inc| {
+                const s = p.expr(inc.operand, params, states);
+                return if (p.writesMutable(inc.operand)) orAll(s, W) else s;
+            },
+            .decrement => |dec| {
+                const s = p.expr(dec.operand, params, states);
+                return if (p.writesMutable(dec.operand)) orAll(s, W) else s;
+            },
+            .call => |call| {
+                var s = states;
+                for (call.args) |arg| s = p.expr(arg, params, s);
+                if (p.lookupPrivate(call.callee)) |m| return p.helper(m, s);
+                return s;
+            },
+            .method_call => |mc| {
+                var s = states;
+                for (mc.args) |arg| s = p.expr(arg, params, s);
+                if (std.mem.eql(u8, mc.method, "addOutput") and
+                    (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self") or isStatefulContext(params, mc.object)))
+                {
+                    return orAll(s, A);
+                }
+                if (p.lookupPrivate(mc.method)) |m| return p.helper(m, s);
+                return s;
+            },
+            .binary_op => |bin| return p.expr(bin.right, params, p.expr(bin.left, params, states)),
+            .unary_op => |un| return p.expr(un.operand, params, states),
+            .ternary => |t| {
+                const c = p.expr(t.condition, params, states);
+                return p.expr(t.then_expr, params, c) | p.expr(t.else_expr, params, c);
+            },
+            .index_access => |idx| return p.expr(idx.index, params, p.expr(idx.object, params, states)),
+            .array_literal => |elems| {
+                var s = states;
+                for (elems) |el| s = p.expr(el, params, s);
+                return s;
+            },
+            else => return states,
+        }
+    }
+
+    /// The private helpers `body` calls whose exits are not computed yet.
+    fn unresolved(p: *Paths, body: []const Statement, params: []const ParamNode) []const MethodNode {
+        var list: std.ArrayListUnmanaged(MethodNode) = .empty;
+        p.missing = &list;
+        defer p.missing = null;
+        _ = p.bodyExits(body, params);
+        return list.items;
+    }
+
+    /// Compute the exits of every helper reachable from `body`, bottom-up by an
+    /// explicit post-order over the call graph (N-264: no host recursion across
+    /// helper chains). A helper on the open path (a cycle; the validator refuses
+    /// recursion) stays unresolved and contributes {0}.
+    fn prepare(p: *Paths, body: []const Statement, params: []const ParamNode) void {
+        const Frame = struct { helper: ?MethodNode, body: []const Statement, params: []const ParamNode };
+        var open: std.StringHashMapUnmanaged(void) = .empty;
+        var stack: std.ArrayListUnmanaged(Frame) = .empty;
+        stack.append(p.allocator, .{ .helper = null, .body = body, .params = params }) catch @panic("out of memory");
+        while (stack.items.len > 0) {
+            const top = stack.items[stack.items.len - 1];
+            var next: ?MethodNode = null;
+            for (p.unresolved(top.body, top.params)) |m| {
+                if (!open.contains(m.name)) {
+                    next = m;
+                    break;
+                }
+            }
+            if (next) |m| {
+                open.put(p.allocator, m.name, {}) catch @panic("out of memory");
+                stack.append(p.allocator, .{ .helper = m, .body = m.body, .params = m.params }) catch @panic("out of memory");
+            } else {
+                _ = stack.pop();
+                if (top.helper) |h| {
+                    p.exits.put(p.allocator, h.name, p.bodyExits(h.body, h.params)) catch @panic("out of memory");
+                    _ = open.remove(h.name);
+                }
+            }
+        }
+    }
+};
+
+/// D18, per path: the method declares a state output somewhere (any
+/// addOutput / addRawOutput, so it gets no auto-continuation) and some path
+/// through it writes state without reaching an addOutput.
 pub fn dropsContinuation(method: MethodNode, contract: ContractNode) bool {
-    return mutatesState(method, contract) and
-        anf_lower.methodHasAddOutput(method, contract) and
-        !methodCallsAddOutput(method, contract);
+    if (!anf_lower.methodHasAddOutput(method, contract)) return false;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var p: Paths = .{ .allocator = arena.allocator(), .contract = contract };
+    p.prepare(method.body, method.params);
+    return droppedState(p.bodyExits(method.body, method.params));
 }
 
 /// #199: the contract-level warning, when it applies (stateful contracts only).

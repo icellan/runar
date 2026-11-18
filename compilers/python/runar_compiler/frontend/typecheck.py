@@ -1091,9 +1091,10 @@ class _TypeChecker:
                     "unspendable. Assert the bond on a non-continuation output index, or make the method "
                     "terminal (no state mutation)"
                 )
-            # D18: a state write whose only declared outputs are raw ones is
-            # dropped (see continuation_rules.py).
-            if method.visibility == "public" and drops_continuation(effects):
+            # D18: in a method that declares its own outputs, a path that
+            # writes state and reaches no addOutput drops its write (see
+            # continuation_rules.py).
+            if method.visibility == "public" and drops_continuation(self.contract, method, effects):
                 self._add_error(dropped_continuation_message(method.name))
 
     def _check_statements(self, stmts: list[Statement], env: _TypeEnv) -> None:

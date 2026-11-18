@@ -103,10 +103,12 @@ class NestedPay extends StatefulSmartContract {
   }
 
   public nested(amt: bigint, flag: bigint): void {
+    this.count = this.count + 1n;
     if (flag === 1n) {
       this.pay(amt);
+    } else {
+      this.pay(amt + 1n);
     }
-    this.count = this.count + 1n;
   }
 }
 `
@@ -128,7 +130,9 @@ class NestedPay extends StatefulSmartContract {
 			controlAddOutputs, controlPayCalls)
 	}
 
-	// Subject: the same call inside an `if` arm must inline identically.
+	// Subject: the same call inside an `if` arm must inline identically. Both
+	// arms pay, so every path that writes `count` carries it (D18 refuses a
+	// writing path that reaches no addOutput).
 	subject := findANFMethodR002(t, prog, "nested")
 	var addOutputs, payCalls int
 	walkANFBindingsR002(subject.Body, func(b ir.ANFBinding) {
@@ -143,8 +147,8 @@ class NestedPay extends StatefulSmartContract {
 		t.Errorf("nested: private output helper was not inlined — found %d method_call to pay; "+
 			"subContext() dropped sideEffects so shouldInlinePrivate returned false", payCalls)
 	}
-	if addOutputs != 1 {
-		t.Errorf("nested: expected 1 add_output binding in the caller's stream, got %d", addOutputs)
+	if addOutputs != 2 {
+		t.Errorf("nested: expected 2 add_output bindings (one per arm) in the caller's stream, got %d", addOutputs)
 	}
 
 	// The continuation must be the multi-output path. The single-output path is

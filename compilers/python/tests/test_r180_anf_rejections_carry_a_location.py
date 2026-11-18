@@ -97,6 +97,9 @@ export class LoopOp extends SmartContract {
 }
 """
 
+# Both arms declare an output, so every path that writes `count` reaches an
+# addOutput and typecheck's D18 rule passes; the then-arm's local assignments
+# still reach the ANF "both declares outputs" rejection this case is about.
 COND_OUT = """import { StatefulSmartContract, assert } from 'runar-lang';
 
 export class CondOut extends StatefulSmartContract {
@@ -113,6 +116,8 @@ export class CondOut extends StatefulSmartContract {
     if (v > 1n) {
       na = v;
       nb = v + 1n;
+      this.addOutput(1000n, this.count);
+    } else {
       this.addOutput(1000n, this.count);
     }
     this.count = na + nb;
