@@ -7,6 +7,7 @@
 
 require_relative "ast_nodes"
 require_relative "diagnostic"
+require_relative "continuation_rules"
 
 module RunarCompiler
   module Frontend
@@ -892,7 +893,7 @@ module RunarCompiler
             )
           end
           if frontend.send(:_method_calls_require_output_p2pkh, method, @contract, true) &&
-             frontend.send(:_method_mutates_state, method, @contract) &&
+             ContinuationRules.mutates_state?(method, @contract) &&
              !has_state_output
             add_error(
               "method '#{method.name}' calls requireOutputP2PKH(0, ...) but also mutates state " \
@@ -902,6 +903,12 @@ module RunarCompiler
               "unspendable. Assert the bond on a non-continuation output index, or make the method " \
               "terminal (no state mutation)"
             )
+          end
+
+          # D18: in a method that declares its own outputs, a path that writes
+          # state and reaches no addOutput drops its write (see continuation_rules.rb).
+          if method.visibility == "public" && ContinuationRules.drops_continuation?(method, @contract)
+            add_error(ContinuationRules.dropped_continuation_message(method.name))
           end
         end
       end

@@ -14,6 +14,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const anf_lower = @import("anf_lower.zig");
+const continuation_rules = @import("continuation_rules.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -1393,7 +1394,7 @@ const TypeChecker = struct {
                 );
             }
             if (anf_lower.methodCallsRequireOutputP2PKH(method, self.contract, true) and
-                anf_lower.methodMutatesState(method, self.contract) and
+                continuation_rules.mutatesState(method, self.contract) and
                 !has_state_output)
             {
                 self.addError(
@@ -1405,6 +1406,13 @@ const TypeChecker = struct {
                         "terminal (no state mutation)",
                     .{method.name},
                 );
+            }
+
+            // D18: in a method that declares its own outputs, a path that
+            // writes state and reaches no addOutput drops its write (see
+            // continuation_rules.zig).
+            if (method.is_public and continuation_rules.dropsContinuation(method, self.contract)) {
+                self.addError(continuation_rules.DROPPED_CONTINUATION_FMT, .{method.name});
             }
         }
     }

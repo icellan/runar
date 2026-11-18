@@ -802,6 +802,11 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 					"unspendable. Assert the bond on a non-continuation output index, or make the method "+
 					"terminal (no state mutation)", method.Name))
 		}
+		// D18: in a method that declares its own outputs, a path that writes
+		// state and reaches no addOutput drops its write (see continuation_rules.go).
+		if method.Visibility == "public" && DropsContinuation(tc.contract, method, effects) {
+			tc.addError(DroppedContinuationMessage(method.Name))
+		}
 	}
 }
 

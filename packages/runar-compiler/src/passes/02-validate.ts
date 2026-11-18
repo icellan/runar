@@ -18,6 +18,8 @@ import { makeDiagnostic } from '../errors.js';
 import { validateSighashUsage } from './sighash-validate.js';
 import { isReservedSourceName } from './reserved-names.js';
 import { InputLimits } from 'runar-ir-schema';
+import { computeSideEffectSummary } from './side-effect-summary.js';
+import { releaseTrapWarning } from './continuation-rules.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -63,6 +65,11 @@ export function validate(contract: ContractNode): ValidationResult {
   for (const d of validateSighashUsage(contract)) {
     (d.severity === 'warning' ? warnings : errors).push(d);
   }
+
+  // #199: a stateful contract none of whose public methods is terminal or
+  // sizes its own outputs can never release its satoshis (advisory only).
+  const releaseTrap = releaseTrapWarning(contract, computeSideEffectSummary(contract));
+  if (releaseTrap) warnings.push(releaseTrap);
 
   return { errors, warnings };
 }

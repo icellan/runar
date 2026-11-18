@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .required_fields import assert_required_ir_fields
 from .stateful_scaffold import stateful_scaffold_error
+from .continuation_rules import dropped_continuation_error
 from .synthetic_array_chain import assert_synthetic_array_chains
 from .preimage_rules import assert_preimage_rules, assert_unique_method_names
 from .rabin_key_provenance import assert_rabin_key_provenance
@@ -322,6 +323,12 @@ def validate_ir(program: ANFProgram) -> list[str]:
         scaffold_error = stateful_scaffold_error(program)
         if scaffold_error:
             errors.append(scaffold_error)
+        else:
+            # D18: IR input skips typecheck's dropped-continuation rule (see
+            # ir/continuation_rules.py).
+            d18_error = dropped_continuation_error(program)
+            if d18_error:
+                errors.append(d18_error)
 
     # N-113 / R-081: a contract with no public method has no spending entry
     # point and emits an EMPTY locking script -- which is anyone-can-spend, not

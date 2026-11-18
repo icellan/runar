@@ -128,6 +128,12 @@ public final class Validate {
             }
         }
 
+        // #199: a stateful contract none of whose public methods is terminal or
+        // sizes its own outputs can never release its satoshis (advisory only;
+        // see ContinuationRules). Contract-level: no source location.
+        String releaseTrap = ContinuationRules.releaseTrapWarning(contract);
+        if (releaseTrap != null) ctx.warn(releaseTrap, null);
+
         return new Result(ctx.errors, ctx.warnings);
     }
 

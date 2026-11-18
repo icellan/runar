@@ -108,7 +108,9 @@ public final class SighashValidate {
 
             // State-continuation binding (stateful auto-injected hashOutputs).
             boolean needsContinuation = isStateful
-                && (AnfLower.methodMutatesState(method, contract)
+                // ContinuationRules.mutatesState also counts FixedArray element
+                // writes, which this unexpanded contract still spells as such.
+                && (ContinuationRules.mutatesState(method, contract)
                     || AnfLower.methodHasAddOutput(method, contract)
                     || AnfLower.methodHasAddDataOutput(method, contract));
 

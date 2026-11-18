@@ -40,6 +40,7 @@ class Lock extends StatefulSmartContract {
   public lock(p: Point) {
     this.addRawOutput(1000n, cat(cat(toByteString('40'), p), toByteString('87')));
     this.n = this.n + 1n;
+    this.addOutput(50000n, this.n);
   }
 }
 `;
@@ -54,6 +55,7 @@ class PayToKey extends StatefulSmartContract {
   public pay(pk: PubKey) {
     this.addRawOutput(1000n, cat(cat(toByteString('21'), pk), toByteString('ac')));
     this.n = this.n + 1n;
+    this.addOutput(50000n, this.n);
   }
 }
 `;
@@ -68,6 +70,7 @@ class RawPay extends StatefulSmartContract {
   public pay(scriptBytes: ByteString) {
     this.addRawOutput(1000n, scriptBytes);
     this.count = this.count + 1n;
+    this.addOutput(50000n, this.count);
   }
 }
 `;

@@ -69,11 +69,15 @@ class RawPay extends StatefulSmartContract {
   public pay(scriptBytes: ByteString) {
     this.addRawOutput(1000n, scriptBytes);
     this.count = this.count + 1n;
+    this.addOutput(100000n, this.count);
   }
 }
 `;
 
-/** #180 (c), verbatim from the issue. */
+/**
+ * #180 (c), from the issue, plus the addOutput that carries the state write
+ * (D18 refuses a state write with only raw outputs).
+ */
 const LOCK_SRC = `import { StatefulSmartContract, cat, toByteString } from 'runar-lang';
 import type { Point } from 'runar-lang';
 
@@ -84,6 +88,7 @@ class Lock extends StatefulSmartContract {
   public lock(p: Point) {
     this.addRawOutput(1000n, cat(cat(toByteString('40'), p), toByteString('87')));
     this.n = this.n + 1n;
+    this.addOutput(100000n, this.n);
   }
 }
 `;
@@ -99,6 +104,7 @@ class PayToKey extends StatefulSmartContract {
   public pay(pk: PubKey) {
     this.addRawOutput(1000n, cat(cat(toByteString('21'), pk), toByteString('ac')));
     this.n = this.n + 1n;
+    this.addOutput(100000n, this.n);
   }
 }
 `;
@@ -115,6 +121,7 @@ class PickKey extends StatefulSmartContract {
     const k = pick ? a : b;
     this.addRawOutput(1000n, cat(cat(toByteString('21'), k), toByteString('ac')));
     this.n = this.n + 1n;
+    this.addOutput(100000n, this.n);
   }
 }
 `;
@@ -131,6 +138,7 @@ class IdKey extends StatefulSmartContract {
   public pay(pk: PubKey) {
     this.addRawOutput(1000n, cat(cat(toByteString('21'), this.id(pk)), toByteString('ac')));
     this.n = this.n + 1n;
+    this.addOutput(100000n, this.n);
   }
 }
 `;

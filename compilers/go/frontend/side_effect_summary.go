@@ -31,6 +31,9 @@ package frontend
 type MethodEffects struct {
 	MutatesState   bool // mutates a non-readonly property (assignment or ++/--)
 	HasStateOutput bool // calls this.addOutput(...) or this.addRawOutput(...)
+	// CallsAddOutput: calls this.addOutput(...) itself (D18: the only output
+	// intrinsic that carries state).
+	CallsAddOutput bool
 	HasDataOutput  bool // calls this.addDataOutput(...)
 	UsesPreimage   bool // calls checkPreimage(...) (manually, outside auto-injected one)
 	// CallsRequireOutputP2PKH: calls requireOutputP2PKH(...) with any index.
@@ -75,6 +78,23 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 
 	inProgress := make(map[string]bool)
 
+	// writesMutableProperty: a write target that is a mutable property, or an
+	// element of one (this.arr[i], this.grid[i][j]). The element form matters
+	// before FixedArray expansion (validate / typecheck see the unexpanded
+	// contract, D18); after it, element writes are already plain property writes.
+	writesMutableProperty := func(target Expression) bool {
+		t := target
+		for {
+			ia, ok := t.(IndexAccessExpr)
+			if !ok {
+				break
+			}
+			t = ia.Object
+		}
+		pa, ok := t.(PropertyAccessExpr)
+		return ok && mutableProps[pa.Property]
+	}
+
 	var effectsFor func(methodName string, body []Statement) MethodEffects
 	var collectStmt func(stmt Statement, into *MethodEffects)
 	var collectExpr func(expr Expression, into *MethodEffects)
@@ -106,6 +126,9 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 		if source.HasStateOutput {
 			target.HasStateOutput = true
 		}
+		if source.CallsAddOutput {
+			target.CallsAddOutput = true
+		}
 		if source.HasDataOutput {
 			target.HasDataOutput = true
 		}
@@ -126,7 +149,7 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 	collectStmt = func(stmt Statement, into *MethodEffects) {
 		switch s := stmt.(type) {
 		case AssignmentStmt:
-			if pa, ok := s.Target.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
+			if writesMutableProperty(s.Target) {
 				into.MutatesState = true
 			}
 			// #123 F3: both sides may contain calls — an output intrinsic could
@@ -166,11 +189,11 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 	collectExpr = func(expr Expression, into *MethodEffects) {
 		switch e := expr.(type) {
 		case IncrementExpr:
-			if pa, ok := e.Operand.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
+			if writesMutableProperty(e.Operand) {
 				into.MutatesState = true
 			}
 		case DecrementExpr:
-			if pa, ok := e.Operand.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
+			if writesMutableProperty(e.Operand) {
 				into.MutatesState = true
 			}
 		case CallExpr:
@@ -185,6 +208,9 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 			if calleeName != "" {
 				if sideEffectStateOutputIntrinsics[calleeName] {
 					into.HasStateOutput = true
+				}
+				if calleeName == "addOutput" {
+					into.CallsAddOutput = true
 				}
 				if sideEffectDataOutputIntrinsics[calleeName] {
 					into.HasDataOutput = true

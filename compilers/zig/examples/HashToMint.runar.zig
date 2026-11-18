@@ -37,8 +37,10 @@ pub const HashToMint = struct {
     }
 
     pub fn redeem(self: *HashToMint, nonce: runar.ByteString, reward_pkh: runar.Addr) void {
-        // SHA256d(outpoint_txid || nonce) — txid at BIP-143 preimage offset 68
-        const hash = runar.hash256(runar.cat(runar.substr(self.txPreimage, 68, 32), nonce));
+        // SHA256d(outpoint_txid || nonce) — the spent outpoint's txid (BIP-143
+        // preimage offset 68), read through the extractor so off-chain SDKs
+        // can derive the call (a raw substr of the preimage aborts there).
+        const hash = runar.hash256(runar.cat(runar.substr(runar.extractOutpoint(self.txPreimage), 0, 32), nonce));
 
         // Linear difficulty ramp
         const mined = self.total_supply - self.supply;
@@ -87,11 +89,15 @@ pub const HashToMint = struct {
 
         // Deduct reward
         runar.assert(self.supply >= self.reward);
-        self.supply = self.supply - self.reward;
+        const rest = self.supply - self.reward;
 
-        // Covenant continuation
-        if (self.supply > 0) {
-            self.addOutput(1, self.supply);
+        // Covenant continuation: a non-final mint carries the remaining supply
+        // on (addOutput's value IS the new state); the final mint (rest == 0)
+        // writes no state and ends the covenant. Writing self.supply before the
+        // branch would drop that write on the final path, which every compiler
+        // refuses (D18).
+        if (rest > 0) {
+            self.addOutput(1, rest);
         }
 
         // Reward inscription + P2PKH (covenant enforced via hashOutputs)

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Release-trap warning and dropped state continuation (PR C)
+
+- **All seven compilers — breaking (D18):** in a public `StatefulSmartContract` method that declares
+  any `addOutput` / `addRawOutput` (which removes the auto-injected continuation for the whole
+  method), every path that writes state must reach an `addOutput`; a path that does not is refused
+  (`method '<m>' writes contract state on a path that reaches no addOutput(): ...`). Before, such a
+  write was silently dropped and the contract's remaining value went to the spender's change, with
+  the SDK then tracking a raw output as the contract's UTXO (issue #180's `Lock`). Refused shapes:
+  a write with only raw outputs, a write on a raw-output branch beside an `addOutput` branch, a
+  write before an `addOutput` only one branch reaches (directly or in a helper). The `--ir` /
+  `compileFromANF` path of every tier re-derives the same rule from the ANF. `addDataOutput` is no
+  trigger; a path that writes nothing still compiles. A write to a FixedArray element now counts
+  as a state write everywhere before pass 3b, which also makes a mutate-only `@sighash SINGLE`
+  method writing only an element a refused value skim (it compiled in all seven tiers before).
+- **All seven compilers (#199):** a non-fatal warning (`contract 'X' has no terminal method and no
+  public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'X'`)
+  for a stateful contract whose every public method takes the default continuation, whose F-024
+  value floor lets the value grow but never shrink. Bytes are unchanged.
+
 ### Checked preimage extractor arguments, IR-loader preimage properties, SDK `sha256Compress` (PR G)
 
 - **All seven compilers — breaking:** a preimage extractor (`extractVersion`, `extractHashPrevouts`,

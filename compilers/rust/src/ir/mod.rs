@@ -4,6 +4,7 @@
 //! Rúnar compiler produces byte-identical ANF IR (when serialised with canonical
 //! JSON), so these types serve as the universal interchange format.
 
+pub mod continuation_rules;
 pub mod input_limits;
 pub mod loader;
 pub mod preimage_rules;

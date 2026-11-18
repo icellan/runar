@@ -686,6 +686,42 @@ other builtins: `runar.ContinuationAmount()` (Go), `continuation_amount()`
 (Python, Ruby, Rust, Move), `runar.continuationAmount()` (Zig),
 `continuationAmount()` (TypeScript, Solidity, Java).
 
+#### A contract whose satoshis can never leave (warning, #199)
+
+Because of that floor, a stateful contract none of whose public methods is
+terminal (writes no state and declares no output) or sizes its own outputs
+(`addOutput` / `addRawOutput`, directly or through a private helper) keeps
+every satoshi locked in its instances forever. That is sometimes intended (a
+perpetual counter) and often a mistake (an escrow or vault with no release
+path), so every compiler emits a non-fatal warning:
+
+```
+contract 'X' has no terminal method and no public method that calls addOutput/addRawOutput; its satoshis can never leave instances of 'X'
+```
+
+A contract with no mutable property has only terminal methods and never warns.
+
+#### A state write on a path with no addOutput (error, D18)
+
+Any `addOutput` / `addRawOutput` in a method (on any branch, or in a private
+helper it calls) replaces the default continuation for the whole method: the
+covenant then commits to exactly the outputs the taken path declared, plus
+change. Only `addOutput` carries the contract's state. So in such a method,
+every path that writes state must reach an `addOutput`; otherwise the write
+would be dropped and the contract's remaining value would go to the spender's
+change. Every compiler refuses a path that does not (on the `--ir` path too):
+
+```
+method 'm' writes contract state on a path that reaches no addOutput(): a method that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, so on that path the state write would be lost and the contract's satoshis would leave with the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop writing state on a path meant to end the contract
+```
+
+Refused shapes include a write with only raw outputs, a write on a raw-output
+branch beside an `addOutput` branch, and a write before an `addOutput` that only
+one branch reaches. A path that writes nothing ends the contract by design and
+is accepted (for example `if (c) { this.addRawOutput(...) } else {
+this.addOutput(sats, this.count + 1n) }`); `addDataOutput` keeps the default
+continuation and is no trigger.
+
 ### Oracle
 
 | Function | Signature | Description |
