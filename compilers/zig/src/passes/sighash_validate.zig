@@ -30,6 +30,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const continuation_rules = @import("continuation_rules.zig");
 
 const ContractNode = types.ContractNode;
 const MethodNode = types.MethodNode;
@@ -78,7 +79,11 @@ pub fn validateSighashUsage(
         try scanMethod(contract, method, &scan, &visiting, 0);
 
         const needs_continuation = is_stateful and
-            (scan.mutates_state or scan.state_output_count > 0 or scan.data_output_count > 0);
+            // continuation_rules.mutatesState also counts FixedArray element
+            // ++/-- on this unexpanded contract (element assignments already
+            // set scan.mutates_state: their target is the base property).
+            (scan.mutates_state or continuation_rules.mutatesState(method, contract) or
+                scan.state_output_count > 0 or scan.data_output_count > 0);
 
         // ---- ANYONECANPAY: only THIS input is signed ---------------------
         if (acp) {

@@ -26,6 +26,7 @@ require_relative "sighash_directive"
 # For the transitive state-mutation / output-intrinsic helpers reused from the
 # ANF lowering pass (continuation detection).
 require_relative "anf_lower"
+require_relative "continuation_rules"
 
 module RunarCompiler
   module Frontend
@@ -170,7 +171,9 @@ module RunarCompiler
       # Stateful continuation is auto-injected when the method mutates state or
       # emits an output (mirrors anf_lower's needs_change_output trigger).
       def continuation_needed?(method, contract)
-        RunarCompiler::Frontend.send(:_method_mutates_state, method, contract) ||
+        # ContinuationRules.mutates_state? also counts FixedArray element writes,
+        # which this unexpanded contract still spells as such.
+        RunarCompiler::Frontend::ContinuationRules.mutates_state?(method, contract) ||
           RunarCompiler::Frontend.send(:_method_has_add_output, method, contract) ||
           RunarCompiler::Frontend.send(:_method_has_add_data_output, method, contract)
       end

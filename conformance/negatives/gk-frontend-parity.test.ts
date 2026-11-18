@@ -402,4 +402,39 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
       }
     }
   });
+
+  // Follow-on of D18's FixedArray fix: validate / typecheck / sighash-validate
+  // see the UNEXPANDED contract, where a FixedArray element write is still an
+  // index_access. Before every tier counted it as a state write, a @sighash
+  // SINGLE method whose only write was an element took the mutate-only auto
+  // continuation unrefused (the value-skim shape sighash-validate exists for).
+  describe('SINGLE + FixedArray element write is a mutate-only continuation', () => {
+    const src = (write: string): string => `import { StatefulSmartContract, assert, FixedArray } from 'runar-lang';
+
+class Sg extends StatefulSmartContract {
+  slots: FixedArray<bigint, 2> = [0n, 0n];
+
+  constructor() {
+    super();
+  }
+
+  /** @sighash SINGLE|FORKID */
+  public bump(i: bigint) {
+    assert(i >= 0n && i < 2n);
+    ${write}
+  }
+}
+`;
+    for (const write of ['this.slots[0] = 5n;', 'this.slots[i]++;']) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses \`${write}\` under SINGLE`, () => {
+          const { status, out, diag } = run(tier, writeFile('Sg.runar.ts', src(write)));
+          expect(status, `${tier.id} accepted (emitted "${out}")`).not.toBe(0);
+          // Case-insensitive: the Zig tier words the sentence break differently
+          // ("...; a mutate-only"), a pre-existing wording drift.
+          expect(diag.toLowerCase()).toContain('mutate-only single continuation is unsound');
+        });
+      }
+    }
+  });
 });
