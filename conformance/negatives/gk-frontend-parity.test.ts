@@ -160,26 +160,76 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
       }
     }
 
-    // R3-GK010-GAPS: a readonly SigHashPreimage property is refused at its
-    // declaration with its own diagnostic, pinned here literally.
-    const RO_PREIMAGE_PRE =
-      "readonly property 'pre' cannot hold a SigHashPreimage: a preimage fixed in the locking script " +
-      'can never pass checkPreimage(), so every field an extractor reads from it is unverified';
-    it('every readonly-property corpus refusal carries the pinned diagnostic', () => {
-      const ro = data.refuse.filter((c) => c.error.startsWith('readonly property '));
-      expect(ro.length).toBeGreaterThanOrEqual(6);
-      for (const c of ro.filter((x) => x.name !== 'readonly-fixedarray-property')) expect(c.error, c.name).toBe(RO_PREIMAGE_PRE);
+    // R3-GK010-GAPS + D9: ANY SigHashPreimage property (readonly or mutable,
+    // scalar or FixedArray element) is refused at its declaration with its own
+    // diagnostic, pinned here literally.
+    const PROP_PREIMAGE = (name: string): string =>
+      `property '${name}' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before ` +
+      'the spending transaction existed, so it can never pass checkPreimage() and every field an extractor ' +
+      'reads from it is unverified';
+    it('every property corpus refusal carries the pinned diagnostic', () => {
+      const props = data.refuse.filter((c) => /^(readonly|mutable|py-readonly|py-mutable|rs-mutable)-.*property/.test(c.name));
+      expect(props.length).toBeGreaterThanOrEqual(12);
+      expect(props.filter((c) => c.name.includes('mutable')).length).toBeGreaterThanOrEqual(6);
+      for (const c of props) expect(c.error, c.name).toBe(PROP_PREIMAGE(c.name.includes('fixedarray') ? 'ps' : 'pre'));
     });
-    const roFixture = 'N530-ts-readonly-preimage-property.runar.ts';
-    const roHeader = readFileSync(join(__dirname, roFixture), 'utf8');
-    it(`${roFixture} documents the pinned diagnostic`, () => {
-      expect(roHeader.replace(/\n(\/\/|#) +/g, ' ')).toContain(RO_PREIMAGE_PRE);
+    for (const propFixture of [
+      'N530-ts-readonly-preimage-property.runar.ts',
+      'N531-ts-mutable-preimage-property.runar.ts',
+    ]) {
+      const propHeader = readFileSync(join(__dirname, propFixture), 'utf8');
+      it(`${propFixture} documents the pinned diagnostic`, () => {
+        expect(propHeader.replace(/\n(\/\/|#) +/g, ' ')).toContain(PROP_PREIMAGE('pre'));
+      });
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${propFixture} with the pinned diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(propFixture, propHeader));
+          expect(status, `${tier.id} accepted ${propFixture} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(PROP_PREIMAGE('pre'));
+        });
+      }
+    }
+  });
+
+  describe('D10: a stateless Rust-DSL contract cannot declare tx_preimage', () => {
+    const D10 =
+      'a stateless contract cannot declare tx_preimage: nothing checks it against the spending transaction, ' +
+      'so every field read from it is unverified; use #[runar::stateful_contract], or take the preimage as a ' +
+      'method parameter and assert!(check_preimage(&preimage))';
+    const data = corpus<{
+      refuse: Array<{ name: string; file: string; src: string; error: string }>;
+      accept: Array<{ name: string; file: string; src: string }>;
+    }>('rust-tx-preimage-cases.json');
+    it('the corpus pins the shared diagnostic', () => {
+      expect(data.refuse.length).toBeGreaterThanOrEqual(5);
+      for (const c of data.refuse) expect(c.error, c.name).toBe(D10);
+    });
+    for (const c of data.refuse) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${c.name}`, () => {
+          const { status, out, diag } = run(tier, writeFile(c.file, c.src));
+          expect(status, `${tier.id} accepted ${c.name} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(D10);
+        });
+      }
+    }
+    for (const c of data.accept) {
+      it(`every tier compiles ${c.name} to the same bytes`, () => {
+        const input = writeFile(c.file, c.src);
+        const hexes = TIERS.map((t) => compileHex(t, input));
+        expect(new Set(hexes).size, TIERS.map((t, i) => `${t.id}: ${hexes[i]!.length}`).join(', ')).toBe(1);
+      });
+    }
+    const fixture = 'N532-rs-stateless-tx-preimage.runar.rs';
+    const header = readFileSync(join(__dirname, fixture), 'utf8');
+    it(`${fixture} documents the pinned diagnostic`, () => {
+      expect(header.replace(/\n(\/\/|#) +/g, ' ')).toContain(D10);
     });
     for (const tier of TIERS) {
-      it(`${tier.id} refuses ${roFixture} with the pinned diagnostic`, () => {
-        const { status, out, diag } = run(tier, writeFile(roFixture, roHeader));
-        expect(status, `${tier.id} accepted ${roFixture} (emitted "${out}")`).not.toBe(0);
-        expect(diag).toContain(RO_PREIMAGE_PRE);
+      it(`${tier.id} refuses ${fixture} with the pinned diagnostic`, () => {
+        const { status, out, diag } = run(tier, writeFile(fixture, header));
+        expect(status, `${tier.id} accepted ${fixture} (emitted "${out}")`).not.toBe(0);
+        expect(diag).toContain(D10);
       });
     }
   });

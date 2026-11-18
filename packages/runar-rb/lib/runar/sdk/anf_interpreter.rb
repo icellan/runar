@@ -3,6 +3,7 @@
 require 'digest'
 require 'set'
 require_relative '../ecdsa'
+require_relative '../builtins'
 
 # Lightweight ANF interpreter for auto-computing state transitions.
 #
@@ -1009,6 +1010,10 @@ module Runar
         when 'hash256'  then hash_fn('hash256',  args[0])
         when 'hash160'  then hash_fn('hash160',  args[0])
         when 'ripemd160' then hash_fn('ripemd160', args[0])
+        # D11: the compiled script's partial-SHA-256 finalize. It used to fall
+        # through to the nil default, so a state field derived from it was
+        # silently wrong off-chain.
+        when 'sha256Finalize' then sha256_finalize_fn(args[0], args[1], args[2])
 
         # Assert — no-op in simulation.
         when 'assert'
@@ -1313,6 +1318,34 @@ module Runar
       # ---------------------------------------------------------------------------
       # Hash helpers
       # ---------------------------------------------------------------------------
+
+      # sha256Finalize as the compiled script computes it, refusing exactly what
+      # the script refuses (F-114 state size, F-142 remaining length,
+      # GK-BUG-013 msgBitLen domain) with the diagnostics every tier shares.
+      #
+      # @return [String] hex-encoded 32-byte digest
+      def sha256_finalize_fn(state_hex, remaining_hex, msg_bit_len)
+        state = [(state_hex || '').to_s].pack('H*')
+        remaining = [(remaining_hex || '').to_s].pack('H*')
+        raise ArgumentError, 'sha256Finalize: msgBitLen must be a bigint' unless msg_bit_len.is_a?(Integer)
+        raise ArgumentError, "sha256Finalize: state must be 32 bytes, got #{state.bytesize}" unless state.bytesize == 32
+        if remaining.bytesize > 119
+          raise ArgumentError, "sha256Finalize: remaining must be 0-119 bytes, got #{remaining.bytesize}"
+        end
+        unless msg_bit_len >= 0 && msg_bit_len < (1 << 64)
+          raise ArgumentError, "sha256Finalize: msgBitLen must be in [0, 2^64), got #{msg_bit_len}"
+        end
+
+        blocks = remaining.bytesize + 1 + 8 <= 64 ? 1 : 2
+        padded = (remaining + "\x80".b).ljust(blocks * 64 - 8, "\x00".b) + [msg_bit_len].pack('Q>')
+        out = state.unpack1('H*')
+        blocks.times { |i| out = SHA256_COMPRESS_HOST.sha256_compress(out, padded[i * 64, 64].unpack1('H*')) }
+        out
+      end
+
+      # The real sha256_compress lives in Runar::Builtins (an instance-method
+      # module); this object hosts it for sha256_finalize_fn.
+      SHA256_COMPRESS_HOST = Object.new.extend(Runar::Builtins)
 
       # Compute a named hash function over hex-encoded input.
       #

@@ -1,0 +1,26 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/sha256-finalize-probe.anf.json",
+  "methodName": "finalize",
+  "currentState": {
+    "digest": "00"
+  },
+  "args": {
+    "state": "fc99a2df88f42a7a7bb9d18033cdc6a20256755f9d5b9a5044a9cc315abe84a7",
+    "remaining": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60616263",
+    "msgBitLen": "800n"
+  },
+  "constructorArgs": [
+    "00"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/Sha256FinalizeProbe.runar.ts",
+    "constructorArgs": [
+      "00"
+    ],
+    "methodArgs": [
+      "fc99a2df88f42a7a7bb9d18033cdc6a20256755f9d5b9a5044a9cc315abe84a7",
+      "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60616263",
+      "800n"
+    ]
+  }
+}

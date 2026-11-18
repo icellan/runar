@@ -183,7 +183,27 @@ export class VarLenReader extends StatefulSmartContract {
 `;
 }
 
-describe.each(['Sig', 'SigHashPreimage'] as const)(
+/**
+ * D9: no property may hold a SigHashPreimage any more (a stored preimage can
+ * never pass checkPreimage), so the SigHashPreimage rows this file used to run
+ * are refused at compile; the deploy + spend cycle runs for Sig.
+ */
+describe('SigHashPreimage state field — refused at compile (D9)', () => {
+  for (const [src, file] of [
+    [reader('SigHashPreimage'), 'VarLenReader.runar.ts'],
+    [carrier('SigHashPreimage'), 'VarLenCarrier.runar.ts'],
+  ] as const) {
+    it(file, () => {
+      const r = compile(src, { fileName: file });
+      expect(r.success).toBe(false);
+      expect(r.diagnostics.map((d) => d.message).join('\n')).toContain(
+        "property 'sig' cannot hold a SigHashPreimage",
+      );
+    });
+  }
+});
+
+describe.each(['Sig'] as const)(
   '%s state field — real Script VM deploy + spend',
   (propType) => {
     describe('deploy-time framing (SDK writer) is <len> || value', () => {
@@ -243,9 +263,9 @@ describe.each(['Sig', 'SigHashPreimage'] as const)(
  * public method of a stateful contract: `RunarContract.prepareCall` strips
  * every SigHashPreimage param as implicit, so `rotate(next: SigHashPreimage,
  * amount: bigint)` is called with one user argument, not two. That is a
- * pre-existing convention of the SDK's ABI, not part of this fix;
- * `SigHashPreimage` state fields are covered above through the constructor and
- * the carry-forward path, and at the byte level in every tier by
+ * pre-existing convention of the SDK's ABI, not part of this fix.
+ * `SigHashPreimage` state fields are refused at compile (D9, above); their
+ * framing codegen is pinned below the validator, in every tier, by
  * `cross-compiler.test.ts`.
  */
 describe('Sig state field — a NEW value supplied by the unlocking script', () => {

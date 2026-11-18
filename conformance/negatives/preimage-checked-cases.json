@@ -1,5 +1,5 @@
 {
-  "_comment": "GK-GAP-010 (tightened by R2-GK010-ASSERT): a public method's SigHashPreimage parameter counts as checked only where checkPreimage(p) is the asserted condition of assert(...), directly or as any conjunct of the top-level && chain inside it, on every path (spec/type-system.md 4.2-4.3). A discarded call, a call bound to a local, a negated, ||-ed, compared or ternary-wrapped call, a call used as an if / ternary condition and a helper that returns checkPreimage(p) check nothing. Refused cases carry the shared diagnostic; accepted cases must compile to the same bytes in every tier. A `return` ends its path: a private helper's asserted check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it). A contract method named checkPreimage is not the built-in (method-named-checkpreimage). R3-GK010-GAPS: a readonly property that holds a SigHashPreimage (scalar or FixedArray element) is refused at its declaration with its own diagnostic (readonly-*property* cases): it is a constant in the locking script and the preimage commits to the outpoint of the transaction carrying that script, so checkPreimage on it can never pass and every extractor read of it is unverified. A FixedArray<SigHashPreimage> method parameter is refused by every tier's validator (fixedarray-parameter; each tier words that diagnostic itself, so only the substring FixedArray is pinned).",
+  "_comment": "GK-GAP-010 (tightened by R2-GK010-ASSERT): a public method's SigHashPreimage parameter counts as checked only where checkPreimage(p) is the asserted condition of assert(...), directly or as any conjunct of the top-level && chain inside it, on every path (spec/type-system.md 4.2-4.3). A discarded call, a call bound to a local, a negated, ||-ed, compared or ternary-wrapped call, a call used as an if / ternary condition and a helper that returns checkPreimage(p) check nothing. Refused cases carry the shared diagnostic; accepted cases must compile to the same bytes in every tier. A `return` ends its path: a private helper's asserted check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it). A contract method named checkPreimage is not the built-in (method-named-checkpreimage). R3-GK010-GAPS + D9: ANY property that holds a SigHashPreimage (readonly or mutable, scalar or FixedArray element, stateless or stateful) is refused at its declaration with its own diagnostic (readonly-*property* and mutable-*property* cases): a readonly one is a constant in the locking script, a mutable one was written by an earlier spend, so either way it was fixed before the spending transaction existed, checkPreimage on it can never pass and every extractor read of it is unverified. The implicit txPreimage of StatefulSmartContract is not a declared property and is unaffected. A FixedArray<SigHashPreimage> method parameter is refused by every tier's validator (fixedarray-parameter; each tier words that diagnostic itself, so only the substring FixedArray is pinned).",
   "refuse": [
     {
       "name": "extract-only",
@@ -143,43 +143,79 @@
       "name": "readonly-property-extract",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcRoPropExtract extends SmartContract {\n  readonly pre: SigHashPreimage;\n\n  constructor(pre: SigHashPreimage) {\n    super(pre);\n    this.pre = pre;\n  }\n\n  public spend(x: bigint) {\n    assert(extractAmount(this.pre) >= x);\n  }\n}\n",
-      "error": "readonly property 'pre' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified"
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
     },
     {
       "name": "readonly-property-checked",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcRoPropChecked extends SmartContract {\n  readonly pre: SigHashPreimage;\n\n  constructor(pre: SigHashPreimage) {\n    super(pre);\n    this.pre = pre;\n  }\n\n  public spend(x: bigint) {\n    assert(checkPreimage(this.pre));\n    assert(extractAmount(this.pre) >= x);\n  }\n}\n",
-      "error": "readonly property 'pre' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified"
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
     },
     {
       "name": "readonly-property-via-helper",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcRoPropHelper extends SmartContract {\n  readonly pre: SigHashPreimage;\n\n  constructor(pre: SigHashPreimage) {\n    super(pre);\n    this.pre = pre;\n  }\n\n  public spend(x: bigint) {\n    assert(this.amt(this.pre) >= x);\n  }\n\n  private amt(p: SigHashPreimage): bigint {\n    return extractAmount(p);\n  }\n}\n",
-      "error": "readonly property 'pre' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified"
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
     },
     {
       "name": "readonly-property-stateful",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcRoPropStateful extends StatefulSmartContract {\n  readonly pre: SigHashPreimage;\n  count: bigint;\n\n  constructor(pre: SigHashPreimage, count: bigint) {\n    super(pre, count);\n    this.pre = pre;\n    this.count = count;\n  }\n\n  public bump(x: bigint) {\n    assert(extractAmount(this.pre) >= x);\n    this.count = this.count + 1n;\n  }\n}\n",
-      "error": "readonly property 'pre' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified"
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
     },
     {
       "name": "readonly-fixedarray-property",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcRoFixedArrayProp extends SmartContract {\n  readonly ps: FixedArray<SigHashPreimage, 2> = [toByteString('00'), toByteString('11')];\n\n  constructor() {\n    super();\n  }\n\n  public spend(x: bigint) {\n    assert(extractAmount(this.ps[0]) >= x);\n  }\n}\n",
-      "error": "readonly property 'ps' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified"
+      "error": "property 'ps' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
     },
     {
       "name": "py-readonly-property",
       "file": "Pc.runar.py",
       "src": "from runar import SmartContract, SigHashPreimage, public, assert_, extract_amount\n\nclass PcPyRoProp(SmartContract):\n    pre: SigHashPreimage\n\n    def __init__(self, pre: SigHashPreimage):\n        super().__init__(pre)\n        self.pre = pre\n\n    @public\n    def spend(self, x: int):\n        assert_(extract_amount(self.pre) >= x)\n",
-      "error": "readonly property 'pre' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified"
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
     },
     {
       "name": "fixedarray-parameter",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcFixedArrayParam extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(ps: FixedArray<SigHashPreimage, 2>) {\n    assert(extractAmount(ps[0]) >= this.minAmount);\n  }\n}\n",
       "error": "FixedArray"
+    },
+    {
+      "name": "mutable-property-extract",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcMutPropExtract extends StatefulSmartContract {\n  pre: SigHashPreimage;\n  count: bigint;\n\n  constructor(pre: SigHashPreimage, count: bigint) {\n    super(pre, count);\n    this.pre = pre;\n    this.count = count;\n  }\n\n  public bump(x: bigint) {\n    assert(extractAmount(this.pre) >= x);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "mutable-property-checked",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcMutPropChecked extends StatefulSmartContract {\n  pre: SigHashPreimage;\n  count: bigint;\n\n  constructor(pre: SigHashPreimage, count: bigint) {\n    super(pre, count);\n    this.pre = pre;\n    this.count = count;\n  }\n\n  public bump(x: bigint) {\n    assert(checkPreimage(this.pre));\n    assert(extractAmount(this.pre) >= x);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "mutable-property-only-state",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcMutPropOnly extends StatefulSmartContract {\n  pre: SigHashPreimage;\n\n  constructor(pre: SigHashPreimage) {\n    super(pre);\n    this.pre = pre;\n  }\n\n  public roll(next: SigHashPreimage) {\n    assert(checkPreimage(next));\n    assert(extractAmount(this.pre) >= 1n);\n    this.pre = next;\n  }\n}\n",
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "mutable-fixedarray-property",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, StatefulSmartContract, assert, ByteString, FixedArray, SigHashPreimage, checkPreimage, extractAmount, toByteString } from 'runar-lang';\n\nclass PcMutFixedArrayProp extends StatefulSmartContract {\n  ps: FixedArray<SigHashPreimage, 2>;\n  count: bigint;\n\n  constructor(ps: FixedArray<SigHashPreimage, 2>, count: bigint) {\n    super(ps, count);\n    this.ps = ps;\n    this.count = count;\n  }\n\n  public bump(x: bigint) {\n    assert(extractAmount(this.ps[0]) >= x);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "error": "property 'ps' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "py-mutable-property",
+      "file": "Pc.runar.py",
+      "src": "from runar import StatefulSmartContract, SigHashPreimage, public, assert_, extract_amount\n\nclass PcPyMutProp(StatefulSmartContract):\n    pre: SigHashPreimage\n    count: int\n\n    def __init__(self, pre: SigHashPreimage, count: int):\n        super().__init__(pre, count)\n        self.pre = pre\n        self.count = count\n\n    @public\n    def bump(self, x: int):\n        assert_(extract_amount(self.pre) >= x)\n        self.count = self.count + 1\n",
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
+    },
+    {
+      "name": "rs-mutable-property",
+      "file": "Pc.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::stateful_contract]\npub struct PcRsMutProp {\n    pub pre: SigHashPreimage,\n    pub count: Bigint,\n}\n\nimpl PcRsMutProp {\n    pub fn bump(&mut self, x: Bigint) {\n        assert!(extract_amount(&self.pre) >= x);\n        self.count = self.count + 1;\n    }\n}\n",
+      "error": "property 'pre' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified"
     }
   ],
   "accept": [

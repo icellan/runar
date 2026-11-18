@@ -105,7 +105,7 @@ class SigStateVarLenTest {
     // -----------------------------------------------------------------------
 
     @ParameterizedTest
-    @ValueSource(strings = {"Sig", "SigHashPreimage"})
+    @ValueSource(strings = {"Sig"})
     void mutatingMethodFramesLikeByteString(String propType) throws Exception {
         String control = PipelineTestSupport.hex(writeSrc("ByteString"), WRITE_FILE);
         String got = PipelineTestSupport.hex(writeSrc(propType), WRITE_FILE);
@@ -120,7 +120,7 @@ class SigStateVarLenTest {
     // -----------------------------------------------------------------------
 
     @ParameterizedTest
-    @ValueSource(strings = {"Sig", "SigHashPreimage"})
+    @ValueSource(strings = {"Sig"})
     void terminalReadMatchesByteString(String propType) throws Exception {
         String control = PipelineTestSupport.hex(readSrc("ByteString"), READ_FILE);
         String got = PipelineTestSupport.hex(readSrc(propType), READ_FILE);
@@ -131,13 +131,27 @@ class SigStateVarLenTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"Sig", "SigHashPreimage", "ByteString"})
+    @ValueSource(strings = {"Sig", "ByteString"})
     void terminalReadRequiresCodePart(String propType) throws Exception {
         // The ABI shape, not just the byte count: this is the flag the artifact
         // assembler publishes as abi.methods[].usesCodePart, which the SDK reads
         // to decide whether to push _codePart into the unlocking script.
         assertTrue(requiresCodePart(readSrc(propType), READ_FILE, "check"),
             "a terminal read of a mutable " + propType + " field must take the implicit _codePart parameter");
+    }
+
+    /**
+     * D9: no property may hold a SigHashPreimage any more (a stored preimage
+     * can never pass checkPreimage); the framing lock above runs for Sig, and
+     * the SigHashPreimage rows it used to carry are refused at validate.
+     */
+    @Test
+    void sigHashPreimageFieldIsRefused() {
+        for (String src : List.of(writeSrc("SigHashPreimage"), readSrc("SigHashPreimage"))) {
+            Exception e = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+                () -> PipelineTestSupport.parseValidated(src, WRITE_FILE));
+            assertTrue(e.getMessage().contains("property 'tag' cannot hold a SigHashPreimage"), e.getMessage());
+        }
     }
 
     // -----------------------------------------------------------------------

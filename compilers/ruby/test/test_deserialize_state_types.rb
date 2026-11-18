@@ -105,7 +105,15 @@ class TestDeserializeStateTypes < Minitest::Test
     refute_nil parse_result.contract
 
     val_result = RunarCompiler::Frontend.validate(parse_result.contract)
-    assert_empty val_result.errors.map(&:format_message), "unexpected validation errors"
+    if ts_type == "SigHashPreimage"
+      # D9: no property may hold a SigHashPreimage, so validate refuses this
+      # source; the codegen below is still reachable from IR (`--ir`), and
+      # this test pins it there.
+      assert(val_result.errors.map(&:format_message).any? { |m| m.include?("property 'value' cannot hold a SigHashPreimage") },
+             "D9: validate must refuse a SigHashPreimage state field")
+    else
+      assert_empty val_result.errors.map(&:format_message), "unexpected validation errors"
+    end
 
     tc_result = RunarCompiler::Frontend.type_check(parse_result.contract)
     assert_empty tc_result.errors.map(&:format_message), "unexpected type check errors"

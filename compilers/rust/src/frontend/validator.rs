@@ -203,11 +203,12 @@ fn is_valid_property_primitive(name: &PrimitiveTypeName) -> bool {
 // Property validation
 // ---------------------------------------------------------------------------
 
-/// The diagnostic every tier shares (R3-GK010-GAPS).
-pub fn readonly_preimage_property_message(name: &str) -> String {
+/// The diagnostic every tier shares (R3-GK010-GAPS, generalised by D9).
+pub fn preimage_property_message(name: &str) -> String {
     format!(
-        "readonly property '{}' cannot hold a SigHashPreimage: a preimage fixed in the locking script \
-         can never pass checkPreimage(), so every field an extractor reads from it is unverified",
+        "property '{}' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before \
+         the spending transaction existed, so it can never pass checkPreimage() and every field an \
+         extractor reads from it is unverified",
         name
     )
 }
@@ -225,15 +226,19 @@ fn validate_properties(contract: &ContractNode, errors: &mut Vec<Diagnostic>, wa
     for prop in &contract.properties {
         validate_property_type(&prop.prop_type, &prop.source_location, errors);
 
-        // R3-GK010-GAPS: a readonly property is a constant in the locking
-        // script, and a sighash preimage commits to the outpoint of the
-        // transaction that carries that script, so checkPreimage() on it can
-        // never pass and every field an extractor reads from it is
-        // unverified. Refused at the declaration (before FixedArray
-        // expansion, so the name is the user's).
-        if prop.readonly && holds_sig_hash_preimage(&prop.prop_type) {
+        // R3-GK010-GAPS + D9: no property may hold a SigHashPreimage. A
+        // readonly one is a constant in the locking script, and a sighash
+        // preimage commits to the outpoint of the transaction that carries
+        // that script; a mutable one was written by an earlier spend and
+        // describes that transaction. Either way it was fixed before the
+        // spending transaction existed, so checkPreimage() on it can never
+        // pass and every field an extractor reads from it is unverified.
+        // Refused at the declaration (before FixedArray expansion, so the
+        // name is the user's). The implicit txPreimage of
+        // StatefulSmartContract is not a declared property and is unaffected.
+        if holds_sig_hash_preimage(&prop.prop_type) {
             errors.push(Diagnostic::error(
-                readonly_preimage_property_message(&prop.name),
+                preimage_property_message(&prop.name),
                 Some(prop.source_location.clone()),
             ));
         }

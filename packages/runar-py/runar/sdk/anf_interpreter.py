@@ -1301,6 +1301,30 @@ def _eval_unary_op(op: str, operand: Any, result_type: Optional[str] = None) -> 
 # Built-in function calls
 # ---------------------------------------------------------------------------
 
+def _sha256_finalize(state_hex: Any, remaining_hex: Any, msg_bit_len: Any) -> str:
+    """sha256Finalize as the compiled script computes it, refusing exactly what
+    the script refuses (F-114 state size, F-142 remaining length, GK-BUG-013
+    msgBitLen domain) with the diagnostics every tier shares."""
+    from runar.builtins import sha256_compress
+
+    state = bytes.fromhex(str(state_hex or ''))
+    remaining = bytes.fromhex(str(remaining_hex or ''))
+    if isinstance(msg_bit_len, bool) or not isinstance(msg_bit_len, int):
+        raise ValueError('sha256Finalize: msgBitLen must be a bigint')
+    if len(state) != 32:
+        raise ValueError(f'sha256Finalize: state must be 32 bytes, got {len(state)}')
+    if len(remaining) > 119:
+        raise ValueError(f'sha256Finalize: remaining must be 0-119 bytes, got {len(remaining)}')
+    if not 0 <= msg_bit_len < 1 << 64:
+        raise ValueError(f'sha256Finalize: msgBitLen must be in [0, 2^64), got {msg_bit_len}')
+    blocks = 1 if len(remaining) + 1 + 8 <= 64 else 2
+    padded = (remaining + b'\x80').ljust(blocks * 64 - 8, b'\x00') + msg_bit_len.to_bytes(8, 'big')
+    out = state
+    for i in range(blocks):
+        out = sha256_compress(out, padded[i * 64:(i + 1) * 64])
+    return out.hex()
+
+
 def _eval_call(
     func: str,
     args: List[Any],
@@ -1357,6 +1381,11 @@ def _eval_call(
         return _hash_fn('hash160', args[0])
     if func == 'ripemd160':
         return _hash_fn('ripemd160', args[0])
+    # D11: the compiled script's partial-SHA-256 finalize. It used to fall
+    # through to the None default, so a state field derived from it was
+    # silently wrong off-chain.
+    if func == 'sha256Finalize':
+        return _sha256_finalize(*(list(args) + [None, None, None])[:3])
 
     # Assert -- skip
     if func == 'assert':

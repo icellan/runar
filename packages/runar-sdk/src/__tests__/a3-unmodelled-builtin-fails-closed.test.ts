@@ -140,7 +140,7 @@ describe('A-3 — an unmodelled builtin must fail closed, naming itself', () => 
     }
   });
 
-  it('RED: the byte-slicing gap (sha256Compress) is refused too', () => {
+  it('RED: the byte-slicing gap (sha256Compress) is refused too; sha256Finalize is modelled (D11)', () => {
     // F-274 modelled `left`/`right` (CL-BUG-163: they used to fail CLOSED
     // here, but also fail OPEN with wrong values in several native runtimes
     // and SDK ANF interpreters for an out-of-range length — see
@@ -152,9 +152,12 @@ describe('A-3 — an unmodelled builtin must fail closed, naming itself', () => 
     // of an empty dummy, so `substr(sc, ...)` in a method like
     // `FungibleToken.merge` no longer needs a clamp to avoid a spurious
     // abort during off-chain state derivation.
-    for (const name of ['sha256Compress', 'sha256Finalize']) {
-      expect(probe(name), `${name} must be refused`).toMatchObject({ kind: 'refused' });
-    }
+    // D11 modelled `sha256Finalize` (its arguments are bytes, so the probe's
+    // argument-less call now draws its domain refusal instead of the
+    // "does not model" one); `sha256Compress` is still the gap.
+    expect(probe('sha256Compress'), 'sha256Compress must be refused').toMatchObject({ kind: 'refused' });
+    expect(probe('sha256Finalize')).toMatchObject({ kind: 'threw-other' });
+    expect((probe('sha256Finalize') as { message: string }).message).toMatch(/^sha256Finalize: /);
   });
 
   it('RED: `__array_access` (ByteString data[i]) is refused — it is a value-producing op the interpreter does not model', () => {

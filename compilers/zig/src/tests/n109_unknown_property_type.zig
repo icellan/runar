@@ -74,9 +74,9 @@ const CONTROL =
 
 /// Over-rejection guard. Every legitimate property type in one stateless
 /// contract — if the new arm is too broad, this stops compiling.
-/// SigHashPreimage is the exception: a READONLY preimage property is refused
-/// on its own grounds (R3-GK010-GAPS), so its type is guarded by the stateful
-/// MUTABLE_PREIMAGE_TYPE control below instead.
+/// SigHashPreimage is the exception: ANY preimage property is refused on its
+/// own grounds (R3-GK010-GAPS, D9), so its type is guarded by the
+/// READONLY_/MUTABLE_PREIMAGE_PROPERTY controls below instead.
 const ALL_LEGAL_TYPES =
     \\import { SmartContract, assert, ByteString, PubKey, Sig, Sha256, Ripemd160, Addr, SigHashPreimage, RabinSig, RabinPubKey, Point, P256Point, P384Point, FixedArray } from 'runar-lang';
     \\
@@ -111,9 +111,27 @@ const ALL_LEGAL_TYPES =
     \\}
 ;
 
-/// SigHashPreimage as a property type: a mutable state field must still
-/// validate and compile.
-const MUTABLE_PREIMAGE_TYPE =
+/// SigHashPreimage as a property type, readonly (stateless) and mutable
+/// (stateful). Neither is legal any more: R3-GK010-GAPS refuses the readonly
+/// one and D9 the mutable one, both at VALIDATE with the shared preimage-
+/// property diagnostic. What N-109 needs from them is the over-rejection
+/// guard: SigHashPreimage is a KNOWN type, so the unknown-type arm must not
+/// fire on it, and the preimage rule must be the only thing that does.
+const READONLY_PREIMAGE_PROPERTY =
+    \\import { SmartContract, assert, SigHashPreimage } from 'runar-lang';
+    \\
+    \\export class PreimageConst extends SmartContract {
+    \\  readonly i: SigHashPreimage;
+    \\
+    \\  constructor(i: SigHashPreimage) { super(i); this.i = i; }
+    \\
+    \\  public go(x: bigint) {
+    \\    assert(x >= 0n);
+    \\  }
+    \\}
+;
+
+const MUTABLE_PREIMAGE_PROPERTY =
     \\import { StatefulSmartContract, assert, SigHashPreimage } from 'runar-lang';
     \\
     \\export class PreimageState extends StatefulSmartContract {
@@ -126,6 +144,10 @@ const MUTABLE_PREIMAGE_TYPE =
     \\  }
     \\}
 ;
+
+/// The shared diagnostic, spelled out (not imported) so a drift in the
+/// validator's constant shows up here.
+const PREIMAGE_PROPERTY_I = "property 'i' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the spending transaction existed, so it can never pass checkPreimage() and every field an extractor reads from it is unverified";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -224,7 +246,28 @@ test "N-109 control: the bigint twin still compiles" {
 
 test "N-109 control: every legitimate property type still validates and compiles" {
     try expectValidatesAndCompiles(ALL_LEGAL_TYPES, "AllTypes.runar.ts");
-    try expectValidatesAndCompiles(MUTABLE_PREIMAGE_TYPE, "PreimageState.runar.ts");
+}
+
+test "N-109 control: a SigHashPreimage property draws the preimage-property diagnostic only, never the unknown-type one" {
+    try expectOnlyPreimagePropertyError(READONLY_PREIMAGE_PROPERTY, "PreimageConst.runar.ts");
+    try expectOnlyPreimagePropertyError(MUTABLE_PREIMAGE_PROPERTY, "PreimageState.runar.ts");
+}
+
+fn expectOnlyPreimagePropertyError(src: []const u8, file_name: []const u8) !void {
+    const a = std.testing.allocator;
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const errors = try validateErrors(arena.allocator(), src, file_name);
+        if (errors.len != 1) {
+            std.debug.print("{s}: validate produced {d} error(s):\n", .{ file_name, errors.len });
+            for (errors) |d| std.debug.print("  {s}\n", .{d.message});
+        }
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqualStrings(PREIMAGE_PROPERTY_I, errors[0].message);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "unsupported type") == null);
+    }
+    try std.testing.expectError(error.ValidationFailed, compiler_api.compileSource(a, src, file_name));
 }
 
 fn expectValidatesAndCompiles(src: []const u8, file_name: []const u8) !void {

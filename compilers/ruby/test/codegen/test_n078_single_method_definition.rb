@@ -89,11 +89,13 @@ class TestN078SingleMethodDefinition < Minitest::Test
 
   def test_get_state_script_frames_variable_length_types_together
     control = state_script("ByteString")
-    %w[Sig SigHashPreimage].each do |t|
-      assert_equal control, state_script(t),
-                   "getStateScript does not frame a mutable #{t} field like ByteString -- " \
-                   "the deserializer decodes a push-data length prefix for all three"
-    end
+    assert_equal control, state_script("Sig"),
+                 "getStateScript does not frame a mutable Sig field like ByteString -- " \
+                 "the deserializer decodes a push-data length prefix for both"
+    # D9: a SigHashPreimage property is refused at validate before it can reach
+    # getStateScript (a stored preimage can never pass checkPreimage).
+    err = assert_raises(RuntimeError) { state_script("SigHashPreimage") }
+    assert_includes err.message, "property 'tag' cannot hold a SigHashPreimage"
   end
 
   def test_get_state_script_classes_stay_distinct

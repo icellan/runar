@@ -1269,13 +1269,20 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // of those files (the public-method entry width gate) and moves its own
     // pins (50 conformance goldens, sdk-output, sdk-vertical), so it needs no
     // cover.
+    // 2026-11-17 — the python `stack.py` nVersion entry is SPENT (PR F edited
+    // the file) and deleted; one new entry replaces it for that edit: a
+    // refusal-only change (`_lower_load_prop` refuses an undeclared property
+    // even with an empty constructor-param list). No accepted program's bytes
+    // change (multi-format fold-OFF 892/892 against the goldens). Spent, and
+    // must be deleted, on the next edit to stack.py.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual([]);
+    expect(entries.map((e) => e.path).sort()).toEqual(['compilers/python/runar_compiler/codegen/stack.py']);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {
-      expect(e.expires).toBe('2027-05-11');
-      expect(e.reviewer).toBe('fix-session: nVersion wording');
+      const prF = e.path === 'compilers/python/runar_compiler/codegen/stack.py';
+      expect(e.expires).toBe(prF ? '2027-05-16' : '2027-05-11');
+      expect(e.reviewer).toBe(prF ? 'fix-session: PR F python ghost-property refusal' : 'fix-session: nVersion wording');
       expect(e.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
   });

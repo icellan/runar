@@ -607,15 +607,18 @@ public final class Validate {
             for (PropertyNode prop : contract.properties()) {
                 validatePropertyType(prop.type(), prop.sourceLocation());
 
-                // R3-GK010-GAPS: a readonly property is a constant in the
-                // locking script, and a sighash preimage commits to the
-                // outpoint of the transaction that carries that script, so
-                // checkPreimage() on it can never pass and every field an
-                // extractor reads from it is unverified. Refused at the
-                // declaration (before FixedArray expansion, so the name is
-                // the user's).
-                if (prop.readonly() && holdsSigHashPreimage(prop.type())) {
-                    error(readonlyPreimagePropertyMessage(prop.name()), prop.sourceLocation());
+                // R3-GK010-GAPS + D9: no property may hold a SigHashPreimage. A
+                // readonly one is a constant in the locking script, and a sighash
+                // preimage commits to the outpoint of the transaction that carries
+                // that script; a mutable one was written by an earlier spend and
+                // describes that transaction. Either way it was fixed before the
+                // spending transaction existed, so checkPreimage() on it can never
+                // pass and every field an extractor reads from it is unverified.
+                // Refused at the declaration (before FixedArray expansion, so the
+                // name is the user's). The implicit txPreimage of
+                // StatefulSmartContract is not a declared property and is unaffected.
+                if (holdsSigHashPreimage(prop.type())) {
+                    error(preimagePropertyMessage(prop.name()), prop.sourceLocation());
                 }
 
                 if (contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT
@@ -665,11 +668,11 @@ public final class Validate {
             }
         }
 
-        /** The diagnostic every tier shares (R3-GK010-GAPS). */
-        static String readonlyPreimagePropertyMessage(String name) {
-            return "readonly property '" + name + "' cannot hold a SigHashPreimage: a preimage fixed in the "
-                + "locking script can never pass checkPreimage(), so every field an extractor reads from it "
-                + "is unverified";
+        /** The diagnostic every tier shares (R3-GK010-GAPS, generalised by D9). */
+        static String preimagePropertyMessage(String name) {
+            return "property '" + name + "' cannot hold a SigHashPreimage: a preimage stored in a property was "
+                + "fixed before the spending transaction existed, so it can never pass checkPreimage() and every "
+                + "field an extractor reads from it is unverified";
         }
 
         /** {@code SigHashPreimage}, or a (nested) FixedArray of it. */

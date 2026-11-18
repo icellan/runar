@@ -126,7 +126,7 @@
         "kind": "go-only-nocodegen"
       }
     },
-        {
+    {
       "fixture": "convergence-proof",
       "cause": "crypto-witness-infeasible",
       "reason": "secp256k1 EC ops (ecAdd/ecMulGen/ecNegate) — EC point witness, not a checkSig",
@@ -287,16 +287,6 @@
         "kind": "go-script-exec",
         "fixture": "post-quantum-wots",
         "note": "compileRúnar(\"post-quantum-wots\", ...) is executed by TestWOTS_ScriptExecution (accept) and _TamperedSig / _WrongMessage (reject) in script_execution_test.go."
-      }
-    },
-    {
-      "fixture": "schnorr-zkp",
-      "cause": "crypto-witness-infeasible",
-      "reason": "secp256k1 EC + hash256 Schnorr proof — EC/hash witness, not an ECDSA checkSig",
-      "coveredBy": {
-        "kind": "integration",
-        "path": "integration/zig/src/schnorr_zkp_test.zig",
-        "note": "real deploy + spend on a live regtest node: SchnorrZKP_SpendValidProof (accept). Compiled output verified byte-identical to expected-script.hex (872,367 bytes)."
       }
     },
     {

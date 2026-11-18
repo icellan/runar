@@ -185,11 +185,12 @@ const VALID_PRIMITIVE_TYPES = new Set<string>([
   'P256Point', 'P384Point',
 ]);
 
-/** The diagnostic every tier shares (R3-GK010-GAPS). */
-export function readonlyPreimagePropertyMessage(name: string): string {
+/** The diagnostic every tier shares (R3-GK010-GAPS, generalised by D9). */
+export function preimagePropertyMessage(name: string): string {
   return (
-    `readonly property '${name}' cannot hold a SigHashPreimage: a preimage fixed in the locking script ` +
-    'can never pass checkPreimage(), so every field an extractor reads from it is unverified'
+    `property '${name}' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before ` +
+    'the spending transaction existed, so it can never pass checkPreimage() and every field an extractor ' +
+    'reads from it is unverified'
   );
 }
 
@@ -203,13 +204,17 @@ function validateProperties(ctx: ValidationContext): void {
   for (const prop of ctx.contract.properties) {
     validatePropertyType(prop.type, prop.sourceLocation, ctx);
 
-    // R3-GK010-GAPS: a readonly property is a constant in the locking script,
-    // and a sighash preimage commits to the outpoint of the transaction that
-    // carries that script, so checkPreimage() on it can never pass and every
-    // field an extractor reads from it is unverified. Refused at the
-    // declaration (before FixedArray expansion, so the name is the user's).
-    if (prop.readonly && holdsSigHashPreimage(prop.type)) {
-      ctx.errors.push(makeDiagnostic(readonlyPreimagePropertyMessage(prop.name), 'error', prop.sourceLocation));
+    // R3-GK010-GAPS + D9: no property may hold a SigHashPreimage. A readonly
+    // one is a constant in the locking script, and a sighash preimage commits
+    // to the outpoint of the transaction that carries that script; a mutable
+    // one was written by an earlier spend and describes that transaction.
+    // Either way it was fixed before the spending transaction existed, so
+    // checkPreimage() on it can never pass and every field an extractor reads
+    // from it is unverified. Refused at the declaration (before FixedArray
+    // expansion, so the name is the user's). The implicit txPreimage of
+    // StatefulSmartContract is not a declared property and is unaffected.
+    if (holdsSigHashPreimage(prop.type)) {
+      ctx.errors.push(makeDiagnostic(preimagePropertyMessage(prop.name), 'error', prop.sourceLocation));
     }
 
     // txPreimage is an implicit property of StatefulSmartContract

@@ -3,6 +3,7 @@ package runar
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -1328,6 +1329,11 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return anfHashFn("hash160", args[0])
 	case "ripemd160":
 		return anfHashFn("ripemd160", args[0])
+	// D11: the compiled script's partial-SHA-256 finalize. It used to fall
+	// through to the nil default, so a state field derived from it was
+	// silently wrong off-chain.
+	case "sha256Finalize":
+		return anfSha256Finalize(args)
 
 	// Assert — skip
 	case "assert":
@@ -1942,6 +1948,45 @@ func anfHashFn(name string, input interface{}) string {
 		return hex.EncodeToString(r.Sum(nil))
 	}
 	return ""
+}
+
+// anfSha256Finalize refuses exactly what the compiled script refuses (F-114
+// state size, F-142 remaining length, GK-BUG-013 msgBitLen domain) with the
+// diagnostics every tier shares, then pads and compresses like the script.
+// msgBitLen is range-checked here as a big.Int: Sha256Finalize takes an
+// int64 and could not represent [2^63, 2^64), which the script accepts.
+func anfSha256Finalize(args []interface{}) string {
+	arg := func(i int) interface{} {
+		if i < len(args) {
+			return args[i]
+		}
+		return nil
+	}
+	state, _ := hex.DecodeString(anfToString(arg(0)))
+	remaining, _ := hex.DecodeString(anfToString(arg(1)))
+	bitLen := anfToBigInt(arg(2))
+	if len(state) != 32 {
+		panic(&ScriptOpcodeError{Opcode: "sha256Finalize", Message: fmt.Sprintf("state must be 32 bytes, got %d", len(state))})
+	}
+	if len(remaining) > 119 {
+		panic(&ScriptOpcodeError{Opcode: "sha256Finalize", Message: fmt.Sprintf("remaining must be 0-119 bytes, got %d", len(remaining))})
+	}
+	if bitLen.Sign() < 0 || bitLen.BitLen() > 64 {
+		panic(&ScriptOpcodeError{Opcode: "sha256Finalize", Message: fmt.Sprintf("msgBitLen must be in [0, 2^64), got %s", bitLen.String())})
+	}
+	blocks := 1
+	if len(remaining)+1+8 > 64 {
+		blocks = 2
+	}
+	padded := make([]byte, blocks*64)
+	copy(padded, remaining)
+	padded[len(remaining)] = 0x80
+	binary.BigEndian.PutUint64(padded[len(padded)-8:], bitLen.Uint64())
+	s := ByteString(state)
+	for i := 0; i < blocks; i++ {
+		s = Sha256Compress(s, ByteString(padded[i*64:(i+1)*64]))
+	}
+	return hex.EncodeToString([]byte(s))
 }
 
 // ---------------------------------------------------------------------------

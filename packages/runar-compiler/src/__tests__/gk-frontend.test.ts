@@ -19,6 +19,9 @@ import { lowerToANF } from '../passes/04-anf-lower.js';
  *    instead of lowering it to `load_const ''`; typecheck still refuses first.
  *  - GK-GAP-010: each refused shape fails the compile with the shared
  *    diagnostic; each accepted shape compiles.
+ *  - D10: a stateless Rust-DSL contract declaring tx_preimage is refused by
+ *    the parser with the shared diagnostic; a stateful one keeps it as the
+ *    implicit, auto-checked txPreimage.
  *  - GK-GAP-005/006: suffixes match ignoring ASCII case (same hex), an unknown
  *    suffix is refused with the shared message, no file name means TypeScript.
  * Does not prove: anything about the other six tiers.
@@ -87,6 +90,33 @@ describe('GK-GAP-010: SigHashPreimage parameter checked on every path', () => {
   }
   for (const c of corpusData.accept) {
     it(`accepts ${c.name}`, () => {
+      const r = compile(c.src, { fileName: c.file });
+      expect(messages(r)).toEqual([]);
+      expect(r.success).toBe(true);
+    });
+  }
+});
+
+describe('D10: a stateless Rust-DSL contract cannot declare tx_preimage', () => {
+  const corpusData = corpus<{
+    refuse: Array<{ name: string; file: string; src: string; error: string }>;
+    accept: Array<{ name: string; file: string; src: string }>;
+  }>('rust-tx-preimage-cases.json');
+  for (const c of corpusData.refuse) {
+    it(`refuses ${c.name} in the parser`, () => {
+      const parsed = parse(c.src, c.file);
+      expect(parsed.errors.map((e) => e.message)).toContain(c.error);
+      const r = compile(c.src, { fileName: c.file });
+      expect(r.success).toBe(false);
+      expect(messages(r)).toContain(c.error);
+    });
+  }
+  for (const c of corpusData.accept) {
+    it(`accepts ${c.name} as stateful, tx_preimage the implicit preimage`, () => {
+      const parsed = parse(c.src, c.file);
+      expect(parsed.errors).toEqual([]);
+      expect(parsed.contract!.parentClass).toBe('StatefulSmartContract');
+      expect(parsed.contract!.properties.map((p) => p.name)).not.toContain('txPreimage');
       const r = compile(c.src, { fileName: c.file });
       expect(messages(r)).toEqual([]);
       expect(r.success).toBe(true);

@@ -1871,7 +1871,9 @@ fn unsignedAbs(value: i64) u64 {
     return @intCast(-value);
 }
 
-fn sha256CompressBlock(out: *[32]u8, state_bytes: []const u8, block_bytes: []const u8) void {
+/// One SHA-256 block compression; `pub` for the SDK ANF interpreter's
+/// sha256Finalize (D11).
+pub fn sha256CompressBlock(out: *[32]u8, state_bytes: []const u8, block_bytes: []const u8) void {
     var h: [8]u32 = undefined;
     var w: [64]u32 = undefined;
 

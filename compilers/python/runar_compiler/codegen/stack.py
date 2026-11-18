@@ -1905,16 +1905,17 @@ class _LoweringContext:
                     found = True
                     break
                 param_index += 1
-            # A true ghost is a name absent from a NON-EMPTY registered
-            # constructor-param list -- exactly the silent-wrong-code case where
-            # the old code coerced it onto an unrelated registered slot. When no
-            # constructor-param property is registered (an empty ``ctor_params``
-            # -- e.g. a ``.runar.ts`` contract whose only constructor param is
-            # declared inline as ``readonly n`` and never surfaces as a property
-            # in this tier's TS parser), the name may still be a legitimate
-            # slot-0 argument, so preserve the historical placeholder rather than
-            # false-positive on a valid deploy-time slot.
-            if not found and ctor_params:
+            # A name absent from the registered constructor-param list is a
+            # ghost, whether or not that list is empty. The empty-list
+            # carve-out that used to sit here kept a slot-0 placeholder for an
+            # inline ``constructor(readonly n)`` property, a shape every tier's
+            # validator now refuses ("constructor parameter 'n' does not
+            # initialise any property"); all it still did was compile a
+            # stateless contract reading an undeclared property (``this.ghost``,
+            # ``this.txPreimage``) into a script whose spend aborts on the empty
+            # placeholder -- funds locked for good -- where Go, Zig and Ruby
+            # refuse it here and TS, Rust and Java refuse it earlier.
+            if not found:
                 loc = ""
                 if self.current_source_loc is not None:
                     sl = self.current_source_loc

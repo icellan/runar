@@ -20,14 +20,18 @@
 //! the same contract with a `ByteString` field — the path that was already
 //! correct. `RabinSig` (a bigint alias, a bare 8-byte NUM2BIN word) and `PubKey`
 //! (33 raw bytes) are the negative controls and must stay DIFFERENT.
+//!
+//! D9: a `SigHashPreimage` property is no longer legal at all (a stored
+//! preimage can never pass checkPreimage), so the source-level lock covers
+//! `Sig` only, and the last test pins that a `SigHashPreimage` state field is
+//! refused at VALIDATE with the shared diagnostic rather than reaching the
+//! framing code.
 
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
 /// Mutating method — drives the state-continuation WRITE path. The field is
-/// rewritten from itself: a public SigHashPreimage parameter must reach
-/// checkPreimage on every path (GK-GAP-010), which the ByteString control
-/// could not mirror.
+/// rewritten from itself, which the ByteString control mirrors exactly.
 fn writeSrc(allocator: std.mem.Allocator, prop_type: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator,
         \\class VarLenStateWrite extends StatefulSmartContract {{
@@ -86,9 +90,9 @@ fn usesCodePart(allocator: std.mem.Allocator, src: []const u8, file_name: []cons
     return std.mem.indexOf(u8, json, "\"usesCodePart\":true") != null;
 }
 
-const VAR_LEN_TYPES = [_][]const u8{ "Sig", "SigHashPreimage" };
+const VAR_LEN_TYPES = [_][]const u8{"Sig"};
 
-test "a mutating method on a Sig/SigHashPreimage field frames like ByteString" {
+test "a mutating method on a Sig field frames like ByteString" {
     const allocator = std.testing.allocator;
 
     const control_src = try writeSrc(allocator, "ByteString");
@@ -105,7 +109,7 @@ test "a mutating method on a Sig/SigHashPreimage field frames like ByteString" {
     }
 }
 
-test "a terminal read of a Sig/SigHashPreimage field matches the ByteString control" {
+test "a terminal read of a Sig field matches the ByteString control" {
     const allocator = std.testing.allocator;
 
     const control_src = try readSrc(allocator, "ByteString");
@@ -122,7 +126,7 @@ test "a terminal read of a Sig/SigHashPreimage field matches the ByteString cont
     }
 }
 
-test "a terminal read of a Sig/SigHashPreimage field advertises usesCodePart" {
+test "a terminal read of a Sig field advertises usesCodePart" {
     // The ABI shape, not just the byte count: the SDK reads this flag to decide
     // whether to push `_codePart` into the unlocking script.
     const allocator = std.testing.allocator;
@@ -151,4 +155,14 @@ test "fixed-width state types are NOT push-data framed" {
         defer allocator.free(got);
         try std.testing.expect(!std.mem.eql(u8, control, got));
     }
+}
+
+test "D9: a SigHashPreimage state field is refused at VALIDATE, read or written" {
+    const allocator = std.testing.allocator;
+    const write = try writeSrc(allocator, "SigHashPreimage");
+    defer allocator.free(write);
+    const read = try readSrc(allocator, "SigHashPreimage");
+    defer allocator.free(read);
+    try std.testing.expectError(error.ValidationFailed, compiler_api.compileSource(allocator, write, "VarLenStateWrite.runar.ts"));
+    try std.testing.expectError(error.ValidationFailed, compiler_api.compileSource(allocator, read, "VarLenStateRead.runar.ts"));
 }
