@@ -317,6 +317,9 @@ test {
     _ = @import("sdk_satcounter_continuation_test.zig");
     _ = @import("sdk_f024_continuation_amount_test.zig");
     _ = @import("sdk_n189_scriptcode_intent_test.zig");
+    _ = @import("sdk_d12_prepare_state_test.zig");
+    _ = @import("sdk_d12_pq_pubkey_length_test.zig");
+    _ = @import("sdk_anf_interpreter_d12_test.zig");
     _ = @import("sdk_n227_zero_mutable_field_fee_floor_test.zig");
     _ = @import("sdk_n038_sighash_single_call_test.zig");
     _ = @import("sdk_n293_stateful_merge_call_test.zig");
@@ -355,6 +358,7 @@ test {
     _ = @import("builtins_math_onchain_test.zig");
     _ = @import("builtins_n171_substr_onchain_test.zig");
     _ = @import("builtins_n173_panic_text_test.zig");
+    _ = @import("builtins_d12_ec_mod_reduce_test.zig");
     _ = @import("leak_detector_probe_test.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");

@@ -16,6 +16,7 @@
 //   blake3Compress-chaining   blake3Compress-block
 //   blake3Hash-message
 //   ecPointX                  ecPointY
+//   ecModReduce-zero          (D12 SECP-F1: modulus 0 aborts)
 //   ok                        (control: valid-length call, exits 0)
 //
 // Mirrors the CLI shim pattern of analyzer_cli.zig / canonicalise_cli.zig.
@@ -65,6 +66,9 @@ pub fn main(init: std.process.Init) !void {
         _ = builtins.ecPointX(point64[0..63]);
     } else if (std.mem.eql(u8, case, "ecPointY")) {
         _ = builtins.ecPointY(point64[0..63]);
+    } else if (std.mem.eql(u8, case, "ecModReduce-zero")) {
+        // D12 SECP-F1: OP_MOD by zero aborts the script; the mock returned 0.
+        _ = builtins.ecModReduce(5, 0);
     } else if (std.mem.eql(u8, case, "ok")) {
         // Control: valid-length operands must not panic.
         _ = builtins.sha256Compress(&state32, &block64);
