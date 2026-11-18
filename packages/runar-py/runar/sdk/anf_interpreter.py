@@ -1271,7 +1271,23 @@ def _eval_bytes_bin_op(op: str, left: str, right: str) -> Any:
         return left == right
     if op in ('!=', '!=='):
         return left != right
-    return ''
+    # D12 BM-F4: OP_AND / OP_OR / OP_XOR on ByteStrings -- bytewise, and the
+    # script aborts when the operands differ in length. This used to return
+    # '' (an invented value the covenant refuses).
+    if op in ('&', '|', '^'):
+        a, b = bytes.fromhex(left), bytes.fromhex(right)
+        if len(a) != len(b):
+            name = {'&': 'OP_AND', '|': 'OP_OR', '^': 'OP_XOR'}[op]
+            raise ValueError(
+                f'{name}: operands of {len(a)} and {len(b)} bytes -- the script aborts '
+                'on a length mismatch'
+            )
+        if op == '&':
+            return bytes(x & y for x, y in zip(a, b)).hex()
+        if op == '|':
+            return bytes(x | y for x, y in zip(a, b)).hex()
+        return bytes(x ^ y for x, y in zip(a, b)).hex()
+    raise ValueError(f"ANF interpreter does not model the binary operator '{op}' on ByteString operands")
 
 
 # ---------------------------------------------------------------------------
@@ -1413,7 +1429,8 @@ def _eval_call(
         return None
 
     # Byte operations
-    if func == 'num2bin':
+    # D12 BM-F4: int2str compiles to OP_NUM2BIN, exactly like num2bin.
+    if func in ('num2bin', 'int2str'):
         n = _to_int(args[0])
         length = int(_to_int(args[1]))
         return _num2bin_hex(n, length)
@@ -1441,6 +1458,13 @@ def _eval_call(
         return hex_str[start * 2:(start + length) * 2]
     if func == 'reverseBytes':
         hex_str = str(args[0] or '')
+        # D12: the compiled script reverses only the first 520 bytes, so a
+        # longer input has no off-chain answer that matches it.
+        if len(hex_str) // 2 > 520:
+            raise ValueError(
+                f'reverseBytes: input of {len(hex_str) // 2} bytes exceeds the 520-byte limit '
+                'the compiled script reverses'
+            )
         pairs = [hex_str[i:i + 2] for i in range(0, len(hex_str), 2)]
         return ''.join(reversed(pairs))
     if func == 'len':
@@ -1615,7 +1639,15 @@ def _eval_call(
             return intent.mock_preimage_bytes['scriptCode'].hex()
         return ''
 
-    return None
+    # Compiler-synthesized scaffolding (not runar-lang builtins): the SDK
+    # rebuilds these outputs itself, so None is the correct off-chain answer
+    # (same carve-out as the TS interpreter's A-3 list).
+    if func in ('computeStateOutput', 'buildChangeOutput', 'buildDataOutput',
+                'buildRawOutput', 'super'):
+        return None
+    # D12 BM-F4: an unmodelled builtin has no off-chain value; returning None
+    # let a state field silently take a value the script never computes.
+    raise ValueError(f"ANF interpreter does not model the builtin '{func}'")
 
 
 def _eval_method_call(
@@ -1770,12 +1802,19 @@ def _num2bin_hex(n: int, byte_len: int) -> str:
         elif negative:
             result_bytes[-1] |= 0x80
 
-    # 2a. Field too narrow for the value: OP_NUM2BIN rejects this outright
-    #     ("impossible encoding"). The interpreter keeps its historical
-    #     truncation rather than growing a new failure mode here; an
-    #     equal-length encoding is already final and needs no sign-bit move.
-    if len(result_bytes) >= byte_len:
-        return ''.join(f'{b:02x}' for b in result_bytes[:byte_len])
+    # 2a. D12 BM-F5: a negative size, or a field too narrow for the value,
+    #     makes OP_NUM2BIN abort ("impossible encoding"). This used to
+    #     truncate, an invented value the covenant refuses. An equal-length
+    #     encoding is already final and needs no sign-bit move.
+    if byte_len < 0:
+        raise ValueError(f'num2bin: negative size {byte_len} -- OP_NUM2BIN aborts')
+    if len(result_bytes) > byte_len:
+        raise ValueError(
+            f'num2bin: {n} needs {len(result_bytes)} bytes, more than the requested {byte_len} '
+            '-- OP_NUM2BIN aborts'
+        )
+    if len(result_bytes) == byte_len:
+        return ''.join(f'{b:02x}' for b in result_bytes)
 
     # 2b. Padded: lift the sign bit off the magnitude, zero-extend, and
     #     re-apply it to the byte that is now most significant.
