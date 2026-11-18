@@ -4,7 +4,8 @@ the compiled script computes, or refuse -- never invent a value.
 - ByteString ``& | ^`` returned ``''`` (script: OP_AND/OP_OR/OP_XOR on equal-length
   operands, abort on a length mismatch). Now exact.
 - ``int2str`` returned None (script: OP_NUM2BIN). Now num2bin.
-- An unmodelled builtin returned None. Now refused.
+- An unmodelled builtin still yields None (as in Go/Rust): it may only feed an
+  assert (BabyBear in StateCovenant); a None that reaches state fails closed.
 - ``num2bin`` / ``int2str`` truncated a value too wide for the field (script:
   OP_NUM2BIN aborts) and returned ``''`` for a negative width. Now refused.
 - ``reverseBytes`` reversed every byte, while the compiled script reverses only
@@ -41,9 +42,10 @@ def test_int2str_is_num2bin():
     assert _eval_call("int2str", [-1, 2]) == "0180"
 
 
-def test_unknown_builtin_refused():
-    with pytest.raises(Exception, match="noSuchBuiltin"):
-        _eval_call("noSuchBuiltin", [1])
+def test_unknown_builtin_yields_none():
+    # Refusing here broke integration StateCovenant.advanceState, whose
+    # bbFieldMul only feeds an assert the SDK does not need to evaluate.
+    assert _eval_call("bbFieldMul", [3, 5]) is None
 
 
 @pytest.mark.parametrize("func", ["num2bin", "int2str"])

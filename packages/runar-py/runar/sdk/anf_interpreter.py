@@ -1645,9 +1645,12 @@ def _eval_call(
     if func in ('computeStateOutput', 'buildChangeOutput', 'buildDataOutput',
                 'buildRawOutput', 'super'):
         return None
-    # D12 BM-F4: an unmodelled builtin has no off-chain value; returning None
-    # let a state field silently take a value the script never computes.
-    raise ValueError(f"ANF interpreter does not model the builtin '{func}'")
+    # An unmodelled builtin (e.g. the Go-scoped BabyBear family, used only
+    # inside asserts) yields None, as in the Go and Rust interpreters. A None
+    # that reaches a state field produces a continuation the covenant refuses,
+    # so the call fails closed at broadcast; refusing here instead broke every
+    # call whose unmodelled builtin only feeds an assert.
+    return None
 
 
 def _eval_method_call(

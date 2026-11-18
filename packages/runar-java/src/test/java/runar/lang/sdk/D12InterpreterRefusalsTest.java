@@ -2,6 +2,7 @@ package runar.lang.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigInteger;
@@ -16,7 +17,7 @@ import org.junit.jupiter.api.Test;
  *   <li>ByteString {@code & | ^} returned "" (script: OP_AND/OP_OR/OP_XOR on
  *       equal-length operands, abort on a mismatch). Now exact.</li>
  *   <li>{@code int2str} and any unmodelled builtin returned null. int2str is
- *       now OP_NUM2BIN; an unmodelled builtin is refused.</li>
+ *       now OP_NUM2BIN; an unmodelled builtin still yields null, as in Go/Rust.</li>
  *   <li>{@code num2bin} truncated a value too wide for the field and returned
  *       "" for a negative width (script: OP_NUM2BIN aborts). Now refused.</li>
  *   <li>{@code reverseBytes} reversed every byte; the script reverses only the
@@ -56,9 +57,10 @@ class D12InterpreterRefusalsTest {
     }
 
     @Test
-    void unknownBuiltinRefused() {
-        RuntimeException e = assertThrows(RuntimeException.class, () -> call("noSuchBuiltin", BigInteger.ONE));
-        assertTrue(e.getMessage().contains("noSuchBuiltin"), e.getMessage());
+    void unknownBuiltinYieldsNull() {
+        // Refusing broke integration StateCovenant.advanceState, whose
+        // bbFieldMul only feeds an assert the SDK does not need to evaluate.
+        assertNull(call("bbFieldMul", BigInteger.valueOf(3), BigInteger.valueOf(5)));
     }
 
     @Test

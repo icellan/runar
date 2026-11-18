@@ -1263,10 +1263,12 @@ module Runar
         when 'computeStateOutput', 'buildChangeOutput', 'buildDataOutput', 'buildRawOutput', 'super'
           nil
 
-        # D12 BM-F4: an unmodelled builtin has no off-chain value; returning
-        # nil let a state field silently take a value the script never computes.
+        # An unmodelled builtin (e.g. the Go-scoped BabyBear family, used only
+        # inside asserts) yields nil, as in the Go and Rust interpreters. A nil
+        # that reaches a state field produces a continuation the covenant
+        # refuses, so the call fails closed at broadcast.
         else
-          raise "ANF interpreter does not model the builtin '#{func}'"
+          nil
         end
       end
       # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity

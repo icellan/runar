@@ -8,7 +8,8 @@ require 'runar/sdk'
 # - ByteString & | ^ returned '' (script: OP_AND/OP_OR/OP_XOR, equal lengths,
 #   abort on mismatch). Now exact.
 # - int2str returned nil (script: OP_NUM2BIN). Now num2bin.
-# - An unmodelled builtin returned nil. Now refused.
+# - An unmodelled builtin still yields nil (as in Go/Rust); a nil reaching
+#   state fails closed at the covenant.
 # - num2bin / int2str truncated a value too wide for the field and returned ''
 #   for a negative width (script: OP_NUM2BIN aborts). Now refused.
 # - reverseBytes reversed every byte; the script reverses only the first 520.
@@ -37,8 +38,10 @@ RSpec.describe 'D12: SDK ANF interpreter refuses what it cannot model' do
     expect(mod.eval_call('int2str', [-1, 2])).to eq('0180')
   end
 
-  it 'refuses an unmodelled builtin' do
-    expect { mod.eval_call('noSuchBuiltin', [1]) }.to raise_error(/noSuchBuiltin/)
+  it 'yields nil for an unmodelled builtin, as Go and Rust do' do
+    # Refusing broke integration StateCovenant.advanceState, whose bbFieldMul
+    # only feeds an assert the SDK does not need to evaluate.
+    expect(mod.eval_call('bbFieldMul', [3, 5])).to be_nil
   end
 
   it 'refuses num2bin / int2str with a too-narrow or negative width' do

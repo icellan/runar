@@ -1772,11 +1772,13 @@ public final class AnfInterpreter {
             case "super":
                 return null;
 
-            // D12 BM-F4: an unmodelled builtin has no off-chain value;
-            // returning null let a state field silently take a value the
-            // script never computes.
+            // An unmodelled builtin (e.g. the Go-scoped BabyBear family, used
+            // only inside asserts) yields null, as in the Go and Rust
+            // interpreters. A null that reaches a state field produces a
+            // continuation the covenant refuses, so the call fails closed at
+            // broadcast.
             default:
-                throw new InterpreterException("ANF interpreter does not model the builtin '" + func + "'");
+                return null;
         }
     }
 
