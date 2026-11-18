@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### SDK (TypeScript): `call()` with raw outputs interleaved with several continuations (#197)
+
+- **`runar-sdk`:** a stateful method that emits more than one `addOutput` continuation, interleaved
+  with `addRawOutput` / `addDataOutput` (`addOutput(a); addRawOutput(fee, payee); addOutput(b)`), no
+  longer throws in `call()`. The transaction is built from the ANF interpreter's source-ordered
+  outputs (state and raw in source order, then data outputs, then change), each continuation from its
+  own state. `call()` / `finalizeCall()` now return `continuations: [{ outputIndex, satoshis, state }]`
+  (new `CallResult` / `CallContinuation` types) and `currentUtxo` / `state` track the index-ordered
+  first continuation, set by output index rather than by script equality. This also fixes a raw output
+  that is byte-identical to the continuation script capturing `currentUtxo`, a call emitting raw
+  outputs but no continuation falling back to a raw output as `currentUtxo` (it is now cleared), and a
+  single `addOutput(0n, ...)` continuation being tracked at the spent UTXO's satoshis instead of 0.
+  `CallOptions.newState` with two or more continuations, and `CallOptions.outputs` together with a
+  method that calls `addRawOutput`, are refused. No `CallOptions.outputPlan`. The other six SDKs keep
+  their fail-closed refusal. Reported by `E-Jacko`. Fixes #197.
+
 ### SDK (TypeScript): `buildContractUnlock` for a transaction built elsewhere (#198)
 
 - **`runar-sdk`:** new `buildContractUnlock(tx, inputIndex, input, { dryRun? })` returns

@@ -12,6 +12,8 @@ export type {
   DeployOptions,
   CallOptions,
   PreparedCall,
+  CallResult,
+  CallContinuation,
 } from './types.js';
 
 // Providers

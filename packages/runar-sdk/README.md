@@ -434,6 +434,28 @@ console.log(counter.state.count); // decoded from the on-chain script
 
 `fromUtxo` is synchronous; `fromTxId` only adds the provider round-trip to fetch the transaction.
 
+#### Several continuations in one call (raw and data outputs interleaved)
+
+A method may emit more than one state continuation, interleaved with raw outputs, e.g. `this.addOutput(a, ...); this.addRawOutput(fee, payee); this.addOutput(b, ...)`. `call()` builds the transaction from the ANF interpreter's source-ordered output list: state and raw outputs in the order the method writes them, then data outputs (`addDataOutput`), then change, whatever the source order of the `addDataOutput` call. Each state continuation's locking script is built from **its own** state. There is no caller-supplied output plan: the interpreter's order is authoritative.
+
+`call()` / `finalizeCall()` report every continuation, by output index:
+
+```typescript
+const { txid, continuations } = await splitter.call('split', [null, payeeScript]);
+// continuations: [
+//   { outputIndex: 0, satoshis: 1000, state: { owner, count: 1n } },
+//   { outputIndex: 2, satoshis: 1000, state: { owner, count: 100n } },
+// ]
+```
+
+`continuations` is in output-index order, and is empty for a terminal call or one that emits no continuation. After the call:
+
+- `splitter.getUtxo()` and `splitter.state` track the **index-ordered first** continuation (here output 0, `count` 1n). The UTXO is chosen by output index, never by comparing scripts, so a raw output whose script equals a continuation's cannot capture the tracking.
+- a call that emits no continuation clears the tracked UTXO (`getUtxo()` is `null`).
+- to spend any other continuation, build a contract for it: `RunarContract.fromUtxo(artifact, { txid, outputIndex: continuations[1].outputIndex, satoshis: continuations[1].satoshis, script })` (the state is decoded from the script).
+
+`CallOptions.newState` is refused for a method with two or more continuations (it cannot say which one it overrides), and `CallOptions.outputs` cannot be combined with a method that calls `addRawOutput`. This surface is TypeScript-only for now: the other six SDKs keep their fail-closed refusal of this shape.
+
 ### OP_PUSH_TX
 
 The OP_PUSH_TX pattern lets a script verify the transaction it's part of without OP_CHECKSIGVERIFY of an external signature. The SDK computes the BIP-143 preimage that the on-chain script will rebuild and pushes only that preimage onto the unlocking stack; the on-chain `checkPreimage` opcode recomputes the preimage from the spending tx and derives the authenticating signature itself (against the well-known `k = 1` generator-point key `G`), so no spender-supplied signature is pushed.

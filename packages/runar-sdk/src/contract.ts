@@ -8,7 +8,7 @@ import { assertScriptHexUnderLimit, InvalidConstructorArgError, MalformedScriptE
 import type { Provider } from './providers/provider.js';
 import { txToTransactionData } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
-import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
+import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall, CallResult, CallContinuation } from './types.js';
 import type { Inscription } from './ordinals/types.js';
 import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction, resolveInputSequence } from './calling.js';
@@ -919,21 +919,21 @@ export class RunarContract {
     methodName: string,
     args: unknown[],
     options?: CallOptions,
-  ): Promise<{ txid: string; tx: TransactionData }>;
+  ): Promise<CallResult>;
   async call(
     methodName: string,
     args: unknown[],
     provider: Provider,
     signer: Signer,
     options?: CallOptions,
-  ): Promise<{ txid: string; tx: TransactionData }>;
+  ): Promise<CallResult>;
   async call(
     methodName: string,
     args: unknown[],
     providerOrOptions?: Provider | CallOptions,
     maybeSigner?: Signer,
     maybeOptions?: CallOptions,
-  ): Promise<{ txid: string; tx: TransactionData }> {
+  ): Promise<CallResult> {
     // If explicit provider/signer passed, temporarily connect them for
     // prepareCall / finalizeCall which use the connected references.
     if (maybeSigner !== undefined) {
@@ -1431,6 +1431,7 @@ export class RunarContract {
         _newSatoshis: 0,
         _hasMultiOutput: false,
         _contractOutputs: [],
+        _continuations: [],
         _intentWitnessHex: witnessHex,
         _dryRun: options?.dryRun ?? false,
       };
@@ -1601,37 +1602,110 @@ export class RunarContract {
       );
     }
 
-    // Finding G1: a method that calls `this.addRawOutput(...)` folds the raw
-    // output(s) into the covenant's continuation hashOutputs IN SOURCE ORDER,
-    // interleaved with the state continuation `this.addOutput(...)`. The
-    // single-stateful branch above only builds the state continuation, so the
-    // built tx's outputs would mismatch hashOutputs and input 0's OP_VERIFY
-    // would reject. Rebuild an ORDERED `contractOutputs` from the interpreter's
-    // source-ordered output list. Purely additive: absent raw outputs this is a
-    // no-op and existing behaviour is untouched.
-    if (isStateful && anfOrderedOutputs.some((o) => o.kind === 'raw')) {
-      const stateEntries = anfOrderedOutputs.filter((o) => o.kind === 'state');
-      // Fail closed. The current SDK only builds raw outputs alongside a SINGLE
-      // state continuation (the covenant machinery below threads exactly one
-      // newLockingScript/newAmount). Multi-output calls, multiple continuations,
-      // or a missing continuation script are not representable — throw rather
-      // than silently drop outputs and strand the funds.
-      if (hasMultiOutput || stateEntries.length >= 2 || (stateEntries.length === 1 && !newLockingScript)) {
+    // Finding G1 / #197: a method that calls `this.addRawOutput(...)`, or emits
+    // MORE THAN ONE `this.addOutput(...)`, folds all of those outputs into the
+    // covenant's continuation hashOutputs IN SOURCE ORDER. The single-stateful
+    // branch above builds exactly one continuation, so the built tx's outputs
+    // would mismatch hashOutputs and input 0's OP_VERIFY would reject. Rebuild
+    // an ORDERED `contractOutputs` from the interpreter's source-ordered list:
+    // each `state` entry gets a locking script built from ITS OWN state, raw
+    // entries carry their caller-supplied script, and data outputs follow later
+    // (buildCallTransaction emits them after every state/raw output, then
+    // change, matching the covenant's hash order wherever addDataOutput is
+    // written). Every state entry is a continuation, recorded BY OUTPUT INDEX.
+    const ordStateEntries = anfOrderedOutputs.filter((o) => o.kind === 'state');
+    const ordHasRaw = anfOrderedOutputs.some((o) => o.kind === 'raw');
+    let continuations: Array<CallContinuation & { script: string }> = [];
+    if (isStateful && hasMultiOutput && ordHasRaw) {
+      // The caller's explicit outputs and the interpreter's raw outputs are two
+      // sources of truth for one transaction; do not blend them.
+      throw new Error(
+        `RunarContract.call('${methodName}'): cannot combine CallOptions.outputs with a method that ` +
+          `calls addRawOutput; the interpreter's source-ordered outputs are authoritative (#197).`,
+      );
+    }
+    if (isStateful && !hasMultiOutput && (ordHasRaw || ordStateEntries.length >= 2)) {
+      if (ordStateEntries.length >= 2 && options?.newState) {
+        this._state = { ...stateBefore }; // the single-output block above already applied it
         throw new Error(
-          `RunarContract.call('${methodName}'): cannot build a transaction that interleaves ` +
-            `raw outputs with ${stateEntries.length} state continuations; the SDK currently ` +
-            `supports raw outputs alongside a single state continuation only (finding G1).`,
+          `RunarContract.call('${methodName}'): CallOptions.newState is ambiguous for a method with ` +
+            `${ordStateEntries.length} state continuations (which one would it override?); remove it, ` +
+            `the interpreter derives each continuation's own state (#197).`,
         );
       }
-      contractOutputs = anfOrderedOutputs.map((o) =>
+      if (ordStateEntries.length === 1 && !newLockingScript) {
+        this._state = { ...stateBefore };
+        throw new Error(
+          `RunarContract.call('${methodName}'): cannot build the continuation script for a method ` +
+            `with raw outputs (finding G1).`,
+        );
+      }
+      const base = ordStateEntries.length >= 2 ? stateBefore : this._state;
+      const scriptsByIndex = new Map<number, { script: string; state: Record<string, unknown> }>();
+      anfOrderedOutputs.forEach((o, idx) => {
+        if (o.kind !== 'state') return;
+        if (ordStateEntries.length === 1) {
+          // One continuation: exactly the script the single-output path built
+          // (honors an explicit newState override), so existing bytes are stable.
+          scriptsByIndex.set(idx, { script: newLockingScript!, state: { ...this._state } });
+          return;
+        }
+        if (!o.state || !autoFlatState) {
+          this._state = { ...stateBefore };
+          throw new Error(
+            `RunarContract.call('${methodName}'): the ANF interpreter did not report the state of ` +
+              `continuation ${idx}; refusing to build ${ordStateEntries.length} continuations from guessed state (#197).`,
+          );
+        }
+        const entryState = {
+          ...base,
+          ...regroupFixedArrayState({ ...autoFlatState, ...o.state }, this.artifact.stateFields),
+        };
+        scriptsByIndex.set(idx, { script: this.lockingScriptForState(entryState), state: entryState });
+      });
+      contractOutputs = anfOrderedOutputs.map((o, idx) =>
         o.kind === 'raw'
           ? { script: o.script!, satoshis: Number(o.satoshis) }
-          : { script: newLockingScript!, satoshis: Number(o.satoshis) },
+          : { script: scriptsByIndex.get(idx)!.script, satoshis: Number(o.satoshis) },
       );
-      // Keep the preimage's newAmount (buildStatefulUnlock) in step with the
-      // continuation output's sats — `this.addOutput(0n, ...)` makes it 0, not
-      // the input value the single-stateful branch defaulted to.
-      newSatoshis = stateEntries.length === 1 ? Number(stateEntries[0]!.satoshis) : newSatoshis;
+      continuations = anfOrderedOutputs.flatMap((o, idx) =>
+        o.kind === 'state'
+          ? [{
+              outputIndex: idx,
+              satoshis: Number(o.satoshis),
+              script: scriptsByIndex.get(idx)!.script,
+              state: scriptsByIndex.get(idx)!.state,
+            }]
+          : [],
+      );
+      const tracked = continuations[0];
+      if (tracked) {
+        // The object tracks the index-first continuation: its state, script and
+        // satoshis must describe the SAME UTXO `finalizeCall` records.
+        this._state = { ...tracked.state };
+        newLockingScript = tracked.script;
+        // Keep the preimage's newAmount (buildStatefulUnlock) in step with the
+        // continuation output's sats (`addOutput(0n, ...)` makes it 0).
+        newSatoshis = tracked.satoshis;
+      } else {
+        // Raw outputs only: no continuation exists, so no continuation script
+        // and the state did not advance.
+        this._state = { ...stateBefore };
+        newLockingScript = undefined;
+      }
+    } else if (isStateful && hasMultiOutput && contractOutputs) {
+      continuations = contractOutputs.map((o, idx) => ({
+        outputIndex: idx, satoshis: o.satoshis, script: o.script,
+        state: { ...(options!.outputs![idx]!.state) },
+      }));
+    } else if (isStateful && newLockingScript) {
+      continuations = [{
+        outputIndex: 0,
+        // buildCallTransaction places the continuation at `newSatoshis ?? input value`.
+        satoshis: newSatoshis ?? this.currentUtxo.satoshis,
+        script: newLockingScript,
+        state: { ...this._state },
+      }];
     }
 
     const feeRate = await provider.getFeeRate();
@@ -2127,6 +2201,7 @@ export class RunarContract {
       _newSatoshis: newSatoshis ?? 0,
       _hasMultiOutput: !!hasMultiOutput,
       _contractOutputs: contractOutputs ?? [],
+      _continuations: continuations,
       _intentWitnessHex: witnessHex,
       _dryRun: options?.dryRun ?? false,
       _stateBefore: stateBefore,
@@ -2143,7 +2218,7 @@ export class RunarContract {
   async finalizeCall(
     prepared: PreparedCall,
     signatures: Record<number, string>,
-  ): Promise<{ txid: string; tx: TransactionData }> {
+  ): Promise<CallResult> {
     // A second finalize of the same PreparedCall is refused below (C29) and
     // must not touch the state the first one committed.
     if (consumedPreparedCalls.has(prepared)) return this.finalizeCallOnce(prepared, signatures);
@@ -2162,7 +2237,7 @@ export class RunarContract {
   private async finalizeCallOnce(
     prepared: PreparedCall,
     signatures: Record<number, string>,
-  ): Promise<{ txid: string; tx: TransactionData }> {
+  ): Promise<CallResult> {
     // C29: one-shot guard. Mark consumed BEFORE any mutation/broadcast work
     // so a second call fails fast regardless of whether the first attempt
     // succeeded, was rejected by the C8 dry-run, or threw during broadcast —
@@ -2266,43 +2341,15 @@ export class RunarContract {
     // Broadcast
     const txid = await provider.broadcast(finalTx);
 
-    // Update tracked UTXO
-    if (prepared._isStateful && prepared._hasMultiOutput && prepared._contractOutputs.length > 0) {
-      this.currentUtxo = {
-        txid,
-        outputIndex: 0,
-        satoshis: prepared._contractOutputs[0]!.satoshis,
-        script: prepared._contractOutputs[0]!.script,
-      };
-    } else if (prepared._isStateful && prepared._newLockingScript) {
-      // The state continuation is normally output 0, but a method that also
-      // calls `this.addRawOutput(...)` (finding G1) can push raw outputs ahead
-      // of it. `_contractOutputs`, when populated (the raw-output path),
-      // records the real source order and each output's satoshis — so track the
-      // continuation at its actual index and value (which may legitimately be
-      // 0). Empty `_contractOutputs` (the common case) keeps the legacy
-      // index-0 / `_newSatoshis`-fallback behaviour byte-for-byte unchanged.
-      const contIdx = prepared._contractOutputs.length > 0
-        ? prepared._contractOutputs.findIndex((o) => o.script === prepared._newLockingScript)
-        : -1;
-      this.currentUtxo = contIdx >= 0
-        ? {
-            txid,
-            outputIndex: contIdx,
-            satoshis: prepared._contractOutputs[contIdx]!.satoshis,
-            script: prepared._newLockingScript,
-          }
-        : {
-            txid,
-            outputIndex: 0,
-            satoshis: prepared._newSatoshis || prepared._contractUtxo.satoshis,
-            script: prepared._newLockingScript,
-          };
-    } else if (prepared._isTerminal) {
-      this.currentUtxo = null;
-    } else {
-      this.currentUtxo = null;
-    }
+    // Update tracked UTXO. The continuation is read from `_continuations` by
+    // OUTPUT INDEX (#197) — never found by script equality, which is ambiguous
+    // when a raw output carries the same script — and with more than one
+    // continuation the index-ordered FIRST is tracked (all are reported in the
+    // result). No continuation (terminal, or raw outputs only) clears it.
+    const tracked = prepared._isStateful ? prepared._continuations[0] : undefined;
+    this.currentUtxo = tracked
+      ? { txid, outputIndex: tracked.outputIndex, satoshis: tracked.satoshis, script: tracked.script }
+      : null;
 
     const txData = await provider.getTransaction(txid).catch((err) => {
       // Audit finding C4 — see the peer fallback in `deploy()`.
@@ -2310,7 +2357,13 @@ export class RunarContract {
       return txToTransactionData(txid, finalTx);
     });
 
-    return { txid, tx: txData };
+    return {
+      txid,
+      tx: txData,
+      continuations: prepared._isStateful
+        ? prepared._continuations.map(({ outputIndex, satoshis, state }) => ({ outputIndex, satoshis, state }))
+        : [],
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -2323,6 +2376,21 @@ export class RunarContract {
   }
 
   /** Update state values directly (for stateful contracts). */
+  /**
+   * The locking script for an arbitrary state, built exactly as
+   * `getLockingScript()` builds it (inscription envelope, no state section for
+   * zero mutable fields), WITHOUT leaving `_state` changed.
+   */
+  private lockingScriptForState(state: Record<string, unknown>): string {
+    const saved = this._state;
+    this._state = { ...state };
+    try {
+      return this.getLockingScript();
+    } finally {
+      this._state = saved;
+    }
+  }
+
   setState(newState: Record<string, unknown>): void {
     this._state = { ...this._state, ...newState };
   }
