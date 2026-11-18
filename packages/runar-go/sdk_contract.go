@@ -844,6 +844,11 @@ func (c *RunarContract) PrepareCall(
 		return nil, fmt.Errorf("RunarContract.PrepareCall: no provider/signer available. Call Connect() or pass them explicitly")
 	}
 
+	// The state this call starts from. PrepareCall advances c.state to the
+	// post-call state before anything is broadcast; FinalizeCall restores this
+	// snapshot when the transaction never makes it onto the network.
+	stateBefore := copyStateMap(c.state)
+
 	// Funding (and terminal fee) inputs are signed by fundingSigner when set
 	// (issue #134). The method's own Sig args stay with the connected signer.
 	fundingSigner := signer
@@ -1622,7 +1627,11 @@ func (c *RunarContract) PrepareCall(
 			}
 			changeHex := ""
 			if methodNeedsChange && changePKHHex != "" {
-				changeHex = EncodePushData(changePKHHex) + encodeArg(txChangeAmount)
+				changePushHex, chgErr := encodeChangePKH(changePKHHex)
+				if chgErr != nil {
+					return "", "", chgErr
+				}
+				changeHex = changePushHex + encodeArg(txChangeAmount)
 			}
 			newAmountHex := ""
 			if methodNeedsNewAmount {
@@ -1962,12 +1971,49 @@ func (c *RunarContract) PrepareCall(
 		groth16WAWitnessHex:  groth16WAWitnessHex,
 		intentWitnessHex:     witnessHex,
 		codeSepIdx:           codeSepIdx,
+		stateBefore:          stateBefore,
+		stateAfter:           copyStateMap(c.state),
 	}, nil
 }
 
 // FinalizeCall completes a prepared call by injecting external signatures and
 // broadcasting. The signatures map keys must be from prepared.SigIndices.
 func (c *RunarContract) FinalizeCall(
+	prepared *PreparedCall,
+	signatures map[int]string,
+	provider Provider,
+) (string, *TransactionData, error) {
+	// Only a PreparedCall that still spends the tracked UTXO owns the state: a
+	// repeat of one that was already committed must not touch it.
+	ownsState := prepared != nil && prepared.stateBefore != nil && c.currentUtxo != nil &&
+		c.currentUtxo.Txid == prepared.contractUtxo.Txid &&
+		c.currentUtxo.OutputIndex == prepared.contractUtxo.OutputIndex
+	txid, tx, err := c.finalizeCallOnce(prepared, signatures, provider)
+	if ownsState {
+		if err != nil {
+			// Nothing was broadcast (or the node refused it): the chain is still
+			// at the state this call started from, so the local state must be
+			// too. Before this, a refused call left the state advanced and the
+			// next call was built from a state the chain never reached.
+			c.state = copyStateMap(prepared.stateBefore)
+		} else {
+			// A retry of a PreparedCall whose first finalize failed must commit
+			// the post-call state the transaction carries.
+			c.state = copyStateMap(prepared.stateAfter)
+		}
+	}
+	return txid, tx, err
+}
+
+func copyStateMap(m map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func (c *RunarContract) finalizeCallOnce(
 	prepared *PreparedCall,
 	signatures map[int]string,
 	provider Provider,
@@ -2017,7 +2063,11 @@ func (c *RunarContract) FinalizeCall(
 		}
 		changeHex := ""
 		if prepared.methodNeedsChange && prepared.changePKHHex != "" {
-			changeHex = EncodePushData(prepared.changePKHHex) + encodeArg(prepared.changeAmount)
+			changePushHex, chgErr := encodeChangePKH(prepared.changePKHHex)
+			if chgErr != nil {
+				return "", nil, fmt.Errorf("RunarContract.FinalizeCall: %w", chgErr)
+			}
+			changeHex = changePushHex + encodeArg(prepared.changeAmount)
 		}
 		newAmountHex := ""
 		if prepared.methodNeedsNewAmount {
@@ -3013,7 +3063,11 @@ func (c *RunarContract) prepareCallTerminal(
 			}
 			changeHex := ""
 			if methodNeedsChange && changePKHHex != "" {
-				changeHex = EncodePushData(changePKHHex) + encodeArg(int64(0))
+				changePushHex, chgErr := encodeChangePKH(changePKHHex)
+				if chgErr != nil {
+					return "", "", chgErr
+				}
+				changeHex = changePushHex + encodeArg(int64(0))
 			}
 			preimageHexStr := hex.EncodeToString(preimage)
 			unlockStr := c.buildStatefulPrefix("", false) +

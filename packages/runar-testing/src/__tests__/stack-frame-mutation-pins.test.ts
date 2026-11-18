@@ -241,8 +241,8 @@ export class SinkDistance extends StatefulSmartContract {
   // fold to OP_ROT (-4 hex chars, both modes; opcode diff is the folds only).
   // Re-measured against the same mutant: fold-OFF 1494 / fold-ON 1510 hex
   // chars, different digests — still killed.
-  foldOff: 'fd22f72064e392254b81401a5592cbd04229223f9d44bfc241c2b3d47d92e1a2',
-  foldOn: 'aa52340126f8e43375dfd9ba193fe5a51600258d750a1ac6f19727e7283593ed',
+  foldOff: '726341a0b3cac240ab53b76a9505e12c6c8b511765959ebb9bd5593b83f263a0',
+  foldOn: '396ee4d24869cd970a999d37120940a9c913c86893066555ffe0705b0a51bce4',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -266,10 +266,12 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
         // F-024 (R14): +64 hex chars in both modes for the value check.
         // N-216: -4 hex chars in both modes (two reconcile rolls fold to OP_ROT).
         // Ports #170: -12 hex chars in both modes (the C=1 binding blob, 428 -> 422 B).
-        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1462);
+        // PR B (#180/#213): +14 hex chars in both modes (1462 -> 1476, 1460 -> 1474;
+        // entry width gate on the injected `_changePKH`; digests re-stamped, gate-only delta).
+        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1476);
         // N-138 (2026-10-30): fold-ON no longer carries the dead operand pushes
         // the folder orphaned (-22 hex chars); fold-OFF is unchanged.
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1460);
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1474);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {

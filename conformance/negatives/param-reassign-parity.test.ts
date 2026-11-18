@@ -52,11 +52,12 @@ import { isCiEnv } from '../env.js';
  * defective arm.
  */
 
-/** Ports #170: PR 1402 hex chars, ShadowParam 1386 (C=1 binding blob, -12 hex each). N-360: 1414 (was 1420) / 1398 (was 1404). */
-const PR_SHA256 = '2d439f924960c54527370c0c700e18807fb3acd634eed4dabd9876da29d7ec05';
-const PR_HEX_LEN = 1402;
-const SHADOW_PARAM_SHA256 = '0bdc94a30c56319970f397648f350453494e27fbbf4ff8f17fd8955f8923a66e';
-const SHADOW_PARAM_HEX_LEN = 1386;
+/** Ports #170: PR 1402 hex chars, ShadowParam 1386 (C=1 binding blob, -12 hex each). N-360: 1414 (was 1420) / 1398 (was 1404).
+ *  PR B (#180/#213): PR 1416 (was 1402), ShadowParam 1400 (was 1386) (+7 B: entry width gate on `_changePKH`). */
+const PR_SHA256 = '3cc2f9bb26cc8e75f02c7b539eb2d3cc2b8f428a59d2229f88b3545af448741a';
+const PR_HEX_LEN = 1416;
+const SHADOW_PARAM_SHA256 = 'b1a5de64298bd85d149ac5a60e9b4c9417877f5088cd7a3e7dc3cee314aeb032';
+const SHADOW_PARAM_HEX_LEN = 1400;
 const SL_HEX = '788b7852937c9d0000a07777';
 
 const PR_SOURCES: Record<string, string> = {

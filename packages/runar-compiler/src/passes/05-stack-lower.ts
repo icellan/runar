@@ -886,6 +886,34 @@ class LoweringContext {
   }
 
   /**
+   * #180 / #213 — enforce a fixed-width parameter's declared width on-chain.
+   *
+   * A public method's witness items are arbitrary bytes. A `Point` /
+   * `Sha256` / `Ripemd160` / ... parameter that the body splices into a
+   * script (`cat` into `addRawOutput`, a state write, the change output)
+   * could otherwise carry extra bytes, opcodes included. The compiler-injected
+   * `_changePKH` (Ripemd160) is such a parameter: without the gate a spender
+   * extended it so the covenant's change output serialised as the change
+   * output followed by an extra output of the spender's choosing (#213).
+   *
+   * Emitted at the unlocking boundary for each parameter
+   * `paramNeedsWidthGate` selects, in declaration order together with the
+   * boolean gate:
+   *
+   *     <copy of param>  OP_SIZE <width> OP_NUMEQUALVERIFY  OP_DROP
+   *
+   * Net stack effect is zero.
+   */
+  emitFixedWidthParamGate(name: string, type: string): void {
+    const slot = this.renamedParams.get(name) ?? name;
+    this.bringToTop(slot, false);
+    this.emitFixedWidthCheck(type);
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    this.trackDepth();
+  }
+
+  /**
    * Clean up excess stack items below the top-of-stack result.
    * Used after method body lowering to ensure a clean stack for Bitcoin Script.
    */
@@ -1384,18 +1412,23 @@ class LoweringContext {
   }
 
   /**
-   * N-045: before a fixed-width state value (Sha256, PubKey, Addr, Ripemd160,
-   * Point, P256Point, P384Point) is committed to a continuation, assert it
-   * has exactly its declared width:
+   * Assert that the value on top of the stack has exactly the declared width
+   * of its fixed-width type (Sha256, PubKey, Addr, Ripemd160, Point,
+   * P256Point, P384Point):
    *
    *   [..., value]  OP_SIZE <width> OP_NUMEQUALVERIFY  -> [..., value]
    *
-   * The writer copies these values as they are, and the next spend's reader
-   * slices each one at its declared width. A wrong-width value therefore
-   * shifts every later field: a 66-byte Sha256 `R || pubkey || 0x22` is read
-   * as root = R and owner = pubkey. No-op for every other type.
+   * No-op for every other type. Two callers:
+   *
+   * - N-045, state writes: before a fixed-width state value is committed to a
+   *   continuation. The writer copies these values as they are, and the next
+   *   spend's reader slices each one at its declared width, so a wrong-width
+   *   value shifts every later field: a 66-byte Sha256 `R || pubkey || 0x22`
+   *   is read as root = R and owner = pubkey.
+   * - #180 / #213, public-method parameters: `emitFixedWidthParamGate`, at
+   *   method entry (this includes the compiler-injected `_changePKH`).
    */
-  private emitFixedWidthStateCheck(type: string): void {
+  private emitFixedWidthCheck(type: string): void {
     const width = fixedWidthStateBytes(type);
     if (width === undefined) return;
     this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
@@ -3805,7 +3838,7 @@ class LoweringContext {
       }
 
       // N-045: a fixed-width byte value must have its declared width.
-      this.emitFixedWidthStateCheck(prop.type);
+      this.emitFixedWidthCheck(prop.type);
 
       // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
       // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
@@ -4161,7 +4194,7 @@ class LoweringContext {
       this.bringToTop(valueRef, consume);
 
       // N-045: a fixed-width byte value must have its declared width.
-      this.emitFixedWidthStateCheck(prop.type);
+      this.emitFixedWidthCheck(prop.type);
 
       // Convert numeric/boolean values to fixed-width bytes.
       // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
@@ -7090,9 +7123,10 @@ function isVariableLengthStateType(type: string): boolean {
 }
 
 /**
- * N-045: the declared byte width of a fixed-width byte state type, or
- * `undefined` for every other type. MUST match the reader's size table in
- * `lowerDeserializeState` (and runar-ir-schema's STATE_FIELD_WIDTHS).
+ * N-045: the declared byte width of a fixed-width byte type, or `undefined`
+ * for every other type. MUST match the reader's size table in
+ * `lowerDeserializeState` (and runar-ir-schema's STATE_FIELD_WIDTHS). Also
+ * the width table of the #180 / #213 parameter entry gate.
  */
 function fixedWidthStateBytes(type: string): number | undefined {
   switch (type) {
@@ -7105,6 +7139,173 @@ function fixedWidthStateBytes(type: string): number | undefined {
     case 'P384Point': return 96;
     default: return undefined;
   }
+}
+
+// ---------------------------------------------------------------------------
+// #180 / #213 / D13: which public-method parameters get a width gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Built-ins that consume a PubKey's bytes without copying them anywhere: a
+ * signature check, or a fixed-width digest.
+ */
+const PUBKEY_VERIFY_FUNCS: ReadonlySet<string> = new Set(['checkSig', 'checkMultiSig', 'hash160']);
+
+/** Every binding reachable from `bs`, nested `if` arms and loop bodies included. */
+function flattenBindings(bs: ANFBinding[], out: ANFBinding[] = []): ANFBinding[] {
+  for (const b of bs) {
+    out.push(b);
+    const v = b.value;
+    if (v.kind === 'if') {
+      flattenBindings(v.then, out);
+      flattenBindings(v.else, out);
+    } else if (v.kind === 'loop') {
+      flattenBindings(v.body, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * The names of the bindings whose value flows OUT of a body without being
+ * referenced: the last binding of the method body (a private helper's return
+ * value) and of every nested `if` arm and loop body (an arm's value, e.g. a
+ * ternary). Such a temp has no direct reference to inspect, so it counts as an
+ * "other use" (fail closed): `pick ? a : b` or `return k` must not launder a
+ * PubKey past the D13 exemption.
+ */
+function collectValueTails(bs: ANFBinding[], out: Set<string> = new Set()): Set<string> {
+  if (bs.length > 0) out.add(bs[bs.length - 1]!.name);
+  for (const b of bs) {
+    const v = b.value;
+    if (v.kind === 'if') {
+      collectValueTails(v.then, out);
+      collectValueTails(v.else, out);
+    } else if (v.kind === 'loop') {
+      collectValueTails(v.body, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * The temps a value reads DIRECTLY (nested arms are visited as their own
+ * bindings by `flattenBindings`). Every kind is listed: a new ANF kind must
+ * be added here, in all seven tiers and in the Lean model (`directRefs`).
+ */
+function directRefs(v: ANFValue): string[] {
+  switch (v.kind) {
+    case 'load_const':
+      return typeof v.value === 'string' && v.value.startsWith('@ref:') ? [v.value.slice(5)] : [];
+    case 'bin_op': return [v.left, v.right];
+    case 'unary_op': return [v.operand];
+    case 'call': return v.args;
+    case 'method_call': return [v.object, ...v.args];
+    case 'if': return [v.cond];
+    case 'assert': return [v.value];
+    case 'update_prop': return [v.value];
+    case 'check_preimage': return [v.preimage];
+    case 'deserialize_state': return [v.preimage];
+    case 'add_output': return [v.satoshis, ...v.stateValues, v.preimage];
+    case 'add_raw_output': return [v.satoshis, v.scriptBytes];
+    case 'add_data_output': return [v.satoshis, v.scriptBytes];
+    case 'array_literal': return v.elements;
+    case 'load_param':
+    case 'load_prop':
+    case 'get_state_script':
+    case 'loop':
+    case 'raw_script':
+      return [];
+  }
+}
+
+/**
+ * D13: does the temp `name` (defined in a method whose flattened body is
+ * `body`) only ever reach `PUBKEY_VERIFY_FUNCS` — directly, through an
+ * `@ref:` alias, an array literal, or a private helper's parameter? Any
+ * other use (cat, comparison, output, state write, another built-in, ...)
+ * answers false, and so does a temp in `tails` (it leaves its body as an
+ * arm's or a helper's value; see `collectValueTails`).
+ */
+function onlyVerifiedTemp(
+  name: string,
+  body: ANFBinding[],
+  tails: Set<string>,
+  privateMethods: Map<string, ANFMethod>,
+  onPath: Set<string> = new Set(),
+): boolean {
+  if (tails.has(name)) return false;
+  // Locals are re-bound by name (branch merges), so an alias chain can cycle
+  // (`nk` read by a binding named `nk`). A cycle is answered "other use"
+  // (gate), as the Lean model's fuel-bounded walk answers it.
+  if (onPath.has(name)) return false;
+  onPath.add(name);
+  try {
+  for (const b of body) {
+    const v = b.value;
+    if (!directRefs(v).includes(name)) continue;
+    if (v.kind === 'call') {
+      if (PUBKEY_VERIFY_FUNCS.has(v.func)) continue;
+      return false;
+    }
+    if ((v.kind === 'load_const' || v.kind === 'array_literal')) {
+      if (onlyVerifiedTemp(b.name, body, tails, privateMethods, onPath)) continue;
+      return false;
+    }
+    if (v.kind === 'method_call' && v.object !== name) {
+      const pm = privateMethods.get(v.method);
+      if (!pm) return false;
+      for (let i = 0; i < v.args.length; i++) {
+        if (v.args[i] !== name) continue;
+        const p = pm.params[i];
+        if (!p || !onlyVerifiedParam(p.name, pm, privateMethods)) return false;
+      }
+      continue;
+    }
+    return false;
+  }
+  return true;
+  } finally {
+    onPath.delete(name);
+  }
+}
+
+/** Every `load_param pname` in `m`'s body satisfies `onlyVerifiedTemp`. */
+function onlyVerifiedParam(
+  pname: string,
+  m: ANFMethod,
+  privateMethods: Map<string, ANFMethod>,
+): boolean {
+  const body = flattenBindings(m.body);
+  const tails = collectValueTails(m.body);
+  for (const b of body) {
+    if (b.value.kind === 'load_param' && b.value.name === pname
+        && !onlyVerifiedTemp(b.name, body, tails, privateMethods)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * #180 / #213 / D13 — THE rule (spec/type-system.md, "Fixed-width
+ * parameters"): a public method's parameter is width-gated at entry iff its
+ * type is fixed-width (`fixedWidthStateBytes`), except a `PubKey` whose value
+ * only ever reaches checkSig / checkMultiSig / hash160. That exemption keeps
+ * a plain P2PKH on its standard template; OP_CHECKSIG and the 20-byte digest
+ * consume such a key without copying its bytes anywhere. `Sig` is never
+ * gated (variable-width DER). Mirrored by `paramWidthGate?` in
+ * runar-verification/RunarVerification/Pipeline.lean.
+ */
+function paramNeedsWidthGate(
+  name: string,
+  type: string,
+  method: ANFMethod,
+  privateMethods: Map<string, ANFMethod>,
+): boolean {
+  if (fixedWidthStateBytes(type) === undefined) return false;
+  if (type === 'PubKey') return !onlyVerifiedParam(name, method, privateMethods);
+  return true;
 }
 
 /**
@@ -7259,10 +7460,16 @@ function lowerMethod(
   // {empty, 0x01} before a single body opcode runs — see emitBooleanParamGate.
   // Constructor args are baked into the locking script by the assembler, never
   // pushed by a spender, so only public methods need the gate.
+  //
+  // #180 / #213: likewise pin each fixed-width parameter to its declared
+  // width (see emitFixedWidthParamGate / paramNeedsWidthGate). One loop, in
+  // declaration order, so every tier and the Lean model agree on the order.
   if (method.isPublic) {
     for (const param of method.params) {
       if (param.type === 'boolean') {
         ctx.emitBooleanParamGate(param.name);
+      } else if (paramNeedsWidthGate(param.name, param.type, method, privateMethods)) {
+        ctx.emitFixedWidthParamGate(param.name, param.type);
       }
     }
   }

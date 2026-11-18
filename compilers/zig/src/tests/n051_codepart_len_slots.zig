@@ -79,10 +79,12 @@ const FIXED_SRC =
     \\}
 ;
 
-/// Pins taken from the TypeScript reference artifact (fold OFF).
-const TS_SCRIPT_LEN_BYTES: usize = 1305;
-const TS_SCRIPT_SHA256 = "738869ba6eed4d229d0d30f0b91b6fe98addff349a4f0fe0dee3ca3ffb656e45";
-const TS_SLOT_BYTE_OFFSET: usize = 947;
+/// Pins taken from the TypeScript reference artifact (fold OFF). #180 / #213
+/// moved them from 1305 B / 738869ba... / 947: the 7-byte `_changePKH` entry
+/// width gate.
+const TS_SCRIPT_LEN_BYTES: usize = 1312;
+const TS_SCRIPT_SHA256 = "6b33f027c6bb4cd829e966da63df07338e97242d3bbd0b1d20eefc6c5bc17533";
+const TS_SLOT_BYTE_OFFSET: usize = 954;
 
 fn compileJson(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     const result = try compiler_api.compileSourceWithOptions(allocator, src, FILE_NAME, true);
@@ -112,7 +114,7 @@ test "N-051: a variable-width readonly arg yields an equality pin and a codePart
     // The pin is an equality; the old lower-bound tail is gone.
     try std.testing.expect(std.mem.indexOf(u8, script, "81a269") == null);
 
-    // codePartLenSlots = [{"byteOffset": 947}] — exactly one key per entry.
+    // codePartLenSlots = [{"byteOffset": 954}] — exactly one key per entry.
     const slots_val = root.get("codePartLenSlots") orelse return error.MissingCodePartLenSlots;
     const slots = slots_val.array.items;
     try std.testing.expectEqual(@as(usize, 1), slots.len);
@@ -131,7 +133,7 @@ test "N-051: a variable-width readonly arg yields an equality pin and a codePart
     // Key order: codePartLenSlots immediately after codeSepIndexSlots.
     const csis = std.mem.indexOf(u8, json, "\"codeSepIndexSlots\":[") orelse return error.MissingCodeSepIndexSlots;
     const close = std.mem.indexOfPos(u8, json, csis, "],") orelse return error.Malformed;
-    try std.testing.expect(std.mem.startsWith(u8, json[close + 2 ..], "\"codePartLenSlots\":[{\"byteOffset\":947}]"));
+    try std.testing.expect(std.mem.startsWith(u8, json[close + 2 ..], "\"codePartLenSlots\":[{\"byteOffset\":954}]"));
 }
 
 test "N-051: a fully fixed-width contract keeps an equality pin and records no slot" {

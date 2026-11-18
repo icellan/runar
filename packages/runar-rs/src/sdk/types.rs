@@ -749,6 +749,12 @@ pub struct PreparedCall {
     /// `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
     /// Empty when the method has no auto-injected intent params.
     pub(crate) intent_witness_hex: String,
+    /// The local state before `prepare_call` advanced it (restored when
+    /// `finalize_call` fails) and the post-call state it advanced to
+    /// (re-applied when a retried `finalize_call` of the same PreparedCall
+    /// succeeds). `None` on the terminal path, which does not touch state.
+    pub(crate) state_before: Option<HashMap<String, SdkValue>>,
+    pub(crate) state_after: Option<HashMap<String, SdkValue>>,
 }
 
 /// A contract output entry stored in PreparedCall (script + satoshis).

@@ -196,35 +196,188 @@ def booleanParamGateOps (depth : Nat) : List StackOp :=
     , .opcode "OP_BOOLOR"
     , .opcode "OP_VERIFY" ]
 
-/-- Gates in declaration order. Depth of param `i` of `n` is `n-1-i`
-(last param is TOS). `_codePart` sits under the user params, so user
-depths are unchanged. -/
-def booleanGatesForMethod (m : ANFMethod) : List StackOp :=
+/-- #180 / #213: declared byte width of a fixed-width param type, or
+`none`. Mirrors `fixedWidthBytes` (05-stack-lower.ts) and runar-ir-schema's
+`STATE_FIELD_WIDTHS`. -/
+def fixedWidthBytes? : ANFType → Option Nat
+  | .pubKey    => some 33
+  | .addr      => some 20
+  | .ripemd160 => some 20
+  | .sha256    => some 32
+  | .point     => some 64
+  | .p256Point => some 64
+  | .p384Point => some 96
+  | _          => none
+
+/-- #180 / #213: width pin on one fixed-width witness. Net stack 0.
+Mirrors `emitFixedWidthParamGate`:
+`<copy> OP_SIZE <w> OP_NUMEQUALVERIFY OP_DROP`. -/
+def widthParamGateOps (depth w : Nat) : List StackOp :=
+  copyAtDepth depth ::
+    [ .opcode "OP_SIZE"
+    , .push (.bigint (Int.ofNat w))
+    , .opcode "OP_NUMEQUALVERIFY"
+    , .drop ]
+
+mutual
+
+/-- Every binding reachable from `bs`, nested `if` arms and loop bodies
+included, outer binding before its nested ones. -/
+def flattenBindings : List ANFBinding → List ANFBinding
+  | [] => []
+  | (.mk n v l) :: rest => (.mk n v l) :: (flattenValue v ++ flattenBindings rest)
+
+def flattenValue : ANFValue → List ANFBinding
+  | .ifVal _ thn els _ => flattenBindings thn ++ flattenBindings els
+  | .loop _ body _ _ _ => flattenBindings body
+  | _ => []
+
+end
+
+/-- Name of the last binding of a body, if any. -/
+def lastBindingName (bs : List ANFBinding) : List String :=
+  (bs.getLast?.map (·.name)).toList
+
+mutual
+
+/-- Value tails of every `if` arm and loop body nested in `bs`. -/
+def nestedValueTails : List ANFBinding → List String
+  | [] => []
+  | (.mk _ v _) :: rest => nestedValueTailsOf v ++ nestedValueTails rest
+
+def nestedValueTailsOf : ANFValue → List String
+  | .ifVal _ thn els _ =>
+      lastBindingName thn ++ nestedValueTails thn ++
+        lastBindingName els ++ nestedValueTails els
+  | .loop _ body _ _ _ => lastBindingName body ++ nestedValueTails body
+  | _ => []
+
+end
+
+/-- Names of the bindings whose value leaves its body unreferenced: the last
+binding of the body (a helper's return value) and of every nested `if` arm
+and loop body (an arm's value). Such a temp counts as an "other use" (fail
+closed). Mirrors `collectValueTails` in 05-stack-lower.ts. -/
+def collectValueTails (bs : List ANFBinding) : List String :=
+  lastBindingName bs ++ nestedValueTails bs
+
+/-- The temps a value reads DIRECTLY (nested arms are visited as their own
+bindings by `flattenBindings`). Mirrors `directRefs` in 05-stack-lower.ts. -/
+def directRefs : ANFValue → List String
+  | .loadConst (.refAlias n) => [n]
+  | .binOp _ l r _           => [l, r]
+  | .unaryOp _ operand _     => [operand]
+  | .call _ args             => args
+  | .methodCall obj _ args   => obj :: args
+  | .ifVal cond _ _ _        => [cond]
+  | .assert ref              => [ref]
+  | .updateProp _ ref        => [ref]
+  | .checkPreimage pre _ _   => [pre]
+  | .deserializeState pre    => [pre]
+  | .arrayLiteral elems      => elems
+  | .addRawOutput sat scr    => [sat, scr]
+  | .addDataOutput sat scr   => [sat, scr]
+  | .addOutput sat vals pre  => (sat :: vals) ++ [pre]
+  | _                        => []
+
+/-- D13: built-ins that consume a PubKey's bytes without copying them
+anywhere (signature check, or a fixed-width digest). -/
+def pubKeyVerifyFuncs : List String := ["checkSig", "checkMultiSig", "hash160"]
+
+mutual
+
+/-- Does the temp `name`, defined in a method whose flattened body is
+`body`, only ever reach `pubKeyVerifyFuncs` — directly, through an
+`@ref:` alias, an array literal, or a private helper's parameter — and is it
+not in `tails` (an arm's or a helper's value)? `fuel`
+bounds the (acyclic) chain; running out answers `false`, i.e. gate. -/
+def onlyVerifiedTemp (privs : List ANFMethod) (body : List ANFBinding)
+    (tails : List String) : Nat → String → Bool
+  | 0, _ => false
+  | fuel + 1, name =>
+      !tails.contains name &&
+      body.all fun b =>
+        let v := b.value
+        if !(directRefs v).contains name then true
+        else match v with
+          | .call f _ => pubKeyVerifyFuncs.contains f
+          | .loadConst (.refAlias _) => onlyVerifiedTemp privs body tails fuel b.name
+          | .arrayLiteral _ => onlyVerifiedTemp privs body tails fuel b.name
+          | .methodCall obj m args =>
+              obj != name &&
+              (match privs.find? (fun pm => pm.name == m) with
+               | none => false
+               | some pm =>
+                   (List.range args.length).all fun i =>
+                     if args[i]? == some name then
+                       match pm.params[i]? with
+                       | none => false
+                       | some p => onlyVerifiedParam privs pm fuel p.name
+                     else true)
+          | _ => false
+
+/-- Every `load_param pname` in `m`'s body satisfies `onlyVerifiedTemp`. -/
+def onlyVerifiedParam (privs : List ANFMethod) (m : ANFMethod) :
+    Nat → String → Bool
+  | 0, _ => false
+  | fuel + 1, pname =>
+      let body := flattenBindings m.body
+      let tails := collectValueTails m.body
+      body.all fun b =>
+        match b.value with
+        | .loadParam n => n != pname || onlyVerifiedTemp privs body tails fuel b.name
+        | _ => true
+
+end
+
+/-- D13 / #180 / #213: does public method `m`'s param `p` get a width gate?
+Every fixed-width type does, except a PubKey whose value only reaches
+checkSig / checkMultiSig / hash160 (so P2PKH keeps its standard template).
+Mirrors `paramNeedsWidthGate` in 05-stack-lower.ts. -/
+def paramWidthGate? (p : ANFProgram) (m : ANFMethod) (param : ANFParam) :
+    Option Nat :=
+  match fixedWidthBytes? param.type with
+  | none => none
+  | some w =>
+      if param.type == .pubKey then
+        let privs := p.methods.filter (fun pm => !pm.isPublic && pm.name != "constructor")
+        let fuel := (p.methods.map (fun pm => (flattenBindings pm.body).length)).foldl (· + ·) 0 + 2
+        if onlyVerifiedParam privs m fuel param.name then none else some w
+      else some w
+
+/-- Entry gates in declaration order: W3's boolean domain pin, or the
+#180/#213 width pin. Depth of param `i` of `n` is `n-1-i` (last param is
+TOS); `_codePart` sits under the user params, so user depths are
+unchanged. -/
+def paramGatesForMethod (p : ANFProgram) (m : ANFMethod) : List StackOp :=
   if !m.isPublic then []
   else
     let n := m.params.length
     (List.range n).foldl (init := ([] : List StackOp)) fun acc i =>
       match m.params[i]? with
-      | some p =>
-          if p.type == .bool then
+      | some param =>
+          if param.type == .bool then
             acc ++ booleanParamGateOps (n - 1 - i)
-          else acc
+          else match paramWidthGate? p m param with
+            | some w => acc ++ widthParamGateOps (n - 1 - i) w
+            | none => acc
       | none => acc
 
-def applyBooleanParamGates (p : ANFProgram) (stack : StackProgram) :
+def applyParamGates (p : ANFProgram) (stack : StackProgram) :
     StackProgram :=
   { stack with methods := stack.methods.map (fun sm =>
       match p.methods.find? (fun m => m.name == sm.name) with
       | none => sm
-      | some m => { sm with ops := booleanGatesForMethod m ++ sm.ops }) }
+      | some m => { sm with ops := paramGatesForMethod p m ++ sm.ops }) }
 
 /-- TS threads `scriptLevelCodeSeparator` through every method so a
 checkPreimage-only sibling of an `addOutput` method does not emit its
 own `OP_CODESEPARATOR`. Applied after `lower` (whose Agrees proofs
-keep the per-method shape) and before peephole/emit. W3 boolean ABI
-gates are prepended on the same path. -/
+keep the per-method shape) and before peephole/emit. The entry
+parameter gates (W3 boolean, #180/#213 width) are prepended on the same
+path. -/
 def hoistStack (p : ANFProgram) : StackProgram :=
-  let lowered := applyBooleanParamGates p (Lower.lower p)
+  let lowered := applyParamGates p (Lower.lower p)
   peepholeProgram
     { lowered with methods := Lower.applyHoistedCodeSeparator lowered.methods }
 

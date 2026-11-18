@@ -32,12 +32,12 @@
         "mergeBalance": "0n"
       },
       "templateHash": {
-        "hash256": "2ff69aa12a0a1cfd9a15d878c9f950d68edd216d7d33367fd3dc6094ed97890f",
-        "codePartByteLength": 3035,
+        "hash256": "1943bbed3b6a7e809db7fb4cf26d1a6215c9a9cc9fbe8c60c0274361a98d784b",
+        "codePartByteLength": 3070,
         "slots": [
           {
             "param": "tokenId",
-            "at": 2119,
+            "at": 2154,
             "was": "51",
             "encoding": "op-n",
             "pushHeaderBytes": 0
@@ -74,12 +74,12 @@
         "mergeBalance": "0n"
       },
       "templateHash": {
-        "hash256": "2ff69aa12a0a1cfd9a15d878c9f950d68edd216d7d33367fd3dc6094ed97890f",
-        "codePartByteLength": 3035,
+        "hash256": "1943bbed3b6a7e809db7fb4cf26d1a6215c9a9cc9fbe8c60c0274361a98d784b",
+        "codePartByteLength": 3070,
         "slots": [
           {
             "param": "tokenId",
-            "at": 2119,
+            "at": 2154,
             "was": "4f",
             "encoding": "op-1negate",
             "pushHeaderBytes": 0
@@ -136,7 +136,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "cb9180d595c41b2e227ac514a6f435b7c307a927a97fb8d517651411c3612845",
+    "expected-script.hex": "4b514e0da98ba17c43b6aab72934fd84d17403d960ec2d251656a5be7ab6a680",
     "expected-ir.json": "d42c20113fdabb76465067584a5d0dcc03bfe08b361ac59408d6dbc6d98061bc"
   }
 }

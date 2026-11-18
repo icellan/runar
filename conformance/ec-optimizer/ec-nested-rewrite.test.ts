@@ -43,8 +43,9 @@ import { isCiEnv } from '../env.js';
 
 const FIXTURE = join(__dirname, 'EcNestedRewrite.runar.ts');
 // sha256 of the hex string every tier must emit, both fold modes.
-const EXPECTED_HEX_SHA256 = '969833f065ad228edb9554c48469515d5899f1056dbcba41ff7f78d354c46401';
-const EXPECTED_BYTES = 2984;
+// PR B (#180/#213): re-pinned, +7 B (2984 -> 2991): entry width gate on `gatedArms`'s Point param.
+const EXPECTED_HEX_SHA256 = '6355c70e703cc8cdf15c01233437e729d5842e0111a1b5cfb9b0dfcfafb26ecc';
+const EXPECTED_BYTES = 2991;
 
 type FoldMode = 'fold-on' | 'fold-off';
 const FOLD_MODES: FoldMode[] = ['fold-on', 'fold-off'];
