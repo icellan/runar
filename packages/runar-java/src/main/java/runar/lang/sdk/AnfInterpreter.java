@@ -38,7 +38,7 @@ import runar.lang.runtime.MockCrypto;
  *       {@code get_state_script}, and {@code add_raw_output}; returns the
  *       new state map merged with {@code currentState}. Crypto primitives
  *       that aren't locally implementable
- *       (BN254/Poseidon2/SLH-DSA/sha256Compress) propagate
+ *       (BN254/Poseidon2/SLH-DSA) propagate
  *       {@link UnsupportedOperationException} from {@link MockCrypto}.</li>
  *   <li>{@link #executeStrict executeStrict(...)} — strict mode: same
  *       walk as {@code computeNewState} except {@code assert} bindings
@@ -1505,6 +1505,12 @@ public final class AnfInterpreter {
             case "ripemd160":  return hashHex("ripemd160", args.get(0));
             // D11: the compiled script's partial-SHA-256 finalize. It used to
             // throw UnsupportedOperationException for every input.
+            // D16: one SHA-256 block compression. It used to throw
+            // UnsupportedOperationException for every input.
+            case "sha256Compress":
+                return sha256CompressHex(
+                    args.size() > 0 ? args.get(0) : null,
+                    args.size() > 1 ? args.get(1) : null);
             case "sha256Finalize":
                 return sha256FinalizeHex(
                     args.size() > 0 ? args.get(0) : null,
@@ -1719,7 +1725,6 @@ public final class AnfInterpreter {
             case "verifySLHDSA_SHA2_192f":
             case "verifySLHDSA_SHA2_256s":
             case "verifySLHDSA_SHA2_256f":
-            case "sha256Compress":
             case "poseidon2Hash":
             case "bn254FieldAdd":
             case "bn254FieldMul":
@@ -1736,6 +1741,25 @@ public final class AnfInterpreter {
     // ------------------------------------------------------------------
     // Hash / number helpers
     // ------------------------------------------------------------------
+
+    /**
+     * D16: {@code sha256Compress(state, block)} as the compiled script computes
+     * it, refusing exactly what the script refuses (F-114: a state that is not
+     * 32 bytes or a block that is not 64) with the diagnostics every tier
+     * shares.
+     */
+    private static String sha256CompressHex(Object stateArg, Object blockArg) {
+        byte[] state = HEX.parseHex(asString(stateArg));
+        byte[] block = HEX.parseHex(asString(blockArg));
+        if (state.length != 32) {
+            throw new IllegalArgumentException("sha256Compress: state must be 32 bytes, got " + state.length);
+        }
+        if (block.length != 64) {
+            throw new IllegalArgumentException("sha256Compress: block must be 64 bytes, got " + block.length);
+        }
+        return HEX.formatHex(MockCrypto.sha256Compress(
+            new runar.lang.types.ByteString(state), new runar.lang.types.ByteString(block)).toByteArray());
+    }
 
     /**
      * D11: {@code sha256Finalize(state, remaining, msgBitLen)} as the compiled

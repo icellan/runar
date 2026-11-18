@@ -20,6 +20,7 @@ require_relative "../frontend/input_limits"
 require_relative "stateful_scaffold"
 require_relative "synthetic_array_chain"
 require_relative "rabin_key_provenance"
+require_relative "preimage_rules"
 
 module RunarCompiler
   module IR
@@ -109,6 +110,10 @@ module RunarCompiler
         raise ArgumentError, "decoding constants: #{e.message}"
       end
 
+      # D15 / GK-BUG-015: a repeated method name, before anything looks a
+      # method up by name.
+      PreimageRules.assert_unique_method_names!(program)
+
       errors = validate_ir(program)
       unless errors.empty?
         raise ArgumentError, "IR validation: #{errors[0]}"
@@ -121,6 +126,10 @@ module RunarCompiler
       # N-205: F-286's verifyRabinSig key provenance, and the write rule for a
       # mutable key property (shared rule and diagnostics, 7 tiers).
       RabinKeyProvenance.assert!(program)
+
+      # D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
+      # diagnostics, 7 tiers; see preimage_rules.rb).
+      PreimageRules.assert!(program)
 
       program
     end

@@ -518,7 +518,7 @@ pub fn compile_from_source_str_with_options(
     // Passes 5-6: Backend (stack lowering + emit)
     // Constant folding already ran above; skip it in compile_from_program.
     let backend_opts = CompileOptions { disable_constant_folding: true, ..Default::default() };
-    compile_from_program_with_options(&anf_program, &backend_opts)
+    compile_program_checked(&anf_program, &backend_opts, false)
 }
 
 /// Compile from a `.runar.ts` source file to ANF IR only (passes 1-4).
@@ -994,6 +994,15 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
 
 /// Compile a parsed ANF program to a Rúnar artifact, with options.
 pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &CompileOptions) -> Result<RunarArtifact, String> {
+    compile_program_checked(program, opts, true)
+}
+
+/// D15: `preimage_rules_apply` re-derives D9 / GK-GAP-010 / D14 on the ANF for
+/// every program that did not come through this tier's own frontend (which
+/// already enforced them on the AST). The source path passes false: its ANF
+/// can nest far deeper than any IR input (N-264), and the rules are proven
+/// there already.
+fn compile_program_checked(program: &ir::ANFProgram, opts: &CompileOptions, preimage_rules_apply: bool) -> Result<RunarArtifact, String> {
     // N-285: see compile_from_source_str_with_options.
     refusal::init();
     reject_unsupported_stop_after_pass_options(opts)?;
@@ -1017,6 +1026,13 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     // the scaffolding the frontend injects. See stateful_scaffold.rs.
     if parent_class == "StatefulSmartContract" {
         stateful_scaffold::check_ir_stateful_scaffolding(program)?;
+    }
+    // D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
+    // diagnostics, 7 tiers; see ir/preimage_rules.rs). After the scaffolding
+    // check, as in the TS reference, so a malformed stateful prologue keeps
+    // its own N-101 diagnostic.
+    if preimage_rules_apply {
+        ir::preimage_rules::assert_preimage_rules(program)?;
     }
 
     let mut program = program.clone();

@@ -59,6 +59,12 @@ func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
 		return nil, err
 	}
 
+	// D15 / GK-BUG-015: a repeated method name, before anything looks a
+	// method up by name.
+	if err := AssertUniqueMethodNames(&program); err != nil {
+		return nil, err
+	}
+
 	if err := ValidateIR(&program); err != nil {
 		return nil, err
 	}

@@ -3804,6 +3804,27 @@
       "verified-against": "second-implementation",
       "reason": "PR F (D11): sha256Finalize is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned null/'0n' or refused the builtin. These strict-mode goldens were stamped from the TS reference interpreter and checked against two independent oracles: (1) the lenient-mode goldens for the same cases, whose digests were computed with Python hashlib (and runar-py's builtin for 2^63+24), and (2) the compiled script on the real @bsv/sdk Spend, which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-finalize-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-finalize.json (including the [0, 2^64) bit-length refusals) through all seven. New files; no existing golden moved.",
       "reviewer": "fix-session: PR F follow-ups (D9-D11)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-compress-abc.json",
+      "sha256": "1f0271a2dc1aa405f7cfa9bb1dfbabaf1ba3cde1801ee03c5a902943b221b192",
+      "verified-against": "second-implementation",
+      "reason": "PR G (D16): sha256Compress is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned nil/None/undefined or refused the builtin. These strict-mode goldens equal the lenient goldens for the same cases, whose digests were computed independently with a pure-Python FIPS 180-4 compression that was itself checked against Python hashlib (sha256-compress-abc = SHA-256('abc'); sha256-compress-chained = SHA-256 of the 56-byte two-block FIPS vector, compressing its second block from the first block's state; sha256-compress-arbitrary-state from the same reference on a non-IV state), and against the compiled script on the real @bsv/sdk Spend (the script-semantics oracle in cross-interpreter.test.ts), which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-compress-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-compress.json (including the F-114 state / block size refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR G (D14-D16)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-compress-arbitrary-state.json",
+      "sha256": "050ce28a36836a1686f121099cff16fda68febde28f7f0a15ee35f1aa785ea6b",
+      "verified-against": "second-implementation",
+      "reason": "PR G (D16): sha256Compress is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned nil/None/undefined or refused the builtin. These strict-mode goldens equal the lenient goldens for the same cases, whose digests were computed independently with a pure-Python FIPS 180-4 compression that was itself checked against Python hashlib (sha256-compress-abc = SHA-256('abc'); sha256-compress-chained = SHA-256 of the 56-byte two-block FIPS vector, compressing its second block from the first block's state; sha256-compress-arbitrary-state from the same reference on a non-IV state), and against the compiled script on the real @bsv/sdk Spend (the script-semantics oracle in cross-interpreter.test.ts), which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-compress-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-compress.json (including the F-114 state / block size refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR G (D14-D16)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/sha256-compress-chained.json",
+      "sha256": "90ec265763fcb22383ecc3616bff588bfadde330c75017cdc5d92e050a6fdc0f",
+      "verified-against": "second-implementation",
+      "reason": "PR G (D16): sha256Compress is now modelled in every SDK ANF interpreter (TS SDK, Go, Python, Ruby, Rust, Zig, Java), which previously returned nil/None/undefined or refused the builtin. These strict-mode goldens equal the lenient goldens for the same cases, whose digests were computed independently with a pure-Python FIPS 180-4 compression that was itself checked against Python hashlib (sha256-compress-abc = SHA-256('abc'); sha256-compress-chained = SHA-256 of the 56-byte two-block FIPS vector, compressing its second block from the first block's state; sha256-compress-arbitrary-state from the same reference on a non-IV state), and against the compiled script on the real @bsv/sdk Spend (the script-semantics oracle in cross-interpreter.test.ts), which agrees. All seven interpreters reproduce each golden byte-for-byte in conformance/anf-interpreter/cross-interpreter-strict.test.ts, and conformance/anf-interpreter/sha256-compress-domain.test.ts replays every row of conformance/witnesses/real-crypto/sha256-compress.json (including the F-114 state / block size refusals) through all seven. New files; no existing golden moved.",
+      "reviewer": "fix-session: PR G (D14-D16)"
     }
   ]
 }

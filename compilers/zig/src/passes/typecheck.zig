@@ -83,6 +83,7 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
         checker.checkMethod(method);
     }
     try checkPreimageCheckedOnEveryPath(&checker, allocator, contract);
+    try checkExtractorsReadCheckedPreimages(&checker, allocator, contract);
 
     const errors = try checker.errors.toOwnedSlice(allocator);
     const error_locations: []const ?types.SourceLocation = if (checker.error_locs.items.len == errors.len)
@@ -372,6 +373,191 @@ fn checkPreimageCheckedOnEveryPath(checker: *TypeChecker, allocator: Allocator, 
             }
             checker.addErrorAt(m.source_loc, PREIMAGE_NOT_CHECKED_FMT, .{ m.name, p.name });
         }
+    }
+}
+
+// ============================================================================
+// D14: a preimage extractor reads only a CHECKED preimage
+// ============================================================================
+
+/// The builtins that read a field out of a sighash preimage (argument 1).
+pub const PREIMAGE_EXTRACTORS = [_][]const u8{
+    "extractVersion",    "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
+    "extractInputIndex", "extractScriptCode",   "extractAmount",       "extractSequence",
+    "extractOutputHash", "extractOutputs",      "extractLocktime",     "extractSigHashType",
+};
+
+/// The diagnostic every tier shares; the argument is the extractor or private method.
+pub const UNCHECKED_PREIMAGE_ARG_FMT = "{s}() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter " ++
+    "(one a public method must assert with checkPreimage()) or the implicit txPreimage of a " ++
+    "StatefulSmartContract; any other value is not bound to the spending transaction, so every " ++
+    "field an extractor reads from it is unverified";
+
+fn isPreimageExtractor(name: []const u8) bool {
+    for (PREIMAGE_EXTRACTORS) |e| if (std.mem.eql(u8, e, name)) return true;
+    return false;
+}
+
+const NameSet = std.StringHashMapUnmanaged(void);
+
+/// D14 (spec/type-system.md 4.3): a provenance rule on top of GK-GAP-010 (the
+/// subtype rules let any ByteString stand where a SigHashPreimage is
+/// expected, so typing the extractor's parameter proves nothing). Inside a
+/// method a "checked preimage" is a SigHashPreimage parameter of that method
+/// (a public method's is asserted on every path by
+/// checkPreimageCheckedOnEveryPath; a private method's is covered by the
+/// call-site rule), a local declared from one (GK-010's alias rule), or, in a
+/// StatefulSmartContract, the implicit txPreimage (`this.txPreimage` /
+/// `ctx.txPreimage`). A name assigned anywhere in the method never counts,
+/// and nothing in a constructor does. Every extractor's argument, and every
+/// argument passed to a private method's SigHashPreimage parameter, must be a
+/// checked preimage.
+const ExtractorCheck = struct {
+    checker: *TypeChecker,
+    allocator: Allocator,
+    contract: ContractNode,
+    method: MethodNode,
+    implicit: bool,
+    reassigned: NameSet = .empty,
+
+    fn privateMethod(self: *ExtractorCheck, name: []const u8) ?MethodNode {
+        for (self.contract.methods) |m| {
+            if (!m.is_public and std.mem.eql(u8, m.name, name)) return m;
+        }
+        return null;
+    }
+
+    /// The implicit preimage only where no parameter of this method takes its
+    /// name (reserved-name rules refuse one; never rely on that alone).
+    fn isOwnParam(self: *ExtractorCheck, name: []const u8) bool {
+        for (self.method.params) |p| if (std.mem.eql(u8, p.name, name)) return true;
+        return false;
+    }
+
+    fn isCtxParam(self: *ExtractorCheck, name: []const u8) bool {
+        for (self.method.params) |p| {
+            if (std.mem.eql(u8, p.name, name) and std.mem.eql(u8, p.type_name, "StatefulContext")) return true;
+        }
+        return false;
+    }
+
+    fn isChecked(self: *ExtractorCheck, e: Expression, checked: *const NameSet) bool {
+        return switch (e) {
+            .identifier => |n| checked.contains(n) and !self.reassigned.contains(n),
+            .property_access => |pa| self.implicit and !self.isOwnParam("txPreimage") and std.mem.eql(u8, pa.property, "txPreimage") and
+                (std.mem.eql(u8, pa.object, "this") or self.isCtxParam(pa.object)),
+            else => false,
+        };
+    }
+
+    fn report(self: *ExtractorCheck, name: []const u8) void {
+        self.checker.addErrorAt(self.method.source_loc, UNCHECKED_PREIMAGE_ARG_FMT, .{name});
+    }
+
+    fn checkPrivateCall(self: *ExtractorCheck, name: []const u8, args: []const Expression, checked: *const NameSet) void {
+        const target = self.privateMethod(name) orelse return;
+        for (target.params, 0..) |p, i| {
+            if (p.type_info != .sig_hash_preimage) continue;
+            if (i >= args.len or !self.isChecked(args[i], checked)) {
+                self.report(target.name);
+                return;
+            }
+        }
+    }
+
+    fn visitExpr(self: *ExtractorCheck, e: Expression, checked: *const NameSet) void {
+        switch (e) {
+            .call => |c| {
+                if (isPreimageExtractor(c.callee)) {
+                    if (c.args.len == 0 or !self.isChecked(c.args[0], checked)) self.report(c.callee);
+                } else {
+                    self.checkPrivateCall(c.callee, c.args, checked);
+                }
+                for (c.args) |a| self.visitExpr(a, checked);
+            },
+            .method_call => |mc| {
+                self.checkPrivateCall(mc.method, mc.args, checked);
+                for (mc.args) |a| self.visitExpr(a, checked);
+            },
+            .binary_op => |b| {
+                self.visitExpr(b.left, checked);
+                self.visitExpr(b.right, checked);
+            },
+            .unary_op => |u| self.visitExpr(u.operand, checked),
+            .increment => |inc| self.visitExpr(inc.operand, checked),
+            .decrement => |dec| self.visitExpr(dec.operand, checked),
+            .ternary => |t| {
+                self.visitExpr(t.condition, checked);
+                self.visitExpr(t.then_expr, checked);
+                self.visitExpr(t.else_expr, checked);
+            },
+            .index_access => |ia| {
+                self.visitExpr(ia.object, checked);
+                self.visitExpr(ia.index, checked);
+            },
+            .array_literal => |els| for (els) |el| self.visitExpr(el, checked),
+            else => {},
+        }
+    }
+
+    fn declare(self: *ExtractorCheck, checked: *NameSet, name: []const u8, value: ?Expression) Allocator.Error!void {
+        const ok = if (value) |v| self.isChecked(v, checked) else false;
+        if (ok and !self.reassigned.contains(name)) {
+            try checked.put(self.allocator, name, {});
+        } else {
+            _ = checked.remove(name);
+        }
+    }
+
+    fn visitStmts(self: *ExtractorCheck, stmts: []const Statement, checked_in: *const NameSet) Allocator.Error!void {
+        var checked = try checked_in.clone(self.allocator);
+        defer checked.deinit(self.allocator);
+        for (stmts) |st| {
+            switch (st) {
+                .const_decl => |d| {
+                    self.visitExpr(d.value, &checked);
+                    try self.declare(&checked, d.name, d.value);
+                },
+                .let_decl => |d| {
+                    if (d.value) |v| self.visitExpr(v, &checked);
+                    try self.declare(&checked, d.name, d.value);
+                },
+                .assign => |a| self.visitExpr(a.value, &checked),
+                .expr_stmt => |es| self.visitExpr(es.expr, &checked),
+                .assert_stmt => |as| self.visitExpr(as.condition, &checked),
+                .return_stmt => |r| if (r.value) |v| self.visitExpr(v, &checked),
+                .if_stmt => |ifs| {
+                    self.visitExpr(ifs.condition, &checked);
+                    try self.visitStmts(ifs.then_body, &checked);
+                    if (ifs.else_body) |eb| try self.visitStmts(eb, &checked);
+                },
+                .for_stmt => |f| {
+                    var loop = try checked.clone(self.allocator);
+                    defer loop.deinit(self.allocator);
+                    _ = loop.remove(f.var_name);
+                    if (f.update) |u| try self.visitStmts(&.{u.*}, &loop);
+                    try self.visitStmts(f.body, &loop);
+                },
+            }
+        }
+    }
+};
+
+fn checkExtractorsReadCheckedPreimages(checker: *TypeChecker, allocator: Allocator, contract: ContractNode) !void {
+    var implicit = contract.parent_class == .stateful_smart_contract;
+    for (contract.properties) |p| {
+        if (std.mem.eql(u8, p.name, "txPreimage")) implicit = false;
+    }
+    for (contract.methods) |m| {
+        var ec: ExtractorCheck = .{ .checker = checker, .allocator = allocator, .contract = contract, .method = m, .implicit = implicit };
+        defer ec.reassigned.deinit(allocator);
+        try PreimageCheck.collectReassigned(allocator, m.body, &ec.reassigned);
+        var initial: NameSet = .empty;
+        defer initial.deinit(allocator);
+        for (m.params) |p| {
+            if (p.type_info == .sig_hash_preimage) try initial.put(allocator, p.name, {});
+        }
+        try ec.visitStmts(m.body, &initial);
     }
 }
 

@@ -54,6 +54,7 @@ export function typecheck(contract: ContractNode): TypeCheckResult {
     checker.checkMethod(method);
   }
   errors.push(...checkPreimageCheckedOnEveryPath(contract));
+  errors.push(...checkExtractorsReadCheckedPreimages(contract));
 
   return { typedContract: contract, errors: errors.map(capDiagnostic) };
 }
@@ -103,6 +104,25 @@ function conjuncts(e: Expression): Expression[] {
   return e.kind === 'binary_expr' && e.op === '&&' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e];
 }
 
+/** Every name assigned anywhere in `stmts` (it never stands for a preimage). */
+function collectReassignedNames(stmts: readonly Statement[], out: Set<string> = new Set()): Set<string> {
+  for (const st of stmts) {
+    if (st.kind === 'assignment' && st.target.kind === 'identifier') out.add(st.target.name);
+    else if (st.kind === 'if_statement') {
+      collectReassignedNames(st.then, out);
+      collectReassignedNames(st.else ?? [], out);
+    } else if (st.kind === 'for_statement') collectReassignedNames(st.body, out);
+  }
+  return out;
+}
+
+/** The private method a call targets (`this.m(...)` / `m(...)`), if any. */
+function privateCallTarget(callee: Expression, privates: ReadonlyMap<string, MethodNode>): MethodNode | undefined {
+  if (callee.kind === 'property_access' || callee.kind === 'member_expr') return privates.get(callee.property);
+  if (callee.kind === 'identifier') return privates.get(callee.name);
+  return undefined;
+}
+
 function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagnostic[] {
   type Aliases = Map<string, string>;
   const privates = new Map<string, MethodNode>();
@@ -110,26 +130,13 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
   const memo = new Map<string, Set<number>>();
 
   let reassigned = new Set<string>();
-  const collectReassigned = (stmts: readonly Statement[], out: Set<string> = new Set()): Set<string> => {
-    for (const st of stmts) {
-      if (st.kind === 'assignment' && st.target.kind === 'identifier') out.add(st.target.name);
-      else if (st.kind === 'if_statement') {
-        collectReassigned(st.then, out);
-        collectReassigned(st.else ?? [], out);
-      } else if (st.kind === 'for_statement') collectReassigned(st.body, out);
-    }
-    return out;
-  };
+  const collectReassigned = collectReassignedNames;
   const resolve = (e: Expression, aliases: Aliases): string | undefined =>
     e.kind === 'identifier' && !reassigned.has(e.name) ? aliases.get(e.name) : undefined;
   const union = (a: Set<string>, b: Set<string>): Set<string> => new Set([...a, ...b]);
   const intersect = (a: Set<string>, b: Set<string>): Set<string> => new Set([...a].filter((x) => b.has(x)));
 
-  const privateTarget = (callee: Expression): MethodNode | undefined => {
-    if (callee.kind === 'property_access' || callee.kind === 'member_expr') return privates.get(callee.property);
-    if (callee.kind === 'identifier') return privates.get(callee.name);
-    return undefined;
-  };
+  const privateTarget = (callee: Expression): MethodNode | undefined => privateCallTarget(callee, privates);
 
   const mustParams = (m: MethodNode, stack: ReadonlySet<string>): Set<number> => {
     const cached = memo.get(m.name);
@@ -271,6 +278,155 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
     }
   }
   return errors;
+}
+
+// ---------------------------------------------------------------------------
+// D14: a preimage extractor reads only a CHECKED preimage
+// ---------------------------------------------------------------------------
+
+/** The builtins that read a field out of a sighash preimage (argument 1). */
+export const PREIMAGE_EXTRACTORS: ReadonlySet<string> = new Set([
+  'extractVersion', 'extractHashPrevouts', 'extractHashSequence', 'extractOutpoint',
+  'extractInputIndex', 'extractScriptCode', 'extractAmount', 'extractSequence',
+  'extractOutputHash', 'extractOutputs', 'extractLocktime', 'extractSigHashType',
+]);
+
+/** The diagnostic every tier shares; `fn` is the extractor or private method. */
+export function uncheckedPreimageArgMessage(fn: string): string {
+  return (
+    `${fn}() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter ` +
+    `(one a public method must assert with checkPreimage()) or the implicit txPreimage of a ` +
+    `StatefulSmartContract; any other value is not bound to the spending transaction, so every ` +
+    `field an extractor reads from it is unverified`
+  );
+}
+
+/**
+ * D14 (spec/type-system.md 4.3): the subtype rules let any ByteString stand
+ * where a SigHashPreimage is expected, so typing the extractor's parameter
+ * proves nothing. This is a provenance rule on top of GK-GAP-010 instead.
+ * Inside a method, a "checked preimage" is:
+ *   - a SigHashPreimage parameter of that method (a public method's is
+ *     asserted on every path by checkPreimageCheckedOnEveryPath; a private
+ *     method's is covered by the call-site rule below);
+ *   - a local declared from a checked preimage (GK-010's alias rule), or
+ *   - in a StatefulSmartContract, the implicit txPreimage (`this.txPreimage`,
+ *     `ctx.txPreimage`), whose checkPreimage the compiler injects.
+ * A name assigned anywhere in the method never counts, and nothing in a
+ * constructor does. Every extractor's argument, and every argument passed to
+ * a private method's SigHashPreimage parameter, must be a checked preimage;
+ * anything else (a ByteString parameter or property, even one passed to
+ * checkPreimage, a helper's return value, a ternary) is refused.
+ */
+function checkExtractorsReadCheckedPreimages(contract: ContractNode): CompilerDiagnostic[] {
+  const privates = new Map<string, MethodNode>();
+  for (const m of contract.methods) if (m.visibility !== 'public') privates.set(m.name, m);
+  const implicitTxPreimage =
+    contract.parentClass === 'StatefulSmartContract' &&
+    !contract.properties.some((p) => p.name === 'txPreimage');
+  const errors: CompilerDiagnostic[] = [];
+
+  for (const m of contract.methods) {
+    const isConstructor = m.name === 'constructor';
+    const reassigned = collectReassignedNames(m.body);
+    const ctxParams = new Set(
+      m.params.filter((p) => p.type.kind === 'custom_type' && p.type.name === 'StatefulContext').map((p) => p.name),
+    );
+    const isChecked = (e: Expression, checked: ReadonlySet<string>): boolean => {
+      if (e.kind === 'identifier') return checked.has(e.name) && !reassigned.has(e.name);
+      // The implicit preimage only where no parameter of this method takes
+      // its name (reserved-name rules refuse one; never rely on that alone).
+      if (isConstructor || !implicitTxPreimage || m.params.some((p) => p.name === 'txPreimage')) return false;
+      if (e.kind === 'property_access') return e.property === 'txPreimage';
+      return (
+        e.kind === 'member_expr' && e.property === 'txPreimage' &&
+        e.object.kind === 'identifier' && ctxParams.has(e.object.name)
+      );
+    };
+
+    const visitExpr = (e: Expression, checked: ReadonlySet<string>): void => {
+      if (e.kind === 'call_expr') {
+        if (e.callee.kind === 'identifier' && PREIMAGE_EXTRACTORS.has(e.callee.name)) {
+          if (e.args[0] === undefined || !isChecked(e.args[0], checked)) {
+            errors.push(makeDiagnostic(uncheckedPreimageArgMessage(e.callee.name), 'error', e.sourceLocation));
+          }
+        } else {
+          const target = privateCallTarget(e.callee, privates);
+          if (target) {
+            const bad = target.params.some(
+              (p, i) => isPreimageType(p.type) && (e.args[i] === undefined || !isChecked(e.args[i]!, checked)),
+            );
+            if (bad) errors.push(makeDiagnostic(uncheckedPreimageArgMessage(target.name), 'error', e.sourceLocation));
+          }
+        }
+      }
+      for (const child of childExpressions(e)) visitExpr(child, checked);
+    };
+
+    const visitStmts = (stmts: readonly Statement[], checkedIn: ReadonlySet<string>): void => {
+      const checked = new Set(checkedIn);
+      for (const st of stmts) {
+        switch (st.kind) {
+          case 'variable_decl':
+            visitExpr(st.init, checked);
+            if (!isConstructor && isChecked(st.init, checked) && !reassigned.has(st.name)) checked.add(st.name);
+            else checked.delete(st.name);
+            break;
+          case 'assignment':
+            visitExpr(st.target, checked);
+            visitExpr(st.value, checked);
+            break;
+          case 'expression_statement':
+            visitExpr(st.expression, checked);
+            break;
+          case 'return_statement':
+            if (st.value) visitExpr(st.value, checked);
+            break;
+          case 'if_statement':
+            visitExpr(st.condition, checked);
+            visitStmts(st.then, checked);
+            visitStmts(st.else ?? [], checked);
+            break;
+          case 'for_statement': {
+            const loop = new Set(checked);
+            visitExpr(st.init.init, loop);
+            loop.delete(st.init.name);
+            visitExpr(st.condition, loop);
+            visitStmts([st.update], loop);
+            visitStmts(st.body, loop);
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    };
+
+    const initial = new Set<string>();
+    if (!isConstructor) {
+      for (const p of m.params) if (isPreimageType(p.type)) initial.add(p.name);
+    }
+    visitStmts(m.body, initial);
+  }
+  return errors;
+}
+
+/** The direct sub-expressions of `e`. */
+function childExpressions(e: Expression): Expression[] {
+  const out: Expression[] = [];
+  for (const v of Object.values(e as unknown as Record<string, unknown>)) {
+    if (Array.isArray(v)) {
+      for (const x of v) if (isExpressionNode(x)) out.push(x);
+    } else if (isExpressionNode(v)) {
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+function isExpressionNode(v: unknown): v is Expression {
+  return typeof v === 'object' && v !== null && typeof (v as { kind?: unknown }).kind === 'string' &&
+    !(v as { kind: string }).kind.endsWith('_type');
 }
 
 // ---------------------------------------------------------------------------

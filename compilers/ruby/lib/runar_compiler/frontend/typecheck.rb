@@ -279,6 +279,7 @@ module RunarCompiler
       checker.check_constructor
       contract.methods.each { |method| checker.check_method(method) }
       checker.errors.concat(check_preimage_checked_on_every_path(contract))
+      checker.errors.concat(check_extractors_read_checked_preimages(contract))
 
       TypeCheckResult.new(contract: contract, errors: checker.errors)
     end
@@ -476,6 +477,157 @@ module RunarCompiler
           errors << Diagnostic.new(message: preimage_not_checked_message(m.name, name),
                                    severity: Severity::ERROR, loc: m.source_location)
         end
+      end
+      errors
+    end
+
+    # -------------------------------------------------------------------
+    # D14: a preimage extractor reads only a CHECKED preimage
+    # -------------------------------------------------------------------
+
+    # The builtins that read a field out of a sighash preimage (argument 1).
+    PREIMAGE_EXTRACTORS = %w[
+      extractVersion extractHashPrevouts extractHashSequence extractOutpoint
+      extractInputIndex extractScriptCode extractAmount extractSequence
+      extractOutputHash extractOutputs extractLocktime extractSigHashType
+    ].to_set.freeze
+
+    # The diagnostic every tier shares; fn is the extractor or private method.
+    def self.unchecked_preimage_arg_message(fn)
+      "#{fn}() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter " \
+        "(one a public method must assert with checkPreimage()) or the implicit txPreimage of a " \
+        "StatefulSmartContract; any other value is not bound to the spending transaction, so every " \
+        "field an extractor reads from it is unverified"
+    end
+
+    # D14 (spec/type-system.md 4.3): a provenance rule on top of GK-GAP-010
+    # (the subtype rules let any ByteString stand where a SigHashPreimage is
+    # expected, so typing the extractor's parameter proves nothing). Inside a
+    # method a "checked preimage" is a SigHashPreimage parameter of that
+    # method (a public method's is asserted on every path by
+    # check_preimage_checked_on_every_path; a private method's is covered by
+    # the call-site rule), a local declared from one (GK-010's alias rule),
+    # or, in a StatefulSmartContract, the implicit txPreimage (this.txPreimage
+    # / ctx.txPreimage). A name assigned anywhere in the method never counts,
+    # and nothing in a constructor does. Every extractor's argument, and every
+    # argument passed to a private method's SigHashPreimage parameter, must be
+    # a checked preimage.
+    def self.check_extractors_read_checked_preimages(contract)
+      preimage = ->(t) { t.is_a?(PrimitiveType) && t.name == "SigHashPreimage" }
+      privates = {}
+      contract.methods.each { |m| privates[m.name] = m unless m.visibility == "public" }
+      implicit = contract.parent_class == "StatefulSmartContract" &&
+                 (contract.properties || []).none? { |p| p.name == "txPreimage" }
+      collect_reassigned = nil
+      collect_reassigned = lambda do |stmts|
+        (stmts || []).each_with_object(Set.new) do |st, out|
+          case st
+          when AssignmentStmt then out << st.target.name if st.target.is_a?(Identifier)
+          when IfStmt then out.merge(collect_reassigned.call(st.then)).merge(collect_reassigned.call(st.else_))
+          when ForStmt then out.merge(collect_reassigned.call(st.body))
+          end
+        end
+      end
+      errors = []
+
+      contract.methods.each do |m|
+        reassigned = collect_reassigned.call(m.body)
+        ctx_params = (m.params || []).select { |p| p.type.is_a?(CustomType) && p.type.name == "StatefulContext" }
+                                     .map(&:name).to_set
+        # The implicit preimage only where no parameter of this method takes
+        # its name (reserved-name rules refuse one; never rely on that alone).
+        implicit_here = implicit && (m.params || []).none? { |p| p.name == "txPreimage" }
+        checked_p = lambda do |e, checked|
+          case e
+          when Identifier then checked.include?(e.name) && !reassigned.include?(e.name)
+          when PropertyAccessExpr then implicit_here && e.property == "txPreimage"
+          when MemberExpr
+            implicit_here && e.property == "txPreimage" && e.object.is_a?(Identifier) && ctx_params.include?(e.object.name)
+          else false
+          end
+        end
+        report = lambda do |fn|
+          errors << Diagnostic.new(message: unchecked_preimage_arg_message(fn),
+                                   severity: Severity::ERROR, loc: m.source_location)
+        end
+        check_private_call = lambda do |target, args, checked|
+          bad = (target.params || []).each_with_index.any? do |p, i|
+            preimage.call(p.type) && (i >= args.length || !checked_p.call(args[i], checked))
+          end
+          report.call(target.name) if bad
+        end
+        visit_expr = nil
+        visit_expr = lambda do |e, checked|
+          case e
+          when CallExpr
+            args = e.args || []
+            if e.callee.is_a?(Identifier) && PREIMAGE_EXTRACTORS.include?(e.callee.name)
+              report.call(e.callee.name) if args.empty? || !checked_p.call(args[0], checked)
+            else
+              target = case e.callee
+                       when PropertyAccessExpr, MemberExpr then privates[e.callee.property]
+                       when Identifier then privates[e.callee.name]
+                       end
+              check_private_call.call(target, args, checked) unless target.nil?
+            end
+            visit_expr.call(e.callee, checked)
+            args.each { |a| visit_expr.call(a, checked) }
+          when MethodCallExpr
+            args = e.args || []
+            target = privates[e.method]
+            check_private_call.call(target, args, checked) unless target.nil?
+            visit_expr.call(e.object, checked)
+            args.each { |a| visit_expr.call(a, checked) }
+          when BinaryExpr
+            visit_expr.call(e.left, checked)
+            visit_expr.call(e.right, checked)
+          when UnaryExpr, IncrementExpr, DecrementExpr then visit_expr.call(e.operand, checked)
+          when TernaryExpr
+            visit_expr.call(e.condition, checked)
+            visit_expr.call(e.consequent, checked)
+            visit_expr.call(e.alternate, checked)
+          when MemberExpr then visit_expr.call(e.object, checked)
+          when IndexAccessExpr
+            visit_expr.call(e.object, checked)
+            visit_expr.call(e.index, checked)
+          when ArrayLiteralExpr then (e.elements || []).each { |el| visit_expr.call(el, checked) }
+          end
+        end
+        visit_stmts = nil
+        visit_stmts = lambda do |stmts, checked_in|
+          checked = checked_in.dup
+          (stmts || []).each do |st|
+            case st
+            when VariableDeclStmt
+              visit_expr.call(st.init, checked)
+              if !st.init.nil? && checked_p.call(st.init, checked) && !reassigned.include?(st.name)
+                checked << st.name
+              else
+                checked.delete(st.name)
+              end
+            when AssignmentStmt
+              visit_expr.call(st.target, checked)
+              visit_expr.call(st.value, checked)
+            when ExpressionStmt then visit_expr.call(st.expr, checked)
+            when ReturnStmt then visit_expr.call(st.value, checked)
+            when AssertStmt then visit_expr.call(st.condition, checked)
+            when IfStmt
+              visit_expr.call(st.condition, checked)
+              visit_stmts.call(st.then, checked)
+              visit_stmts.call(st.else_, checked)
+            when ForStmt
+              loop_set = checked.dup
+              unless st.init.nil?
+                visit_expr.call(st.init.init, loop_set)
+                loop_set.delete(st.init.name)
+              end
+              visit_expr.call(st.condition, loop_set)
+              visit_stmts.call([st.update], loop_set) unless st.update.nil?
+              visit_stmts.call(st.body, loop_set)
+            end
+          end
+        end
+        visit_stmts.call(m.body, (m.params || []).select { |p| preimage.call(p.type) }.map(&:name).to_set)
       end
       errors
     end

@@ -492,6 +492,10 @@ public final class Typecheck {
             for (PreimageChecked.Finding f : PreimageChecked.check(contract)) {
                 errors.add(format(f.message(), f.loc()));
             }
+            // D14: see ExtractorPreimage.
+            for (PreimageChecked.Finding f : ExtractorPreimage.check(contract)) {
+                errors.add(format(f.message(), f.loc()));
+            }
         }
 
         /**

@@ -1533,6 +1533,8 @@ class Bad extends SmartContract {
 fn test_stack_extract_output_hash_offset_40() {
     // extractOutputHash slices [size-40..size] from the preimage to get hashOutputs.
     // Verify via IR-level compilation that offset 40 (not 44) appears in the output.
+    // D15: the IR loader requires the SigHashPreimage parameter asserted with
+    // check_preimage, so the program checks it before extracting.
     use runar_compiler_rust::compile_from_ir_str;
 
     let ir_json = r#"{
@@ -1545,6 +1547,8 @@ fn test_stack_extract_output_hash_offset_40() {
             ],
             "body": [
                 {"name": "t0", "value": {"kind": "load_param", "name": "preimage"}},
+                {"name": "tc", "value": {"kind": "check_preimage", "preimage": "t0"}},
+                {"name": "ta", "value": {"kind": "assert", "value": "tc"}},
                 {"name": "t1", "value": {"kind": "call", "func": "extractOutputHash", "args": ["t0"]}},
                 {"name": "t2", "value": {"kind": "load_const", "value": true}},
                 {"name": "t3", "value": {"kind": "assert", "value": "t2"}}

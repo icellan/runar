@@ -217,6 +217,9 @@ public final class AnfLoader {
                 throw new RuntimeException(err);
             }
         }
+        // D15 / GK-BUG-015: a repeated method name, before anything looks a
+        // method up by name.
+        IrPreimageRules.checkUniqueMethodNames(methods);
         // N-265: --ir never runs frontend's checkNoRecursion, which enforces
         // both the call-graph cycle rule and N-180's MAX_CALL_DEPTH bound.
         // Stack lowering (StackLower's method_call inlining) inlines every
@@ -243,6 +246,9 @@ public final class AnfLoader {
         // N-205: F-286's verifyRabinSig key provenance, and the write rule for
         // a mutable key property (shared rule and diagnostics, 7 tiers).
         RabinKeyProvenance.check(props, methods);
+        // D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
+        // diagnostics, 7 tiers; see IrPreimageRules).
+        IrPreimageRules.check(props, methods);
         return new AnfProgram(name, props, methods, parentClass);
     }
 

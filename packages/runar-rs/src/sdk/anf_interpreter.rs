@@ -1265,6 +1265,16 @@ fn eval_value(
                     binding_name: format!("{} ({})", binding_name, msg),
                 });
             }
+            // D16: one SHA-256 block compression. It used to fall through to
+            // the `Undefined` default. What the script refuses (F-114: a state
+            // that is not 32 bytes or a block that is not 64) takes the same
+            // abort channel as sha256Finalize.
+            if func == "sha256Compress" {
+                return sha256_compress_val(&args).map_err(|msg| AssertionFailureError {
+                    method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                    binding_name: format!("{} ({})", binding_name, msg),
+                });
+            }
             // Strict mode: a `call(assert, x)` lowering path enforces the
             // predicate the same way the dedicated `assert` ANF node does.
             if let Some(ctx) = strict {
@@ -1924,6 +1934,21 @@ fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
         "log2" => arg(0) <= 0,
         _ => false,
     }
+}
+
+/// D16: `sha256Compress(state, block)` as the compiled script computes it,
+/// or the shared diagnostic for an input the script refuses (F-114).
+fn sha256_compress_val(args: &[Val]) -> Result<Val, String> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(Val::Undefined);
+    let state = hex_to_bytes(&arg(0).as_hex());
+    let block = hex_to_bytes(&arg(1).as_hex());
+    if state.len() != 32 {
+        return Err(format!("sha256Compress: state must be 32 bytes, got {}", state.len()));
+    }
+    if block.len() != 64 {
+        return Err(format!("sha256Compress: block must be 64 bytes, got {}", block.len()));
+    }
+    Ok(Val::Bytes(bytes_to_hex(&crate::prelude::sha256_compress(&state, &block))))
 }
 
 /// D11: `sha256Finalize(state, remaining, msgBitLen)` as the compiled script

@@ -68,9 +68,15 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 	// N-101: a StatefulSmartContract (declared or inferred) must carry exactly
 	// the scaffolding the frontend injects. See ir_stateful_scaffold.go.
 	if parentClass == "StatefulSmartContract" {
-		return checkIRStatefulScaffolding(program)
+		if err := checkIRStatefulScaffolding(program); err != nil {
+			return err
+		}
 	}
-	return nil
+	// D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
+	// diagnostics, 7 tiers; see ir/preimage_rules.go). After the scaffolding
+	// check, as in the TS reference, so a malformed stateful prologue keeps
+	// its own N-101 diagnostic.
+	return ir.AssertPreimageRules(program)
 }
 
 // N-087: the source validator's parentClass rules, which --ir never ran. A

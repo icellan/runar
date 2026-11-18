@@ -1334,6 +1334,10 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 	// silently wrong off-chain.
 	case "sha256Finalize":
 		return anfSha256Finalize(args)
+	// D16: one SHA-256 block compression. It used to fall through to the nil
+	// default, so a state field derived from it was silently wrong off-chain.
+	case "sha256Compress":
+		return anfSha256Compress(args)
 
 	// Assert — skip
 	case "assert":
@@ -1948,6 +1952,27 @@ func anfHashFn(name string, input interface{}) string {
 		return hex.EncodeToString(r.Sum(nil))
 	}
 	return ""
+}
+
+// anfSha256Compress refuses exactly what the compiled script refuses (F-114:
+// a state that is not 32 bytes or a block that is not 64) with the
+// diagnostics every tier shares, then compresses like the script.
+func anfSha256Compress(args []interface{}) string {
+	arg := func(i int) interface{} {
+		if i < len(args) {
+			return args[i]
+		}
+		return nil
+	}
+	state, _ := hex.DecodeString(anfToString(arg(0)))
+	block, _ := hex.DecodeString(anfToString(arg(1)))
+	if len(state) != 32 {
+		panic(&ScriptOpcodeError{Opcode: "sha256Compress", Message: fmt.Sprintf("state must be 32 bytes, got %d", len(state))})
+	}
+	if len(block) != 64 {
+		panic(&ScriptOpcodeError{Opcode: "sha256Compress", Message: fmt.Sprintf("block must be 64 bytes, got %d", len(block))})
+	}
+	return hex.EncodeToString([]byte(Sha256Compress(ByteString(state), ByteString(block))))
 }
 
 // anfSha256Finalize refuses exactly what the compiled script refuses (F-114

@@ -49,7 +49,9 @@ import { createHash } from 'node:crypto';
 import { parse } from '../passes/01-parse.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
-import { compile, compileFromANF } from '../index.js';
+import { compile, compileFromANF, optimizeEC } from '../index.js';
+import { optimizeStackIR } from '../optimizer/peephole.js';
+import { emit } from '../passes/06-emit.js';
 import type { StackProgram } from '../ir/index.js';
 
 /** Mutating method — drives the state-continuation WRITE path (defect 1). */
@@ -128,18 +130,32 @@ function abiUsesCodePart(source: string, fileName: string, method: string): bool
 
 /**
  * D9: no property may hold a SigHashPreimage, so `compile()` refuses every
- * SigHashPreimage source below at validate. The state-framing codegen for the
- * type is still reachable from IR (`--ir` / compileFromANF), so the
- * SigHashPreimage rows lower the parsed contract directly and compare the
- * script that path emits, on both sides of each equality.
+ * SigHashPreimage source below at validate, and D15 makes every IR loader
+ * (`--ir` / compileFromANF) refuse it too. The state-framing codegen for the
+ * type is still shared by the backends, so the SigHashPreimage rows drive the
+ * same pipeline compileFromANF runs BELOW its loader (EC optimize ->
+ * stack-lower -> peephole -> emit) on both sides of each equality, and
+ * separately assert the loader refuses them with the D9 text.
  */
-function irHexOf(source: string): string {
+function belowLoaderHexOf(source: string): string {
   const parsed = parse(source);
   if (!parsed.contract) throw new Error(`parse failed: ${parsed.errors.map(e => e.message).join('; ')}`);
-  return compileFromANF(lowerToANF(parsed.contract), { disableConstantFolding: true }).scriptHex.toLowerCase();
+  const stack = lowerToStack(optimizeEC(lowerToANF(parsed.contract)));
+  for (const m of stack.methods) m.ops = optimizeStackIR(m.ops);
+  return emit(stack).scriptHex.toLowerCase();
+}
+function irRefusalOf(source: string): string {
+  const parsed = parse(source);
+  if (!parsed.contract) throw new Error(`parse failed: ${parsed.errors.map(e => e.message).join('; ')}`);
+  try {
+    compileFromANF(lowerToANF(parsed.contract), { disableConstantFolding: true });
+  } catch (e) {
+    return (e as Error).message;
+  }
+  return '<accepted>';
 }
 const hexFor = (t: string, fileName: string) => (src: string) =>
-  t === 'SigHashPreimage' ? irHexOf(src) : hexOf(src, fileName);
+  t === 'SigHashPreimage' ? belowLoaderHexOf(src) : hexOf(src, fileName);
 const D9_REFUSAL = "property 'tag' cannot hold a SigHashPreimage";
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -169,6 +185,8 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
             const r = compile(src, { fileName: WRITE_FILE, disableConstantFolding: true });
             expect(r.success).toBe(false);
             expect(r.diagnostics.map(d => d.message).join('\n')).toContain(D9_REFUSAL);
+            // D15: the IR path refuses it as well.
+            expect(irRefusalOf(src)).toContain(D9_REFUSAL);
           }
         });
       } else {

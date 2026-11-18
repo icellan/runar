@@ -1014,6 +1014,9 @@ module Runar
         # through to the nil default, so a state field derived from it was
         # silently wrong off-chain.
         when 'sha256Finalize' then sha256_finalize_fn(args[0], args[1], args[2])
+        # D16: one SHA-256 block compression. It used to fall through to the
+        # nil default, so a state field derived from it was silently wrong.
+        when 'sha256Compress' then sha256_compress_fn(args[0], args[1])
 
         # Assert — no-op in simulation.
         when 'assert'
@@ -1318,6 +1321,21 @@ module Runar
       # ---------------------------------------------------------------------------
       # Hash helpers
       # ---------------------------------------------------------------------------
+
+      # sha256Compress as the compiled script computes it (one block
+      # compression), refusing exactly what the script refuses (F-114: a state
+      # that is not 32 bytes or a block that is not 64) with the diagnostics
+      # every tier shares.
+      #
+      # @return [String] hex-encoded 32-byte state
+      def sha256_compress_fn(state_hex, block_hex)
+        state = [(state_hex || '').to_s].pack('H*')
+        block = [(block_hex || '').to_s].pack('H*')
+        raise ArgumentError, "sha256Compress: state must be 32 bytes, got #{state.bytesize}" unless state.bytesize == 32
+        raise ArgumentError, "sha256Compress: block must be 64 bytes, got #{block.bytesize}" unless block.bytesize == 64
+
+        SHA256_COMPRESS_HOST.sha256_compress(state.unpack1('H*'), block.unpack1('H*'))
+      end
 
       # sha256Finalize as the compiled script computes it, refusing exactly what
       # the script refuses (F-114 state size, F-142 remaining length,

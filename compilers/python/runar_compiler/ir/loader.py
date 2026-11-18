@@ -13,6 +13,7 @@ from pathlib import Path
 from .required_fields import assert_required_ir_fields
 from .stateful_scaffold import stateful_scaffold_error
 from .synthetic_array_chain import assert_synthetic_array_chains
+from .preimage_rules import assert_preimage_rules, assert_unique_method_names
 from .rabin_key_provenance import assert_rabin_key_provenance
 from .types import (
     ANFBinding,
@@ -129,6 +130,10 @@ def load_ir(source: str) -> ANFProgram:
     except ValueError as exc:
         raise ValueError(f"decoding constants: {exc}") from exc
 
+    # D15 / GK-BUG-015: a repeated method name, before anything looks a
+    # method up by name.
+    assert_unique_method_names(program)
+
     errors = validate_ir(program)
     if errors:
         raise ValueError(f"IR validation: {errors[0]}")
@@ -140,6 +145,10 @@ def load_ir(source: str) -> ANFProgram:
     # N-205: F-286's verifyRabinSig key provenance, and the write rule for a
     # mutable key property (shared rule and diagnostics, 7 tiers).
     assert_rabin_key_provenance(program)
+
+    # D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
+    # diagnostics, 7 tiers; see preimage_rules.py).
+    assert_preimage_rules(program)
 
     return program
 

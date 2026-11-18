@@ -45,6 +45,7 @@ pub fn typecheck(contract: &ContractNode) -> TypeCheckResult {
         checker.check_method(method);
     }
     errors.extend(super::preimage_checked::check_preimage_checked_on_every_path(contract));
+    errors.extend(super::preimage_checked::check_extractors_read_checked_preimages(contract));
 
     TypeCheckResult { errors }
 }

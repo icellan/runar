@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Checked preimage extractor arguments, IR-loader preimage properties, SDK `sha256Compress` (PR G)
+
+- **All seven compilers — breaking:** a preimage extractor (`extractVersion`, `extractHashPrevouts`,
+  `extractHashSequence`, `extractOutpoint`, `extractInputIndex`, `extractScriptCode`,
+  `extractAmount`, `extractSequence`, `extractOutputHash`, `extractOutputs`, `extractLocktime`,
+  `extractSigHashType`) reads only a checked preimage: its argument, and every argument passed to
+  a private method's `SigHashPreimage` parameter, must be a `SigHashPreimage` parameter (which
+  GK-GAP-010 forces through `assert(checkPreimage(...))`), a local declared from one, or the
+  implicit `txPreimage` of a `StatefulSmartContract`. A `ByteString` parameter or property, a
+  laundering local, a helper's return value or a ternary used to compile with the value never
+  checked against the transaction; it is now a type error (`<fn>() needs a checked
+  SigHashPreimage: ...`, spec/type-system.md 4.3).
+- **All seven IR loaders (`--ir` / `compileFromANF`) — breaking:** the preimage rules the frontend
+  enforces are re-derived on the ANF: a property typed `SigHashPreimage` is refused with the D9
+  text; every `SigHashPreimage` parameter of a public method must be asserted with
+  `checkPreimage` on every path (GK-GAP-010 text); and every extractor argument, and every
+  argument to a private method's `SigHashPreimage` parameter, must resolve to a checked
+  `SigHashPreimage` parameter or the implicit stateful `txPreimage` (D14 text). The ANF carries no
+  source-level type, so a hand-written IR is taken at its declared parameter types; a check only
+  inside a loop body or a multi-result `if` is refused on the IR path (spec/type-system.md 4.3).
+- **SDK ANF interpreters (TS, Go, Rust, Python, Zig, Ruby, Java):** `sha256Compress` is computed
+  as the compiled script computes it (one SHA-256 block compression; it returned nil / None /
+  undefined in five SDKs and was refused in TS and Java), and refused for a state that is not 32
+  bytes or a block that is not 64 bytes (`sha256Compress: state must be 32 bytes, got N`,
+  `sha256Compress: block must be 64 bytes, got N`).
+
 ### Preimage properties, stateless `tx_preimage`, SDK `sha256Finalize` (PR F)
 
 - **All seven compilers — breaking:** any property holding a `SigHashPreimage` (readonly or

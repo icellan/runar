@@ -771,25 +771,19 @@ class P384StateRead extends StatefulSmartContract {
 `;
 
 /**
- * D9: no property may hold a SigHashPreimage any more, so `compile()` refuses
- * the two Preimage* contracts at validate. The seven backends still share the
- * state-framing codegen for the type (reachable from `--ir`), so those two are
- * lowered directly and every tier is held to the same IR -> hex as before.
+ * D9 refuses a SigHashPreimage property on the source path and D15 on the IR
+ * path (`--ir` / compileFromANF), so the two Preimage* contracts compile
+ * nowhere any more. They are lowered below the validator and every tier's IR
+ * loader is held to refusing them with the D9 text (see the D15 block at the
+ * end of this file); the Sig* rows keep the shared var-length state framing
+ * under test.
  */
 const IR_ONLY_SOURCES = new Set([PREIMAGE_STATE_WRITE_SOURCE, PREIMAGE_STATE_READ_SOURCE]);
-
-function compile(source: string, options?: Parameters<typeof compileSource>[1]): ReturnType<typeof compileSource> {
-  if (!IR_ONLY_SOURCES.has(source)) return compileSource(source, options);
-  expect(compileSource(source, options).success, 'D9: a SigHashPreimage state field must not compile').toBe(false);
-  const parsed = parse(source, 'Contract.runar.ts');
-  if (!parsed.contract) throw new Error(parsed.errors.map((e) => e.message).join('; '));
-  const r = compileFromANF(lowerToANF(parsed.contract), {
-    disableConstantFolding: options?.disableConstantFolding,
-  });
-  return { success: true, anf: r.anf, scriptHex: r.scriptHex, diagnostics: [] } as unknown as ReturnType<
-    typeof compileSource
-  >;
-}
+const compile = compileSource;
+const D9_PREIMAGE_STATE =
+  "property 'tag' cannot hold a SigHashPreimage: a preimage stored in a property was fixed before the " +
+  'spending transaction existed, so it can never pass checkPreimage() and every field an extractor ' +
+  'reads from it is unverified';
 
 const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'P2PKH', source: P2PKH_SOURCE },
@@ -798,8 +792,6 @@ const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'MultiSig2of3', source: MULTISIG_SOURCE },
   { name: 'SigStateWrite', source: SIG_STATE_WRITE_SOURCE },
   { name: 'SigStateRead', source: SIG_STATE_READ_SOURCE },
-  { name: 'PreimageStateWrite', source: PREIMAGE_STATE_WRITE_SOURCE },
-  { name: 'PreimageStateRead', source: PREIMAGE_STATE_READ_SOURCE },
   { name: 'P256StateWrite', source: P256_STATE_WRITE_SOURCE },
   { name: 'P256StateRead', source: P256_STATE_READ_SOURCE },
   { name: 'P384StateWrite', source: P384_STATE_WRITE_SOURCE },
@@ -1888,6 +1880,61 @@ describe('Cross-compiler: a mixed add/sub constant chain is byte-identical in al
           expect(tierHex, `${tier.name} diverges from the TS reference`).toBe(tsHex);
         }, 180_000);
       }
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// D15: every IR loader refuses a SigHashPreimage state property
+// ---------------------------------------------------------------------------
+
+describe('D15: Preimage{Write,Read} state fields are refused on the IR path in every tier', () => {
+  const tiers: Array<{ name: string; skip: boolean; run: (p: string) => CompilerOutput }> = [
+    { name: 'Go', skip: !hasGo, run: runGoCompiler },
+    { name: 'Rust', skip: !hasRust || rustBinaryPath === null, run: runRustCompiler },
+    { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+    { name: 'Zig', skip: zigBinaryPath === null, run: runZigCompiler },
+    { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+    { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
+  ];
+  let tempDir: string;
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-d15-'));
+  });
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  for (const [name, source] of [
+    ['PreimageStateWrite', PREIMAGE_STATE_WRITE_SOURCE],
+    ['PreimageStateRead', PREIMAGE_STATE_READ_SOURCE],
+  ] as const) {
+    const lowered = (): ANFProgram => {
+      expect(IR_ONLY_SOURCES.has(source)).toBe(true);
+      const parsed = parse(source, 'Contract.runar.ts');
+      if (!parsed.contract) throw new Error(parsed.errors.map((e) => e.message).join('; '));
+      return lowerToANF(parsed.contract);
+    };
+
+    it(`TS refuses ${name} at compile (D9) and at compileFromANF (D15)`, () => {
+      const r = compileSource(source, { disableConstantFolding: true });
+      expect(r.success).toBe(false);
+      expect(r.diagnostics.map((d) => d.message).join('\n')).toContain(D9_PREIMAGE_STATE);
+      expect(() => compileFromANF(lowered(), { disableConstantFolding: true })).toThrow(D9_PREIMAGE_STATE);
+    });
+
+    for (const tier of tiers) {
+      it.skipIf(tier.skip)(`D15 ${tier.name} refuses ${name} ANF IR with the D9 text`, () => {
+        const irPath = join(tempDir, `${name}-${tier.name}.anf.json`);
+        writeFileSync(irPath, anfToJson(lowered()));
+        const out = tier.run(irPath);
+        expect(out.hex, `${tier.name} accepted ${name}`).toBeNull();
+        expect(out.stderr).toContain(D9_PREIMAGE_STATE);
+      });
     }
   }
 });

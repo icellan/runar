@@ -630,7 +630,9 @@ private helper(x: bigint): bigint {
 
 ### Preimage (Stateful Contracts)
 
-In `StatefulSmartContract`, `checkPreimage` and state continuation are handled automatically by the compiler. The preimage is available via `this.txPreimage`. Use the `extract*` functions to read specific fields:
+In `StatefulSmartContract`, `checkPreimage` and state continuation are handled automatically by the compiler. The preimage is available via `this.txPreimage`. Use the `extract*` functions to read specific fields.
+
+An extractor reads only a **checked** preimage: its argument must be a `SigHashPreimage` parameter (which a public method must `assert(checkPreimage(...))` on every path), a local declared from one, or the implicit `this.txPreimage` of a `StatefulSmartContract`; an argument passed to a private method's `SigHashPreimage` parameter is held to the same rule. A `ByteString` parameter or property, a laundering local (`const p: SigHashPreimage = x`), a helper's return value or a ternary is a compile error, `<fn>() needs a checked SigHashPreimage: ...` (spec/type-system.md 4.3):
 
 | Function | Signature | Description |
 |----------|-----------|-------------|

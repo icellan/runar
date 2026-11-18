@@ -324,3 +324,190 @@ func checkPreimageCheckedOnEveryPath(contract *ContractNode) []Diagnostic {
 	}
 	return errs
 }
+
+// ---------------------------------------------------------------------------
+// D14: a preimage extractor reads only a CHECKED preimage
+// ---------------------------------------------------------------------------
+
+// PreimageExtractors are the builtins that read a field out of a sighash
+// preimage (argument 1).
+var PreimageExtractors = map[string]bool{
+	"extractVersion": true, "extractHashPrevouts": true, "extractHashSequence": true, "extractOutpoint": true,
+	"extractInputIndex": true, "extractScriptCode": true, "extractAmount": true, "extractSequence": true,
+	"extractOutputHash": true, "extractOutputs": true, "extractLocktime": true, "extractSigHashType": true,
+}
+
+// UncheckedPreimageArgMessage is the diagnostic every tier shares; fn is the
+// extractor or private method.
+func UncheckedPreimageArgMessage(fn string) string {
+	return fmt.Sprintf("%s() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter "+
+		"(one a public method must assert with checkPreimage()) or the implicit txPreimage of a "+
+		"StatefulSmartContract; any other value is not bound to the spending transaction, so every "+
+		"field an extractor reads from it is unverified", fn)
+}
+
+// checkExtractorsReadCheckedPreimages is D14 (spec/type-system.md 4.3), a
+// provenance rule on top of GK-GAP-010 (the subtype rules let any ByteString
+// stand where a SigHashPreimage is expected, so typing the extractor's
+// parameter proves nothing). Inside a method a "checked preimage" is a
+// SigHashPreimage parameter of that method (a public method's is asserted on
+// every path by checkPreimageCheckedOnEveryPath; a private method's is covered
+// by the call-site rule), a local declared from one (GK-010's alias rule), or,
+// in a StatefulSmartContract, the implicit txPreimage (this.txPreimage /
+// ctx.txPreimage). A name assigned anywhere in the method never counts, and
+// nothing in a constructor does. Every extractor's argument, and every
+// argument passed to a private method's SigHashPreimage parameter, must be a
+// checked preimage.
+func checkExtractorsReadCheckedPreimages(contract *ContractNode) []Diagnostic {
+	privates := map[string]MethodNode{}
+	for _, m := range contract.Methods {
+		if m.Visibility != "public" {
+			privates[m.Name] = m
+		}
+	}
+	implicit := contract.ParentClass == "StatefulSmartContract"
+	for _, p := range contract.Properties {
+		if p.Name == "txPreimage" {
+			implicit = false
+		}
+	}
+	pc := &preimageChecker{privates: privates}
+	var errs []Diagnostic
+	for _, m := range contract.Methods {
+		loc := m.SourceLocation
+		reassigned := collectReassigned(m.Body, map[string]bool{})
+		ctxParams := map[string]bool{}
+		// The implicit preimage only where no parameter of this method takes
+		// its name (reserved-name rules refuse one; never rely on that alone).
+		implicitHere := implicit
+		for _, p := range m.Params {
+			if p.Name == "txPreimage" {
+				implicitHere = false
+			}
+		}
+		for _, p := range m.Params {
+			if ct, ok := p.Type.(CustomType); ok && ct.Name == "StatefulContext" {
+				ctxParams[p.Name] = true
+			}
+		}
+		isChecked := func(e Expression, checked map[string]bool) bool {
+			switch x := e.(type) {
+			case Identifier:
+				return checked[x.Name] && !reassigned[x.Name]
+			case *Identifier:
+				return x != nil && checked[x.Name] && !reassigned[x.Name]
+			case PropertyAccessExpr:
+				return implicitHere && x.Property == "txPreimage"
+			case MemberExpr:
+				if id, ok := x.Object.(Identifier); ok {
+					return implicitHere && x.Property == "txPreimage" && ctxParams[id.Name]
+				}
+			}
+			return false
+		}
+		report := func(fn string) {
+			l := loc
+			errs = append(errs, Diagnostic{Message: UncheckedPreimageArgMessage(fn), Severity: SeverityError, Loc: &l})
+		}
+		var visitExpr func(e Expression, checked map[string]bool)
+		visitExpr = func(e Expression, checked map[string]bool) {
+			switch x := e.(type) {
+			case CallExpr:
+				if id, ok := x.Callee.(Identifier); ok && PreimageExtractors[id.Name] {
+					if len(x.Args) == 0 || !isChecked(x.Args[0], checked) {
+						report(id.Name)
+					}
+				} else if target, ok := pc.privateTarget(x.Callee); ok {
+					for i, p := range target.Params {
+						if isPreimageType(p.Type) && (i >= len(x.Args) || !isChecked(x.Args[i], checked)) {
+							report(target.Name)
+							break
+						}
+					}
+				}
+				visitExpr(x.Callee, checked)
+				for _, a := range x.Args {
+					visitExpr(a, checked)
+				}
+			case *CallExpr:
+				if x != nil {
+					visitExpr(*x, checked)
+				}
+			case BinaryExpr:
+				visitExpr(x.Left, checked)
+				visitExpr(x.Right, checked)
+			case UnaryExpr:
+				visitExpr(x.Operand, checked)
+			case TernaryExpr:
+				visitExpr(x.Condition, checked)
+				visitExpr(x.Consequent, checked)
+				visitExpr(x.Alternate, checked)
+			case MemberExpr:
+				visitExpr(x.Object, checked)
+			case IndexAccessExpr:
+				visitExpr(x.Object, checked)
+				visitExpr(x.Index, checked)
+			case IncrementExpr:
+				visitExpr(x.Operand, checked)
+			case DecrementExpr:
+				visitExpr(x.Operand, checked)
+			case ArrayLiteralExpr:
+				for _, el := range x.Elements {
+					visitExpr(el, checked)
+				}
+			}
+		}
+		copySet := func(s map[string]bool) map[string]bool {
+			out := make(map[string]bool, len(s))
+			for k, v := range s {
+				out[k] = v
+			}
+			return out
+		}
+		var visitStmts func(stmts []Statement, in map[string]bool)
+		visitStmts = func(stmts []Statement, in map[string]bool) {
+			checked := copySet(in)
+			for _, s := range stmts {
+				switch st := s.(type) {
+				case VariableDeclStmt:
+					visitExpr(st.Init, checked)
+					if st.Init != nil && isChecked(st.Init, checked) && !reassigned[st.Name] {
+						checked[st.Name] = true
+					} else {
+						delete(checked, st.Name)
+					}
+				case AssignmentStmt:
+					visitExpr(st.Target, checked)
+					visitExpr(st.Value, checked)
+				case ExpressionStmt:
+					visitExpr(st.Expr, checked)
+				case ReturnStmt:
+					if st.Value != nil {
+						visitExpr(st.Value, checked)
+					}
+				case IfStmt:
+					visitExpr(st.Condition, checked)
+					visitStmts(st.Then, checked)
+					visitStmts(st.Else, checked)
+				case ForStmt:
+					loop := copySet(checked)
+					visitExpr(st.Init.Init, loop)
+					delete(loop, st.Init.Name)
+					visitExpr(st.Condition, loop)
+					if st.Update != nil {
+						visitStmts([]Statement{st.Update}, loop)
+					}
+					visitStmts(st.Body, loop)
+				}
+			}
+		}
+		initial := map[string]bool{}
+		for _, p := range m.Params {
+			if isPreimageType(p.Type) {
+				initial[p.Name] = true
+			}
+		}
+		visitStmts(m.Body, initial)
+	}
+	return errs
+}

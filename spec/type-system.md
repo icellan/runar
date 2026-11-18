@@ -473,6 +473,59 @@ preimage reaches an extractor through them:
   validator like every `FixedArray` method parameter (each tier words that
   diagnostic itself).
 
+**Extractors read only a checked preimage (D14).** `ByteString` and
+`SigHashPreimage` are mutually assignable, so the declared type of an
+extractor's argument proves nothing: `spend(x: ByteString) {
+assert(extractAmount(x) >= this.n) }` used to compile in every tier with `x`
+never checked against the transaction. The rule is therefore on provenance,
+not type. Inside a method, a *checked preimage* is:
+
+- a `SigHashPreimage` parameter of that method (a public method's is checked
+  on every path by the rule above; a private method's by the call-site rule
+  below);
+- a local declared from a checked preimage and never assigned
+  (`const q = p`), exactly as the rule above treats aliases;
+- in a `StatefulSmartContract`, the implicit `txPreimage` (`this.txPreimage`,
+  `ctx.txPreimage`), whose `checkPreimage` the compiler injects.
+
+Nothing in a constructor counts. The argument of every preimage extractor
+(`extractVersion`, `extractHashPrevouts`, `extractHashSequence`,
+`extractOutpoint`, `extractInputIndex`, `extractScriptCode`, `extractAmount`,
+`extractSequence`, `extractOutputHash`, `extractOutputs`, `extractLocktime`,
+`extractSigHashType`), and every argument passed to a private method's
+`SigHashPreimage` parameter, must be a checked preimage. Anything else is a
+type error: a `ByteString` parameter or property (even one passed to
+`checkPreimage`), a laundering local (`const p: SigHashPreimage = x`), a
+helper's return value, a ternary. The diagnostic names the extractor or the
+private method:
+
+```
+extractAmount() needs a checked SigHashPreimage: its argument must be a SigHashPreimage parameter (one a public method must assert with checkPreimage()) or the implicit txPreimage of a StatefulSmartContract; any other value is not bound to the spending transaction, so every field an extractor reads from it is unverified
+```
+
+`extractPrevOutputScript(index, script)` is not a preimage extractor: it takes
+an input index and a script, and checks the script against the implicit
+`txPreimage` itself.
+
+**The IR path (D15).** `--ir` / `compileFromANF` skip validate and typecheck,
+so every tier's IR loader re-derives these rules from the ANF: a property
+typed `SigHashPreimage` is refused with the property diagnostic above; every
+`SigHashPreimage` parameter of a public method must be checked on every path
+(an `assert` of a `check_preimage` of it, an `&&`-lowered `if` whose other arm
+is the constant `false`, an `if` both of whose arms check it, or a top-level
+call to a private method that checks it; a loop body checks nothing), with
+the GK-GAP-010 diagnostic; and every extractor argument, and every argument
+passed to a private method's `SigHashPreimage` parameter, must resolve
+through `@ref:` aliases of names bound once to a `load_param` of a
+`SigHashPreimage` parameter of that method (or, in a private method of a
+program whose every public method declares `txPreimage: SigHashPreimage`, to
+the implicit `txPreimage`), with the D14 diagnostic. ANF carries no
+source-level type, so a hand-written IR that declares a parameter
+`SigHashPreimage` is taken at its word, and then must check it; a check the
+lowering placed where this analysis does not look (only inside a loop body,
+or in a multi-result `if`) is refused on the IR path even where the source
+compiler accepts it.
+
 ### 4.4 Practical Impact
 
 ```typescript

@@ -250,6 +250,7 @@ still TS / Java / Zig only; when it lands, this matrix should grow
 | `checkPreimage` (real-crypto) | `hash256(preimage) == sighash` byte-eq (`verifyPreimage`) | `hash256(preimage) == sighash` byte-eq (`verifyPreimageReal`) | `hash256(preimage) == sighash` byte-eq (`verifyPreimageReal`) |
 | `sha256`, `hash256`, `hash160`, `ripemd160` | real, deterministic (`hashFn`) | real, deterministic via `MockCrypto` | real, deterministic via `bsvz.crypto.hash` |
 | `sha256Finalize` (D11, all seven SDKs) | real FIPS 180-4 padding + 1-2 compressions; refuses (throws) a non-32-byte state, more than 119 remaining bytes, or msgBitLen outside [0, 2^64), with the shared `sha256Finalize: ...` diagnostics | same (throws `IllegalArgumentException`) | same; refusal is `error.ScriptNumberError` (no message channel) |
+| `sha256Compress` (D16, all seven SDKs) | real FIPS 180-4 single-block compression; refuses (throws) a state that is not 32 bytes or a block that is not 64, with the shared `sha256Compress: ...` diagnostics | same (throws `IllegalArgumentException`) | same; refusal is `error.ScriptNumberError` (no message channel) |
 | `assert` (as a `call.func`) | skipped lenient; enforced strict + real-crypto | skipped lenient; enforced strict + real-crypto | skipped lenient; enforced strict + real-crypto |
 | EC ops (`ecAdd`, `ecMul`, …) | not implemented in this layer | not implemented | not implemented |
 | WOTS+ / SLH-DSA verifiers | not implemented | not implemented | not implemented |
