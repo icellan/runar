@@ -135,6 +135,58 @@ describe('D12 SDK-F2: an abandoned or superseded PreparedCall changes nothing', 
 });
 
 describe('D12 SDK-F4: an underfunded call is refused before broadcast', () => {
+  // Short (not missing) funding: a caller whose only UTXO is f sats. The fee
+  // the tx needs is found by scanning; one sat below it is refused locally
+  // (broadcast never reached), the exact amount is broadcast and accepted.
+  it('short funding: one sat below the required fee is refused locally, the exact fee is accepted', async () => {
+    const PLAIN = `import { StatefulSmartContract } from 'runar-lang';
+class P extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  public plain() { this.count = this.count + 1n; }
+}
+`;
+    const r = compile(PLAIN, { fileName: 'P.runar.ts' });
+    if (!r.artifact) throw new Error(JSON.stringify(r.diagnostics));
+    const attempt = async (f: number) => {
+      const deployer = new LocalSigner('11'.repeat(32));
+      const provider = new MockProvider();
+      provider.addUtxo(await deployer.getAddress(), {
+        txid: 'aa'.repeat(32), outputIndex: 0, satoshis: 200_000,
+        script: buildP2PKHScript(await deployer.getPublicKey()),
+      });
+      const c = new RunarContract(r.artifact!, [0n]);
+      await c.deploy(provider, deployer, { satoshis: 50_000 });
+      const caller = new LocalSigner('22'.repeat(32));
+      provider.addUtxo(await caller.getAddress(), {
+        txid: 'bb'.repeat(32), outputIndex: 0, satoshis: f,
+        script: buildP2PKHScript(await caller.getPublicKey()),
+      });
+      let broadcasts = 0;
+      const origB = provider.broadcast.bind(provider);
+      provider.broadcast = async (tx) => { broadcasts++; return origB(tx); };
+      try {
+        await c.call('plain', [], provider, caller);
+        return { ok: true as const, broadcasts, state: c.state };
+      } catch (e) {
+        return { ok: false as const, broadcasts, err: (e as Error).message, state: c.state };
+      }
+    };
+    let need = -1;
+    for (let f = 200; f <= 320; f++) {
+      if ((await attempt(f)).ok) { need = f; break; }
+    }
+    expect(need).toBeGreaterThan(200);
+    const below = await attempt(need - 1);
+    expect(below.ok).toBe(false);
+    expect(below.err).toMatch(/insufficient funds/);
+    expect(below.broadcasts).toBe(0);
+    expect(below.state).toEqual({ count: 0n });
+    const exact = await attempt(need);
+    expect(exact.ok).toBe(true);
+    expect(exact.state).toEqual({ count: 1n });
+  });
+
   it('no funding UTXOs -> local insufficient-funds error, broadcast not reached', async () => {
     const { contract, provider } = await deployed();
     provider.getUtxos = async () => [];
