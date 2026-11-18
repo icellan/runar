@@ -52,19 +52,6 @@
       ],
       "surface": "mixed",
       "why_deferred": "Pulled in by @changesets/cli (release-only) AND by ts-morph via runar-compiler. The ts-morph path is a compile-time glob over the author’s own source tree, so the ReDoS input is not attacker-controlled."
-    },
-    {
-      "module": "picomatch",
-      "advisory": "GHSA-fc5q-39xc-vjpf",
-      "severity": "high",
-      "title": "picomatch vulnerable to ReDoS through single-branch repeated extglobs",
-      "pulled_in_by": [
-        "@changesets/cli@2.30.0",
-        "vite@8.3.5",
-        "ts-morph@24.0.0"
-      ],
-      "surface": "mixed",
-      "why_deferred": "No patched release exists: the advisory covers every picomatch <=4.0.7, the latest version, so there is no upgrade to take; remove this entry as soon as one ships. Same class and same paths as GHSA-c2c7-rcm5-vvqj: @changesets/cli (release-only), vite (test runner only), and ts-morph via runar-compiler, where picomatch globs the author's own source tree, so the pattern is not attacker-controlled."
     }
   ]
 }
