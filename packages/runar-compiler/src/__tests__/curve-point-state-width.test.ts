@@ -143,13 +143,17 @@ describe('P256Point / P384Point are fixed-width raw state', () => {
       // OP_NUMEQUALVERIFY before committing the field (+8 hex chars). Re-measured
       // byte-identical in all seven tiers; Point == P256Point still holds, and
       // the read shape and the framed rows are byte-unchanged.
-      { shape: 0, type: 'Point', digest: '859c25fc', hexLen: 1388 },
-      { shape: 0, type: 'P256Point', digest: '859c25fc', hexLen: 1388 },
-      { shape: 0, type: 'P384Point', digest: '87f3fba0', hexLen: 1388 },
-      { shape: 0, type: 'PubKey', digest: 'acf3b1b1', hexLen: 1388 },
-      { shape: 0, type: 'Sha256', digest: '4854d31a', hexLen: 1388 },
-      { shape: 0, type: 'ByteString', digest: '58b91009', hexLen: 1704 },
-      { shape: 0, type: 'Sig', digest: '58b91009', hexLen: 1704 },
+      // PR B (#180/#213) re-stamp: only shape 0 moves — the entry width gate on
+      // the injected `_changePKH` (+14 hex chars, 1704 -> 1718 for the framed
+      // rows), plus one on the fixed-width `next` param (+28 total, 1388 -> 1416).
+      // Gate-only delta; Point == P256Point and ByteString == Sig still hold.
+      { shape: 0, type: 'Point', digest: '5c6cc2d2', hexLen: 1416 },
+      { shape: 0, type: 'P256Point', digest: '5c6cc2d2', hexLen: 1416 },
+      { shape: 0, type: 'P384Point', digest: 'ddce4cf0', hexLen: 1416 },
+      { shape: 0, type: 'PubKey', digest: 'cbae90ab', hexLen: 1416 },
+      { shape: 0, type: 'Sha256', digest: '157de632', hexLen: 1416 },
+      { shape: 0, type: 'ByteString', digest: 'c5bde21d', hexLen: 1718 },
+      { shape: 0, type: 'Sig', digest: 'c5bde21d', hexLen: 1718 },
       { shape: 1, type: 'Point', digest: 'e1202b56', hexLen: 930 },
       { shape: 1, type: 'P256Point', digest: 'e1202b56', hexLen: 930 },
       { shape: 1, type: 'P384Point', digest: '40ced076', hexLen: 930 },

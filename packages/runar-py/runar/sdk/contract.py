@@ -25,7 +25,7 @@ from runar.sdk.calling import (
 from runar.sdk.script_utils import is_hex_bytes, restore_constructor_args
 from runar.sdk.state import (
     serialize_state, extract_state_from_script, find_last_op_return,
-    encode_push_data, check_fixed_width_value,
+    encode_push_data, check_fixed_width_value, encode_change_pkh,
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
 from runar.sdk.oppushtx import compute_op_push_tx_preimage
@@ -656,6 +656,12 @@ class RunarContract:
             raise RuntimeError(
                 "RunarContract.prepare_call: no provider/signer. Call connect() or pass them."
             )
+
+        # The state this call starts from. prepare_call advances self._state to
+        # the post-call state before anything is broadcast; finalize_call
+        # restores this snapshot when the transaction never makes it onto the
+        # network.
+        state_before = dict(self._state)
 
         # Funding (and terminal fee) inputs are signed by funding_signer when
         # set (issue #134). The method's own Sig args stay with the connected
@@ -1338,7 +1344,7 @@ class RunarContract:
                 # Append change params (PKH + amount) for methods that need them
                 change_hex = ''
                 if method_needs_change and change_pkh_hex:
-                    change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(tx_change_amount)
+                    change_hex = encode_change_pkh(change_pkh_hex) + _encode_script_number(tx_change_amount)
                 new_amount_hex = ''
                 if method_needs_new_amount:
                     new_amount_hex = _encode_script_number(new_satoshis)
@@ -1588,6 +1594,8 @@ class RunarContract:
             contract_outputs=contract_outputs or [],
             code_sep_idx=code_sep_idx,
             intent_witness_hex=witness_hex,
+            state_before=state_before,
+            state_after=dict(self._state),
         )
 
     def finalize_call(
@@ -1604,6 +1612,35 @@ class RunarContract:
                          Each key must be one of prepared.sig_indices.
             provider:    Optional provider override.
         """
+        # Only a PreparedCall that still spends the tracked UTXO owns the
+        # state: a repeat of one that was already committed must not touch it.
+        cur, spent = self._current_utxo, prepared.contract_utxo
+        owns_state = (
+            cur is not None and spent is not None
+            and cur.txid == spent.txid and cur.output_index == spent.output_index
+        )
+        try:
+            result = self._finalize_call_once(prepared, signatures, provider)
+        except BaseException:
+            # Nothing was broadcast (or the node refused it): the chain is still
+            # at the state this call started from, so the local state must be
+            # too. Before this, a refused call left the state advanced and the
+            # next call was built from a state the chain never reached.
+            if owns_state and prepared.state_before is not None:
+                self._state = dict(prepared.state_before)
+            raise
+        # A retry of a PreparedCall whose first finalize failed must commit the
+        # post-call state the transaction carries.
+        if owns_state and prepared.state_after is not None:
+            self._state = dict(prepared.state_after)
+        return result
+
+    def _finalize_call_once(
+        self,
+        prepared: PreparedCall,
+        signatures: dict[int, str],
+        provider: Provider | None = None,
+    ) -> tuple[str, TransactionData]:
         provider = provider or self._provider
         if provider is None:
             raise RuntimeError("finalize_call: no provider")
@@ -1637,7 +1674,7 @@ class RunarContract:
                 args_hex += _encode_arg(arg)
             change_hex = ''
             if prepared.method_needs_change and prepared.change_pkh_hex:
-                change_hex = encode_push_data(prepared.change_pkh_hex) + _encode_script_number(prepared.change_amount)
+                change_hex = encode_change_pkh(prepared.change_pkh_hex) + _encode_script_number(prepared.change_amount)
             new_amount_hex = ''
             if prepared.method_needs_new_amount:
                 new_amount_hex = _encode_script_number(prepared.new_amount)
@@ -2056,7 +2093,7 @@ class RunarContract:
                 # Terminal: 0 change
                 change_hex = ''
                 if method_needs_change and change_pkh_hex:
-                    change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(0)
+                    change_hex = encode_change_pkh(change_pkh_hex) + _encode_script_number(0)
                 unlock = (
                     self._build_stateful_prefix('', False) +
                     args_hex +

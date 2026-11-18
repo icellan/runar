@@ -67,7 +67,8 @@ contract F200Silent is StatefulSmartContract {
     }
 }
 `,
-    sha256: '484142b25662c6a0a0126f11b1d4700fd79632224dc38c6ae869c889e5fe30d5',
+    // PR B (#180/#213): re-pinned, +7 B (entry width gate on `_changePKH`; 692 -> 699 B).
+    sha256: '6001736ca0dd06f9b6b772cf09952c98d042fdfb65dd4a2f46be69b9d5de3feb',
   },
   'F200Inter.runar.sol': {
     src: `pragma runar ^0.1.0;
@@ -85,7 +86,8 @@ contract F200Inter is StatefulSmartContract {
     }
 }
 `,
-    sha256: '29956ebf68e8510b65a74f18a47e5851f322bf6dc2d0981b45ee301f2aaae575',
+    // PR B (#180/#213): re-pinned, +7 B (entry width gate on `_changePKH`; 696 -> 703 B).
+    sha256: '18b2efad1bff573669e7aaa7cfa5f5bcd65a1cca23e78672d29f88789a584da9',
   },
 };
 

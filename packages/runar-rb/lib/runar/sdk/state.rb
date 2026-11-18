@@ -466,6 +466,17 @@ module Runar
               "contract's on-chain reader slices it at #{width} bytes"
       end
 
+      # #213 (defence in depth): push-encode the compiler-injected _changePKH
+      # arg of a stateful method, refusing anything that is not exactly 20
+      # bytes of hex. Every change-PKH push site goes through it. The covenant
+      # gates the width on chain; this is the off-chain refusal.
+      #
+      # @raise [ArgumentError]
+      def encode_change_pkh(change_pkh_hex)
+        check_fixed_width_value(change_pkh_hex, 'Ripemd160', 'changePKH')
+        encode_push_data(change_pkh_hex)
+      end
+
       # @param field_type [String] Runar type name
       # @return [String] hex-encoded bytes
       def encode_state_value(value, field_type, label = '?')

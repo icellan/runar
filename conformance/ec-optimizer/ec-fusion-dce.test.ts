@@ -46,8 +46,10 @@ import { isCiEnv } from '../env.js';
 
 const FIXTURE = join(__dirname, 'EcFusionDce.runar.ts');
 // sha256 of the hex string every tier must emit, both fold modes.
-const EXPECTED_HEX_SHA256 = '17498b757c32bf95d6bfe43cb41a193a205c93af1a91ee8068b52c7c2134ac54';
-const EXPECTED_BYTES = 3816690;
+// PR B (#180/#213): re-pinned, +46 B (3816690 -> 3816736): the entry width gate on
+// the Point param `p` of the seven methods that take one (3 x 6 B + 4 x 7 B).
+const EXPECTED_HEX_SHA256 = 'f12041fc7ec190719729369979741a16c03f7881f679c3bd3cefa33311fba699';
+const EXPECTED_BYTES = 3816736;
 
 type FoldMode = 'fold-on' | 'fold-off';
 const FOLD_MODES: FoldMode[] = ['fold-on', 'fold-off'];

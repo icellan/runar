@@ -393,12 +393,13 @@ const TEST_SPECS: TestSpec[] = [
   // sees, so the combination is only decidable here — in the SDK.
   //
   // MessageBoard has a ByteString state field, so its pin is an EQUALITY pin
-  // (9c) on the deployed code-part length: 1348 bytes (1360 before the C=1
+  // (9c) on the deployed code-part length: 1355 bytes (1348 before PR B's
+  // #213 entry width gate on `post`'s `_changePKH` grew it by 7; 1360 before the C=1
   // binding blob, ports #170, shrank each of its two methods by 6; 1304 before W1's
   // unsigned 32-bit extractor zero-pad grew MessageBoard by 6, 1310 before
   // F-024's continuation value check grew its `post` method by 16, 1326 before
   // N-044's unsigned PUSHDATA reader + PUSHDATA4 writer grew it by 34). Attaching a
-  // 23-byte envelope makes the real code part 1371, every honest spend fails OP_VERIFY,
+  // 23-byte envelope makes the real code part 1378, every honest spend fails OP_VERIFY,
   // and the funds are locked. Both escape routes are closed (the truncated code
   // part dies on clause 8b), so refusal is the only safe verdict.
   {
@@ -410,7 +411,7 @@ const TEST_SPECS: TestSpec[] = [
     ],
     inscription: { contentType: 'text/plain', data: '6869' },
     expectRefusal: {
-      pattern: 'pins SIZE\\(_codePart\\) == 1348',
+      pattern: 'pins SIZE\\(_codePart\\) == 1355',
       reason:
         'MessageBoard pins its deployed code-part length exactly; a 23-byte ' +
         'ordinals envelope lands inside the code part and breaks the pin, so ' +

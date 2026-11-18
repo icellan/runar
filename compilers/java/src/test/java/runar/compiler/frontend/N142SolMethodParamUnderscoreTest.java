@@ -117,13 +117,13 @@ class N142SolMethodParamUnderscoreTest {
         IncrementExpr ie = assertInstanceOf(IncrementExpr.class,
             assertInstanceOf(ExpressionStatement.class, inc.body().get(0)).expression());
         assertEquals(new PropertyAccessExpr("count"), ie.operand());
-        assertEquals("484142b25662c6a0a0126f11b1d4700fd79632224dc38c6ae869c889e5fe30d5",
+        assertEquals("6001736ca0dd06f9b6b772cf09952c98d042fdfb65dd4a2f46be69b9d5de3feb",
             sha256(hex(dir, "F200Silent.runar.sol", SILENT)));
     }
 
     @Test
     void interShapeCompilesToTsBytes(@TempDir Path dir) throws Exception {
-        assertEquals("29956ebf68e8510b65a74f18a47e5851f322bf6dc2d0981b45ee301f2aaae575",
+        assertEquals("18b2efad1bff573669e7aaa7cfa5f5bcd65a1cca23e78672d29f88789a584da9",
             sha256(hex(dir, "F200Inter.runar.sol", INTER)));
     }
 

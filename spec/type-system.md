@@ -82,11 +82,13 @@ RabinSig RabinPubKey
 ### 2.2 Domain Types
 
 Domain types are members of the `ByteString` family, distinguished by the size each
-one documents. The sizes below describe intent for a human reader: **they are not
-checked** by any tier, at compile time or at runtime (see §6.1, "Declared sizes are
-not checked"). Assignment inside the family is permitted in both directions — a
-domain type where a `ByteString` is expected, and a `ByteString` where a domain type
-is expected.
+one documents. The type checker does not check these sizes (see §6.1, "Declared sizes
+are not checked by the type checker"), and assignment inside the family is permitted in
+both directions — a domain type where a `ByteString` is expected, and a `ByteString`
+where a domain type is expected. The sizes ARE enforced on-chain at exactly two
+boundaries where a value enters a script from outside: a public method's parameters
+(see "Fixed-width parameters" below) and a mutable state field being written into a
+continuation (N-045).
 
 | Type       | Size (bytes) | Description                                  |
 |------------|-------------|----------------------------------------------|
@@ -99,6 +101,59 @@ is expected.
 | `Point`    | 64          | secp256k1 elliptic curve point (affine coordinates) |
 | `P256Point`| 64          | NIST P-256 curve point (same affine layout as `Point`) |
 | `P384Point`| 96          | NIST P-384 curve point (x[48] \|\| y[48], big-endian) |
+
+#### Fixed-width parameters
+
+A public method's parameters are witness items the spender writes, so a fixed-width
+parameter could otherwise carry any number of bytes. A value spliced into a script
+(`cat` into `addRawOutput`, a state write, the change output) would then carry the
+surplus bytes with it, opcodes included (#180). The compiler therefore emits a width
+check at method entry, before any of the body runs, applied to a copy of the
+parameter:
+
+```
+<copy of param> OP_SIZE <width> OP_NUMEQUALVERIFY OP_DROP
+```
+
+The gated types and widths are `Point` 64, `P256Point` 64, `P384Point` 96, `Sha256`
+32, `Ripemd160` 20, `Addr` 20 and `PubKey` 33. The gate costs 6 bytes when the
+parameter is at depth 0 or 1 of the entry stack (`OP_DUP` / `OP_OVER`), 7 at depth
+2-16 (`<d> OP_PICK`), and is emitted once per gated parameter, in declaration order together
+with the `boolean` gate. Private helpers inherit it, because their arguments come
+from an already-gated caller.
+
+Two exceptions:
+
+- **`PubKey` whose value is only verified.** A `PubKey` parameter is NOT gated when
+  every use of its value, in the method and in any private helper it is passed to, is
+  an argument of `checkSig`, `checkMultiSig` or `hash160` (directly, through a local
+  alias, or inside the array literal handed to `checkMultiSig`). Those built-ins
+  consume the key without copying its bytes anywhere, and the exemption keeps a plain
+  P2PKH (`assert(hash160(pubKey) === this.pkh); assert(checkSig(sig, pubKey));`) on its
+  standard `OP_DUP OP_HASH160 <pkh> OP_EQUALVERIFY OP_CHECKSIG` template. Any other
+  use (`cat`, a comparison, an output, a state write, another built-in) makes the
+  parameter gated at exactly 33 bytes. An unused `PubKey` parameter is not gated.
+
+  The analysis is deliberately conservative (fail closed), so it gates some keys
+  that only ever reach a signature check:
+  - a key that leaves a body as its VALUE -- the result of an `if`/ternary arm
+    (`pick ? a : b`), or a private helper's return value (`return k`) -- counts as
+    another use, even if the selected value then only reaches `checkSig`;
+  - a key reached through a local that branch merges re-bind into an alias cycle
+    counts as another use.
+  Pass the key to `checkSig` directly (`pick ? checkSig(sig, a) : checkSig(sig, b)`)
+  to keep it ungated.
+- **`Sig` is never gated.** A DER signature is variable-width (and the empty
+  signature is a valid "no" vote under NULLFAIL).
+
+The compiler-injected `_changePKH` of a stateful method is a public `Ripemd160`
+parameter, so it is gated at 20 bytes like any other (#213): without the gate a
+spender could extend it so the covenant's change output serialised as the change
+output followed by an extra output of the spender's choosing.
+
+Every tier implements this rule in one function (`paramNeedsWidthGate` in the TS
+reference), over the ANF IR, so `--ir` inputs get identical gates; the Lean model
+mirrors it in `runar-verification/RunarVerification/Pipeline.lean` (`paramWidthGate?`).
 
 #### Point Encoding
 
@@ -483,11 +538,14 @@ Rules 2 and 3 are **mutual**, not the one-way widening the subtyping arrows in
 `Sha256`, and `bigint` is assignable to `RabinSig`. Cross-FAMILY assignment stays
 a compile-time error — `bigint` never reaches a `ByteString` slot and vice versa.
 
-#### Declared sizes are not checked
+#### Declared sizes are not checked by the type checker
 
 Neither rule consults the byte lengths in §2.2. A 1-byte value annotated `Sha256`
-is assignable to a `PubKey`, and no tier verifies at compile time or at runtime
-that either value has its documented size. This is deliberate, and it follows from
+is assignable to a `PubKey`, and no tier verifies at compile time that either value
+has its documented size, nor at runtime for a value computed inside the script. (The
+two boundaries where a value enters from outside, public-method parameters and state
+writes, ARE width-checked on-chain; see §2.2, "Fixed-width parameters".) This is
+deliberate, and it follows from
 what Script can represent: every domain type is the same stack item as a
 `ByteString` holding the same bytes, so a narrowing rule could only reject source
 — it could never make an emitted script safer. The lengths that reach domain-typed

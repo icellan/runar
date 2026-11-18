@@ -630,6 +630,33 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
+        // planCall advances `state` to the post-call state before anything is
+        // broadcast. When the call fails (the node refuses it, or it is never
+        // sent) the chain is still at the state this call started from, so the
+        // local state must be too. Before this, a refused call left the state
+        // advanced and the next call was built from a state the chain never
+        // reached.
+        Map<String, Object> stateBefore = new HashMap<>(state);
+        try {
+            return callWithOptionsOnce(methodName, args, options, provider, signer);
+        } catch (RuntimeException e) {
+            restoreState(stateBefore);
+            throw e;
+        }
+    }
+
+    private void restoreState(Map<String, Object> snapshot) {
+        state.clear();
+        state.putAll(snapshot);
+    }
+
+    private CallOutcome callWithOptionsOnce(
+        String methodName,
+        List<Object> args,
+        CallOptions options,
+        Provider provider,
+        Signer signer
+    ) {
         CallPlan plan = planCall("call", methodName, args, options, signer);
         List<CallOptions.TerminalOutput> terminalOutputs =
             options == null ? null : options.terminalOutputs;
@@ -1978,7 +2005,7 @@ public final class RunarContract {
 
         // _changePKH + _changeAmount
         if (changePkhHex != null) {
-            sb.append(ScriptUtils.encodePushData(changePkhHex));
+            sb.append(StateSerializer.encodeChangePkh(changePkhHex));
             sb.append(ContractScript.encodeConstructorArg(java.math.BigInteger.valueOf(changeAmount), "bigint"));
         }
 
@@ -2620,20 +2647,31 @@ public final class RunarContract {
                     + "for external signers."
             );
         }
-        CallPlan plan = planCall("prepareCall", methodName, args, options, signer);
-        int locktime = (options != null && options.locktime != null) ? options.locktime : 0;
-        PushTxLayout lay = layoutPushTx(
-            plan.m(), methodName, plan.resolved(), plan.sigIndices(),
-            plan.methodNeedsChange(), plan.methodNeedsNewAmount(),
-            plan.isStateful(), plan.parentStateful(), plan.dataOutputs(), plan.orderedOutputs(),
-            provider, signer, locktime, options
-        );
-        // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
-        if (lay.newLockingScript() != null) {
-            ScriptSizeExceededError.assertScriptHexUnderLimit(
-                lay.newLockingScript(), InputLimits.MAX_SCRIPT_BYTES,
-                artifact.contractName() + ".prepareCall(" + methodName + ").continuation"
+        // The state this call starts from. planCall advances `state` to the
+        // post-call state before anything is broadcast; finalizeCall restores
+        // this snapshot when the transaction never makes it onto the network.
+        Map<String, Object> stateBefore = new HashMap<>(state);
+        CallPlan plan;
+        PushTxLayout lay;
+        try {
+            plan = planCall("prepareCall", methodName, args, options, signer);
+            int locktime = (options != null && options.locktime != null) ? options.locktime : 0;
+            lay = layoutPushTx(
+                plan.m(), methodName, plan.resolved(), plan.sigIndices(),
+                plan.methodNeedsChange(), plan.methodNeedsNewAmount(),
+                plan.isStateful(), plan.parentStateful(), plan.dataOutputs(), plan.orderedOutputs(),
+                provider, signer, locktime, options
             );
+            // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+            if (lay.newLockingScript() != null) {
+                ScriptSizeExceededError.assertScriptHexUnderLimit(
+                    lay.newLockingScript(), InputLimits.MAX_SCRIPT_BYTES,
+                    artifact.contractName() + ".prepareCall(" + methodName + ").continuation"
+                );
+            }
+        } catch (RuntimeException e) {
+            restoreState(stateBefore);
+            throw e;
         }
         List<byte[]> sighashes = new ArrayList<>(plan.sigIndices().size());
         for (int i = 0; i < plan.sigIndices().size(); i++) sighashes.add(lay.userSighash());
@@ -2649,7 +2687,8 @@ public final class RunarContract {
             lay.newLockingScript(),
             lay.newSats(),
             lay.intentWitnessHex(),
-            lay
+            lay,
+            plan.isStateful() ? stateBefore : null
         );
     }
 
@@ -2908,6 +2947,34 @@ public final class RunarContract {
      *         0x30 DER tag).
      */
     public CallOutcome finalizeCall(
+        PreparedCall prepared,
+        List<byte[]> signatures,
+        Provider provider
+    ) {
+        // Only a PreparedCall that still spends the tracked UTXO owns the
+        // state: a repeat of one that was already committed must not touch it.
+        UTXO spent = prepared == null ? null : prepared.contractUtxo;
+        boolean ownsState = spent != null && currentUtxo != null
+            && currentUtxo.txid().equals(spent.txid()) && currentUtxo.outputIndex() == spent.outputIndex();
+        CallOutcome outcome;
+        try {
+            outcome = finalizeCallOnce(prepared, signatures, provider);
+        } catch (RuntimeException e) {
+            // Nothing was broadcast (or the node refused it): the chain is
+            // still at the state this call started from, so the local state
+            // must be too.
+            if (ownsState && prepared.stateBefore != null) restoreState(prepared.stateBefore);
+            throw e;
+        }
+        // A retry of a PreparedCall whose first finalize failed must commit
+        // the post-call state the transaction carries.
+        if (ownsState && prepared.stateBefore != null && prepared.continuation != null) {
+            restoreState(prepared.continuation);
+        }
+        return outcome;
+    }
+
+    private CallOutcome finalizeCallOnce(
         PreparedCall prepared,
         List<byte[]> signatures,
         Provider provider

@@ -113,8 +113,9 @@ fn n051_variable_width_pin_is_an_equality_with_a_deploy_time_slot() {
         serde_json::json!([{ "byteOffset": push_at + 1 }]),
         "codePartLenSlots must record the pin's length field"
     );
-    // Same layout as the TS reference artifact (fold OFF).
-    assert_eq!(push_at + 1, 947);
+    // Same layout as the TS reference artifact (fold OFF). #180 / #213 (PR B):
+    // 947 -> 954, +7 B for the `_changePKH` entry width gate.
+    assert_eq!(push_at + 1, 954);
 }
 
 #[test]

@@ -1264,13 +1264,13 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // greater than 1, not merely other than 1; @bsv/sdk Spend.isRelaxed).
     // A comment cannot move a byte. Each is spent, and must be deleted, on
     // the next edit to its file.
+    //
+    // 2026-11-17 — all four DELETED, spent: PR B (#180/#213) edits every one
+    // of those files (the public-method entry width gate) and moves its own
+    // pins (50 conformance goldens, sdk-output, sdk-vertical), so it needs no
+    // cover.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual([
-      'compilers/java/src/main/java/runar/compiler/passes/StackLower.java',
-      'compilers/python/runar_compiler/codegen/stack.py',
-      'compilers/ruby/lib/runar_compiler/codegen/stack.rb',
-      'compilers/zig/src/passes/stack_lower.zig',
-    ]);
+    expect(entries.map((e) => e.path).sort()).toEqual([]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {

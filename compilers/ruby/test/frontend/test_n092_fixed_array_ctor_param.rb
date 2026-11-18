@@ -127,6 +127,8 @@ class TestN092FixedArrayCtorParam < Minitest::Test
   # Hexes pinned from the pre-fix compiler, so a port that over-reaches and
   # starts refusing legal contracts fails here rather than at conformance time.
   # The Zig tier emits the same bytes for both.
+  # #180 / #213 re-stamped the initialized-property hex to the TS reference
+  # output for the same source (go() gained the `_changePKH` entry width gate).
   GOOD_INITIALIZED_PROPERTY_HEX = File.read(
     File.expand_path("fixtures/n092_ctrl_initialized_property.hex", __dir__)
   ).strip

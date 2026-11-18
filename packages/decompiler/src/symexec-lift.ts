@@ -69,7 +69,23 @@ type InferredType =
   | 'boolean'
   | 'bytes'
   | 'sig'
-  | 'pubkey';
+  | 'pubkey'
+  // Fixed-width domain types, known only from a stripped #180/#213 entry
+  // width gate (see stripParamGates). 20 bytes is recovered as Ripemd160
+  // (Addr is the same bytes) and 64 as Point (P256Point is the same bytes).
+  | 'sha256'
+  | 'ripemd160'
+  | 'point'
+  | 'p384point';
+
+/** Byte-family refinements of `bytes` (siblings conflict with each other). */
+const BYTES_REFINEMENTS: ReadonlySet<InferredType> = new Set<InferredType>([
+  'sig', 'pubkey', 'sha256', 'ripemd160', 'point', 'p384point',
+]);
+
+function isBytesFamily(t: InferredType): boolean {
+  return t === 'bytes' || BYTES_REFINEMENTS.has(t);
+}
 
 /** Returns a TS type name for the recovered source. */
 function tsTypeName(t: InferredType): string {
@@ -78,6 +94,10 @@ function tsTypeName(t: InferredType): string {
     case 'boolean': return 'boolean';
     case 'sig':     return 'Sig';
     case 'pubkey':  return 'PubKey';
+    case 'sha256':  return 'Sha256';
+    case 'ripemd160': return 'Ripemd160';
+    case 'point':   return 'Point';
+    case 'p384point': return 'P384Point';
     case 'bytes':   return 'ByteString';
     case 'unknown': return 'ByteString';
   }
@@ -97,8 +117,8 @@ function unify(current: InferredType, wanted: InferredType): InferredType | null
   // `bytes` is a generic supertype of `sig` and `pubkey`. `sig` and `pubkey`
   // are sibling refinements that CONFLICT with each other (a single value
   // can't simultaneously be both a signature and a public key).
-  if (current === 'bytes' && (wanted === 'sig' || wanted === 'pubkey')) return wanted;
-  if (wanted === 'bytes' && (current === 'sig' || current === 'pubkey')) return current;
+  if (current === 'bytes' && BYTES_REFINEMENTS.has(wanted)) return wanted;
+  if (wanted === 'bytes' && BYTES_REFINEMENTS.has(current)) return current;
   return null; // conflict
 }
 
@@ -270,13 +290,14 @@ export function liftStraightLine(
   const className  = opts.className  ?? '_Recovered';
   const methodName = opts.methodName ?? '_method0';
 
-  // W3 / BoolBamboozle: strip the compiler's `boolean` ABI-domain prologue
-  // before anything else looks at the stream. It is emitted by the stack
-  // lowerer, not written by the author, so re-emitting it as recovered source
-  // would both mangle the body and make re-compilation add a SECOND copy.
-  // `gatedParamDepths` remembers which entry-stack slots it guarded, which is
-  // exactly the set of parameters declared `boolean`.
-  const gate = stripBooleanParamGates(ops);
+  // W3 / BoolBamboozle and #180/#213: strip the compiler's parameter entry
+  // gates (the `boolean` ABI-domain pin and the fixed-width pin) before
+  // anything else looks at the stream. They are emitted by the stack lowerer,
+  // not written by the author, so re-emitting them as recovered source would
+  // both mangle the body and make re-compilation add a SECOND copy.
+  // `gatedParams` remembers which entry-stack slots they guarded and the type
+  // each gate proves.
+  const gate = stripParamGates(ops);
   ops = gate.ops;
 
   // Pre-scan: compute required param count + reject control flow / large pushes.
@@ -363,13 +384,14 @@ export function liftStraightLine(
   // codegen path expects.
   state.bindings = reorderConsumerOperands(state.bindings);
 
-  // W3: a stripped gate is direct evidence of the declared type, stronger than
-  // any use-site inference — the compiler emits it for `boolean` parameters and
-  // for nothing else. Depth is measured from the top of the entry stack, where
-  // the LAST parameter sits, so depth d is parameter `paramCount - 1 - d`.
-  for (const depth of gate.gatedParamDepths) {
+  // A stripped gate is direct evidence of the declared type, stronger than any
+  // use-site inference — the compiler emits the boolean gate for `boolean`
+  // parameters only, and the width gate only for the fixed-width type of that
+  // width. Depth is measured from the top of the entry stack, where the LAST
+  // parameter sits, so depth d is parameter `paramCount - 1 - d`.
+  for (const { depth, type } of gate.gatedParams) {
     const idx = scan.paramCount - 1 - depth;
-    if (idx >= 0 && idx < scan.paramCount) state.types.set(`_v${idx}`, 'boolean');
+    if (idx >= 0 && idx < scan.paramCount) state.types.set(`_v${idx}`, type);
   }
 
   // Build params with inferred types.
@@ -418,6 +440,7 @@ export function liftStraightLine(
   for (const t of paramTypes) {
     if (t === 'sig') imports.add('Sig');
     if (t === 'pubkey') imports.add('PubKey');
+    if (t === 'sha256' || t === 'ripemd160' || t === 'point' || t === 'p384point') imports.add(tsTypeName(t));
     if (t === 'bytes' || t === 'unknown') imports.add('ByteString');
   }
   collectCallImports(state.bindings, imports);
@@ -568,6 +591,12 @@ function reverseTsTypeName(ts: string): InferredType {
     case 'boolean':    return 'boolean';
     case 'Sig':        return 'sig';
     case 'PubKey':     return 'pubkey';
+    case 'Sha256':     return 'sha256';
+    case 'Ripemd160':  return 'ripemd160';
+    case 'Addr':       return 'ripemd160';
+    case 'Point':      return 'point';
+    case 'P256Point':  return 'point';
+    case 'P384Point':  return 'p384point';
     case 'ByteString': return 'bytes';
     default:           return 'unknown';
   }
@@ -1581,26 +1610,36 @@ function scrubBindings(state: LiftState, names: string[]): void {
 
 interface PreScanOk { ok: true; paramCount: number }
 /**
- * W3 / BoolBamboozle — recognise and remove the `boolean` ABI-domain prologue
- * that `05-stack-lower.ts` (and its six peers) emit at the head of every public
- * method, once per `boolean` parameter:
+ * Recognise and remove the parameter entry gates that `05-stack-lower.ts` (and
+ * its six peers) emit at the head of every public method, in parameter
+ * declaration order:
  *
- *     <copy of the param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
- *                          OP_BOOLOR OP_VERIFY
+ * - W3 / BoolBamboozle, once per `boolean` parameter:
+ *
+ *       <copy of the param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+ *                            OP_BOOLOR OP_VERIFY
+ *
+ * - #180 / #213, once per gated fixed-width parameter (spec/type-system.md
+ *   §2.2, "Fixed-width parameters"):
+ *
+ *       <copy of the param>  OP_SIZE <width> OP_NUMEQUALVERIFY OP_DROP
  *
  * where the copy is `OP_DUP` (depth 0), `OP_OVER` (depth 1), or
- * `<push depth> OP_PICK` (deeper). The sequence is stack-neutral, so removing
- * it leaves the rest of the stream liftable exactly as before, and re-compiling
- * the recovered source puts it back byte-for-byte.
+ * `<push depth> OP_PICK` (deeper). Both are stack-neutral, so removing them
+ * leaves the rest of the stream liftable exactly as before, and re-compiling
+ * the recovered source puts them back byte-for-byte.
  *
  * Only a run of these at the very START of the method's op stream is stripped —
  * that is the only place the lowerer can emit them, so a later coincidental
  * match is left alone rather than silently deleted from a contract's body.
  */
-function stripBooleanParamGates(ops: Op[]): { ops: Op[]; gatedParamDepths: number[] } {
-  const BODY = [0x76, 0x00, 0x87, 0x7c, 0x51, 0x87, 0x9b, 0x69];
+function stripParamGates(ops: Op[]): { ops: Op[]; gatedParams: { depth: number; type: InferredType }[] } {
+  const BOOL_BODY = [0x76, 0x00, 0x87, 0x7c, 0x51, 0x87, 0x9b, 0x69];
+  const WIDTH_TYPES: ReadonlyMap<number, InferredType> = new Map<number, InferredType>([
+    [20, 'ripemd160'], [32, 'sha256'], [33, 'pubkey'], [64, 'point'], [96, 'p384point'],
+  ]);
 
-  const depths: number[] = [];
+  const gated: { depth: number; type: InferredType }[] = [];
   let i = 0;
   for (;;) {
     // The copy that puts the parameter on top of the stack.
@@ -1620,14 +1659,31 @@ function stripBooleanParamGates(ops: Op[]): { ops: Op[]; gatedParamDepths: numbe
       break;
     }
 
-    if (!BODY.every((byte, k) => ops[after + k]?.byte === byte)) break;
+    if (BOOL_BODY.every((byte, k) => ops[after + k]?.byte === byte)) {
+      gated.push({ depth, type: 'boolean' });
+      i = after + BOOL_BODY.length;
+      continue;
+    }
 
-    depths.push(depth);
-    i = after + BODY.length;
+    // OP_SIZE <push 1 byte: width> OP_NUMEQUALVERIFY OP_DROP
+    const w = ops[after + 1];
+    const width = w?.byte === 0x01 && w.data?.length === 1 ? w.data[0]! : undefined;
+    const type = width === undefined ? undefined : WIDTH_TYPES.get(width);
+    if (
+      type !== undefined
+      && ops[after]?.byte === 0x82 /* OP_SIZE */
+      && ops[after + 2]?.byte === 0x9d /* OP_NUMEQUALVERIFY */
+      && ops[after + 3]?.byte === 0x75 /* OP_DROP */
+    ) {
+      gated.push({ depth, type });
+      i = after + 4;
+      continue;
+    }
+    break;
   }
 
-  if (depths.length === 0) return { ops, gatedParamDepths: [] };
-  return { ops: ops.slice(i), gatedParamDepths: depths };
+  if (gated.length === 0) return { ops, gatedParams: [] };
+  return { ops: ops.slice(i), gatedParams: gated };
 }
 
 function preScanArity(ops: Op[]): PreScanOk | LiftFailure {
@@ -2108,7 +2164,7 @@ function stepOpcode(state: LiftState, op: Op): LiftFailure | null {
     const n = state.stack.length;
     const aT = state.types.get(state.stack[n - 2]!) ?? 'unknown';
     const bT = state.types.get(state.stack[n - 1]!) ?? 'unknown';
-    const isBytes = (t: InferredType) => t === 'bytes' || t === 'sig' || t === 'pubkey';
+    const isBytes = isBytesFamily;
     const operandHint: 'bigint' | 'bytes' = (isBytes(aT) || isBytes(bT)) ? 'bytes' : 'bigint';
     if (operandHint === 'bytes') {
       // Refine both operands toward bytes.
@@ -2127,7 +2183,7 @@ function stepOpcode(state: LiftState, op: Op): LiftFailure | null {
     const n = state.stack.length;
     const aT = state.types.get(state.stack[n - 2]!) ?? 'unknown';
     const bT = state.types.get(state.stack[n - 1]!) ?? 'unknown';
-    const isBytes = (t: InferredType) => t === 'bytes' || t === 'sig' || t === 'pubkey';
+    const isBytes = isBytesFamily;
     if (isBytes(aT) || isBytes(bT)) {
       refineType(state, state.stack[n - 2]!, 'bytes');
       refineType(state, state.stack[n - 1]!, 'bytes');

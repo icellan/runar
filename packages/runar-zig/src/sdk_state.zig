@@ -608,6 +608,15 @@ pub fn checkFixedWidthValue(value: types.StateValue, field_type: []const u8) err
     }
 }
 
+/// #213 (defence in depth): push-encode the compiler-injected `_changePKH` arg
+/// of a stateful method, refusing anything that is not exactly 20 bytes of hex
+/// (`error.FixedWidthMismatch`). Every change-PKH push goes through it. The
+/// covenant gates the width on chain; this is the off-chain refusal.
+pub fn encodeChangePkh(allocator: std.mem.Allocator, change_pkh_hex: []const u8) ![]u8 {
+    try checkFixedWidthValue(.{ .bytes = change_pkh_hex }, "Ripemd160");
+    return encodePushData(allocator, change_pkh_hex);
+}
+
 fn decodeStateValue(
     allocator: std.mem.Allocator,
     hex: []const u8,

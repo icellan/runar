@@ -301,6 +301,8 @@ test {
     _ = @import("sdk_g1_raw_outputs_test.zig");
     _ = @import("sdk_null_bytestring_arg_test.zig");
     _ = @import("sdk_n045_fixed_width_test.zig");
+    _ = @import("sdk_pr_b_change_pkh_test.zig");
+    _ = @import("sdk_pr_b_state_rollback_test.zig");
     _ = @import("sdk_n084_num2bin_state_test.zig");
     _ = @import("sdk_gk_bug_010_bool_state_test.zig");
     _ = @import("sdk_n051_codepart_len_slots_test.zig");

@@ -346,7 +346,10 @@ class AdditionalContractInputsTest {
         LocalSigner signer = new LocalSigner(PRIV);
         MockProvider provider = new MockProvider();
         String p2pkh = ScriptUtils.buildP2PKHScript(signer.address());
-        for (int i = 0; i < 8; i++) {
+        // 10 x 300 sat: PR B's entry width gate grew the token-ft merge tx so
+        // that 8 x 300 no longer covered its own relay fee (the wallet ran dry
+        // at 2400 sat for a 2425-sat fee); several inputs are still required.
+        for (int i = 0; i < 10; i++) {
             provider.addUtxo(signer.address(),
                 new UTXO("ab".repeat(31) + String.format("%02x", i), 0, 300L, p2pkh));
         }

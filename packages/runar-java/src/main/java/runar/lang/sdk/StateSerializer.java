@@ -168,6 +168,19 @@ public final class StateSerializer {
         }
     }
 
+    /**
+     * #213 (defence in depth): push-encodes the compiler-injected
+     * {@code _changePKH} arg of a stateful method, refusing anything that is
+     * not exactly 20 bytes of hex. Every change-PKH push goes through it. The
+     * covenant gates the width on chain; this is the off-chain refusal.
+     *
+     * @throws IllegalArgumentException on a wrong-width or non-hex value
+     */
+    static String encodeChangePkh(String changePkhHex) {
+        checkFixedWidthValue(changePkhHex, "Ripemd160", "changePKH");
+        return ScriptUtils.encodePushData(changePkhHex);
+    }
+
     static String encodeStateValue(Object value, String fieldType, String label) {
         return switch (fieldType) {
             // F-035: RabinSig / RabinPubKey are bigint aliases; every compiler

@@ -224,12 +224,15 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       // 9-byte ABI-domain gate. The other six rows are unmoved, which is the
       // point of the control — the gate is scoped to boolean PARAMS and does
       // not touch state encoding for any type, boolean included.
+      // PR B (#180/#213) re-stamp (PubKey / Sha256 / Addr only): `check(expected: T)`
+      // takes a fixed-width parameter, so its entry gains the 6-byte width gate
+      // (`OP_OVER OP_SIZE <w> OP_NUMEQUALVERIFY OP_DROP`). Gate-only delta.
       boolean: 'a7b7f3697b02e1021204ec6741e5ffb64c2caf54d68ce163bdb95037cac0885b',
       RabinSig: 'f176cc040e818cd980bb6d84335b956070e46419cab9fd49ec66c0fe76674881',
       RabinPubKey: 'f176cc040e818cd980bb6d84335b956070e46419cab9fd49ec66c0fe76674881',
-      PubKey: '16e9668876a97cdc86e86c243732cee98be673d7acb13085a048fdb9ea695016',
-      Sha256: '349aaa70a6a675748629b9d3595d906819c11683b15745c0df7d54a4688128df',
-      Addr: '15f00ac46f526821caa217e9c7234655a7b219a2aace1bf9bf6ec559273f120d',
+      PubKey: '8be28ef4b28a4e551ea499b2cd5e94640def0d982d9fc510951e3320f1ebf89d',
+      Sha256: 'c97f1a78751f0b604d0c838bc200a5b3e522e4ccd5059ea206d93c2129578d72',
+      Addr: 'bbc41899b7531e350aade444fbb86549c0ff6604d63e6d33e30751a2f6779057',
     };
 
     const WRITE_PINS: Record<string, string> = {
@@ -244,15 +247,18 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       // re-measured byte-identical in all seven tiers (the same script as
       // curve-point-state-width's PubKey write pin). The numeric and framed
       // rows are unmoved.
-      ByteString: '58b91009cbc8e6e14f970225de10430d5440291da06c3659c0c2c5470a2f4b92',
-      PubKey: 'acf3b1b1632fe4afc9ab6f7cee50c0ed93286194884fb68041d0fe21af9677c9',
-      bigint: '78bfd5caf2af4353342ac3c498abb3d8c98d06a05806243af9fc8356d0f76736',
+      // PR B (#180/#213) re-stamp, every row: +7 B for the entry width gate on
+      // the injected `_changePKH` (+14 B for PubKey, whose `next: PubKey`
+      // param is gated too). Gate-only delta.
+      ByteString: 'c5bde21d3c0fb65e703756ec6ec7c137d2bd8f9507faf5340bfe45aae8fe459a',
+      PubKey: 'cbae90abbd839aeb84e39cdd85f62e3b3be1d5b26ae27f2c61cd4c1de5f3163f',
+      bigint: '194a175534f9f33b200745d35a3b9f62499151041d96cc138231da7c19a12ef6',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
       // parameter and so gains the 9-byte ABI-domain gate. `bigint` and
       // `RabinSig` still agree with each other, which is the equality this
       // table exists to defend.
-      boolean: 'de3ef459c5d33d114be642a3dbcb04f77e1e8a7d4abedd3c6102f0eade9795c5',
-      RabinSig: '78bfd5caf2af4353342ac3c498abb3d8c98d06a05806243af9fc8356d0f76736',
+      boolean: '93aaabfed910cdb528de5a82b34985e3d5e1f3ba4200471859ed95b2d2a00f07',
+      RabinSig: '194a175534f9f33b200745d35a3b9f62499151041d96cc138231da7c19a12ef6',
     };
 
     for (const [type, digest] of Object.entries(TERMINAL_PINS)) {
