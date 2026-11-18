@@ -24,6 +24,9 @@
  *    compiles, binds `__idx_*` after the `update_prop cursor` in ANF, and under
  *    the real `Spend` rejects the spend at cursor 0 and accepts it at cursor 1,
  *    exactly as the source says.
+ * The contract carries its cursor write in an addOutput continuation (1,000
+ * sat, with 198,000 to the raw output and the rest as fee): without one, D18
+ * refuses `release` in typecheck before pass 3b's order check runs.
  * What it does not prove: the other six tiers (their own suites and
  * conformance/negatives/N120–N122 cover them), or any shape beyond the ones
  * named in 03b-expand-fixed-arrays.test.ts.
@@ -45,7 +48,8 @@ export class RotatingVault extends StatefulSmartContract {
   constructor(cursor: bigint) { super(cursor); this.cursor = cursor; }
   public release(destination: ByteString) {
     assert((++this.cursor > 0n) && this.enabled[this.cursor % 2n] === 1n);
-    this.addRawOutput(199000n, destination);
+    this.addRawOutput(198000n, destination);
+    this.addOutput(1000n, this.cursor);
   }
 }`;
 

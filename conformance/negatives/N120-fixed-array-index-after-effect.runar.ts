@@ -5,7 +5,9 @@
 // source forbids (enabled[1] = 0). Accepted by all seven tiers pre-fix, under
 // @bsv/sdk Spend.validate. Every tier must refuse with:
 //   FixedArray index would be evaluated out of source order: ...
-// Shape: index after a ++ in the left operand of &&.
+// Shape: index after a ++ in the left operand of &&. The addOutput carries the
+// cursor write; without it D18 refuses the method in typecheck, before the
+// pass-3b order check this fixture is about can run.
 import { StatefulSmartContract, FixedArray, ByteString, assert } from 'runar-lang';
 
 class RotatingVault extends StatefulSmartContract {
@@ -20,5 +22,6 @@ class RotatingVault extends StatefulSmartContract {
   public release(destination: ByteString) {
     assert((++this.cursor > 0n) && this.enabled[this.cursor % 2n] === 1n);
     this.addRawOutput(199000n, destination);
+    this.addOutput(1000n, this.cursor);
   }
 }

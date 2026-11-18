@@ -425,6 +425,14 @@ class Sg extends StatefulSmartContract {
   }
 }
 `;
+    const n539 = readFileSync(join(__dirname, 'N539-ts-single-fixedarray-element-mutate-only.runar.ts'), 'utf8');
+    for (const tier of TIERS) {
+      it(`${tier.id} refuses N539 (the rejection fixture of this shape)`, () => {
+        const { status, out, diag } = run(tier, writeFile('N539.runar.ts', n539));
+        expect(status, `${tier.id} accepted N539 (emitted "${out}")`).not.toBe(0);
+        expect(diag.toLowerCase()).toContain('mutate-only single continuation is unsound');
+      });
+    }
     for (const write of ['this.slots[0] = 5n;', 'this.slots[i]++;']) {
       for (const tier of TIERS) {
         it(`${tier.id} refuses \`${write}\` under SINGLE`, () => {
