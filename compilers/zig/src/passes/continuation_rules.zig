@@ -35,6 +35,13 @@ pub const DROPPED_CONTINUATION_FMT =
     "the spend. Add this.addOutput(satoshis, ...) on every path that writes state, or stop " ++
     "writing state on a path meant to end the contract";
 
+/// D27: the shared error text (method name; D18's sibling, same family).
+pub const DEAD_STATE_WRITE_FMT =
+    "method '{s}' writes contract state after the last addOutput() on a path: a method that declares its own " ++
+    "outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the " ++
+    "write never reaches the chain and a caller that tracks the final state builds a continuation the script " ++
+    "refuses. Pass the new value to addOutput(...) instead, or remove the write";
+
 const MAX_DEPTH: u32 = @intCast(input_limits.MAX_CALL_DEPTH);
 
 const Pending = struct { stmts: []const Statement, params: []const ParamNode, depth: u32 };
@@ -153,49 +160,99 @@ pub fn mutatesState(method: MethodNode, contract: ContractNode) bool {
 }
 
 // ---------------------------------------------------------------------------
-// D18, per path
+// D18 / D27, per path
 // ---------------------------------------------------------------------------
 //
-// A path state is two bits, W (state written) and A (addOutput reached); a
-// set of the four possible states is a u4 mask (bit x set iff state x is
-// live). Every call in an expression runs; `if` unions its arms; a loop
-// unions skipping it; a private helper call composes the caller's states
-// with the helper's exit states (fallthrough + return).
+// A path state is three bits, W (state written), A (addOutput reached) and D
+// (state written since the path's last addOutput; D27); a set of the eight
+// possible states is a u8 mask (bit x set iff state x is live). A write sets
+// W|D, an addOutput sets A and clears D. Every call in an expression runs;
+// `if` unions its arms; a loop unions skipping it; a private helper call
+// composes the caller's states with the helper's exit states (fallthrough +
+// return) by `then`: an addOutput in the helper clears the caller's D.
 
-pub const W: u2 = 1;
-pub const A: u2 = 2;
+pub const W: u3 = 1;
+pub const A: u3 = 2;
+pub const D: u3 = 4;
 /// The single fresh path {0}.
-pub const ZERO: u4 = 1;
+pub const ZERO: u8 = 1;
 
-/// Every live state `x` becomes `x | bits`.
-pub fn orAll(states: u4, bits: u2) u4 {
-    var out: u4 = 0;
-    for (0..4) |x| {
-        if ((states >> @intCast(x)) & 1 != 0) out |= @as(u4, 1) << (@as(u2, @intCast(x)) | bits);
+/// Maps every live state through `f`.
+fn mapStates(states: u8, comptime f: fn (u3) u3) u8 {
+    var out: u8 = 0;
+    for (0..8) |x| {
+        if ((states >> @intCast(x)) & 1 != 0) out |= @as(u8, 1) << f(@intCast(x));
     }
     return out;
 }
 
-/// {x | y : x in states, y in exits}.
-pub fn compose(states: u4, exits: u4) u4 {
-    var out: u4 = 0;
-    for (0..4) |y| {
-        if ((exits >> @intCast(y)) & 1 != 0) out |= orAll(states, @intCast(y));
+fn writeOne(x: u3) u3 {
+    return x | W | D;
+}
+fn addOutputOne(x: u3) u3 {
+    return (x | A) & ~D;
+}
+
+/// A state write on every live path: W|D.
+pub fn write(states: u8) u8 {
+    return mapStates(states, writeOne);
+}
+
+/// An addOutput on every live path: A set, D cleared.
+pub fn addOutput(states: u8) u8 {
+    return mapStates(states, addOutputOne);
+}
+
+/// A callee's exit state `y` run after the caller's `x`.
+fn then(x: u3, y: u3) u3 {
+    const d: u3 = if (y & A != 0) y & D else (x | y) & D;
+    return ((x | y) & ~D) | d;
+}
+
+/// {then(x, y) : x in states, y in exits}.
+pub fn compose(states: u8, exits: u8) u8 {
+    var out: u8 = 0;
+    for (0..8) |x| {
+        if ((states >> @intCast(x)) & 1 == 0) continue;
+        for (0..8) |y| {
+            if ((exits >> @intCast(y)) & 1 != 0) out |= @as(u8, 1) << then(@intCast(x), @intCast(y));
+        }
     }
     return out;
 }
 
-/// Some path wrote state (W) and reached no addOutput (not A): state 1.
-pub fn droppedState(states: u4) bool {
-    return states & (@as(u4, 1) << W) != 0;
+/// Some path wrote state (W) and reached no addOutput (not A).
+pub fn droppedState(states: u8) bool {
+    for (0..8) |x| {
+        const v: u3 = @intCast(x);
+        if ((states >> v) & 1 != 0 and v & W != 0 and v & A == 0) return true;
+    }
+    return false;
 }
 
-const Flow = struct { live: u4, returned: u4 };
+/// D27: some path reached an addOutput (A) and wrote state after its last one (D).
+pub fn deadWriteState(states: u8) bool {
+    for (0..8) |x| {
+        const v: u3 = @intCast(x);
+        if ((states >> v) & 1 != 0 and v & A != 0 and v & D != 0) return true;
+    }
+    return false;
+}
+
+/// D18 / D27 verdict of a method's exit states: D18 wins when both apply.
+pub const Verdict = enum { none, dropped, dead_write };
+pub fn verdict(states: u8) Verdict {
+    if (droppedState(states)) return .dropped;
+    if (deadWriteState(states)) return .dead_write;
+    return .none;
+}
+
+const Flow = struct { live: u8, returned: u8 };
 
 const Paths = struct {
     allocator: Allocator,
     contract: ContractNode,
-    exits: std.StringHashMapUnmanaged(u4) = .empty,
+    exits: std.StringHashMapUnmanaged(u8) = .empty,
     /// Set while collecting the helpers a body calls whose exits are unknown.
     missing: ?*std.ArrayListUnmanaged(MethodNode) = null,
 
@@ -221,14 +278,14 @@ const Paths = struct {
     }
 
     /// Exit states (fallthrough and return) of a body entered with a fresh path.
-    fn bodyExits(p: *Paths, body: []const Statement, params: []const ParamNode) u4 {
+    fn bodyExits(p: *Paths, body: []const Statement, params: []const ParamNode) u8 {
         const f = p.stmts(body, params, ZERO);
         return f.live | f.returned;
     }
 
-    fn stmts(p: *Paths, list: []const Statement, params: []const ParamNode, states: u4) Flow {
+    fn stmts(p: *Paths, list: []const Statement, params: []const ParamNode, states: u8) Flow {
         var live = states;
-        var returned: u4 = 0;
+        var returned: u8 = 0;
         for (list) |st| {
             if (live == 0) break;
             const f = p.stmt(st, params, live);
@@ -238,7 +295,7 @@ const Paths = struct {
         return .{ .live = live, .returned = returned };
     }
 
-    fn stmt(p: *Paths, st: Statement, params: []const ParamNode, states: u4) Flow {
+    fn stmt(p: *Paths, st: Statement, params: []const ParamNode, states: u8) Flow {
         switch (st) {
             .assign => |as_| {
                 var s = states;
@@ -246,7 +303,7 @@ const Paths = struct {
                 // index chain in `index_target`.
                 if (as_.index_target) |it| s = p.expr(it.index, params, p.expr(it.object, params, s));
                 s = p.expr(as_.value, params, s);
-                if (as_.target_is_property and p.isMutable(as_.target)) s = orAll(s, W);
+                if (as_.target_is_property and p.isMutable(as_.target)) s = write(s);
                 return .{ .live = s, .returned = 0 };
             },
             .expr_stmt => |e| return .{ .live = p.expr(e.expr, params, states), .returned = 0 },
@@ -269,7 +326,7 @@ const Paths = struct {
         }
     }
 
-    fn helper(p: *Paths, m: MethodNode, states: u4) u4 {
+    fn helper(p: *Paths, m: MethodNode, states: u8) u8 {
         const ex = p.exits.get(m.name) orelse blk: {
             if (p.missing) |list| list.append(p.allocator, m) catch @panic("out of memory");
             break :blk ZERO;
@@ -277,15 +334,15 @@ const Paths = struct {
         return compose(states, ex);
     }
 
-    fn expr(p: *Paths, e: Expression, params: []const ParamNode, states: u4) u4 {
+    fn expr(p: *Paths, e: Expression, params: []const ParamNode, states: u8) u8 {
         switch (e) {
             .increment => |inc| {
                 const s = p.expr(inc.operand, params, states);
-                return if (p.writesMutable(inc.operand)) orAll(s, W) else s;
+                return if (p.writesMutable(inc.operand)) write(s) else s;
             },
             .decrement => |dec| {
                 const s = p.expr(dec.operand, params, states);
-                return if (p.writesMutable(dec.operand)) orAll(s, W) else s;
+                return if (p.writesMutable(dec.operand)) write(s) else s;
             },
             .call => |call| {
                 var s = states;
@@ -299,7 +356,7 @@ const Paths = struct {
                 if (std.mem.eql(u8, mc.method, "addOutput") and
                     (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self") or isStatefulContext(params, mc.object)))
                 {
-                    return orAll(s, A);
+                    return addOutput(s);
                 }
                 if (p.lookupPrivate(mc.method)) |m| return p.helper(m, s);
                 return s;
@@ -361,16 +418,17 @@ const Paths = struct {
     }
 };
 
-/// D18, per path: the method declares a state output somewhere (any
-/// addOutput / addRawOutput, so it gets no auto-continuation) and some path
-/// through it writes state without reaching an addOutput.
-pub fn dropsContinuation(method: MethodNode, contract: ContractNode) bool {
-    if (!anf_lower.methodHasAddOutput(method, contract)) return false;
+/// D18 + D27, per path, in a method that declares a state output somewhere
+/// (any addOutput / addRawOutput, so it gets no auto-continuation): .dropped
+/// when some path writes state without reaching an addOutput, else
+/// .dead_write when some path writes state after its last addOutput.
+pub fn continuationVerdict(method: MethodNode, contract: ContractNode) Verdict {
+    if (!anf_lower.methodHasAddOutput(method, contract)) return .none;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     var p: Paths = .{ .allocator = arena.allocator(), .contract = contract };
     p.prepare(method.body, method.params);
-    return droppedState(p.bodyExits(method.body, method.params));
+    return verdict(p.bodyExits(method.body, method.params));
 }
 
 /// #199: the contract-level warning, when it applies (stateful contracts only).

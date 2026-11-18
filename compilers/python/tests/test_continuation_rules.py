@@ -127,3 +127,81 @@ def test_d18_ir_refuses_write_on_raw_branch(tmp_path):
 def test_d18_ir_accepts(case, tmp_path):
     program = compile_source_to_ir(_write(tmp_path, case), disable_constant_folding=True)
     assert compile_from_ir_bytes(_ir_bytes(program)).script
+
+
+# ---------------------------------------------------------------------------
+# D27: a state write after the path's last addOutput is dead on chain.
+# ---------------------------------------------------------------------------
+
+_D27 = _D18["refuse_after_last"]
+
+
+def _unchecked_ir(case) -> bytes:
+    parsed = parse_source(case["src"], case["file"])
+    assert parsed.contract is not None, parsed.errors
+    expanded = expand_fixed_arrays(parsed.contract)
+    assert not expanded.errors, expanded.errors
+    return _ir_bytes(lower_to_anf(expanded.contract))
+
+
+@pytest.mark.parametrize("case", _D27, ids=[c["name"] for c in _D27])
+def test_d27_source_refuses(case, tmp_path):
+    with pytest.raises(CompilationError) as exc:
+        compile_from_source(_write(tmp_path, case))
+    assert case["error"] in str(exc.value)
+
+
+@pytest.mark.parametrize("case", _D27, ids=[c["name"] for c in _D27])
+def test_d27_ir_refuses(case):
+    with pytest.raises(Exception) as exc:
+        compile_from_ir_bytes(_unchecked_ir(case))
+    assert case["error"] in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# D26: a lower-bound locktime gate must pin the locktime domain on its path.
+# Corpus: conformance/negatives/locktime-domain-cases.json; mirrors
+# packages/runar-compiler/src/passes/locktime-domain.ts.
+# ---------------------------------------------------------------------------
+
+_D26 = json.loads((_REPO / "conformance/negatives/locktime-domain-cases.json").read_text())
+
+
+@pytest.mark.parametrize("case", _D26["refuse"], ids=[c["name"] for c in _D26["refuse"]])
+def test_d26_source_refuses(case, tmp_path):
+    with pytest.raises(CompilationError) as exc:
+        compile_from_source(_write(tmp_path, case))
+    assert case["error"] in str(exc.value)
+
+
+@pytest.mark.parametrize("case", _D26["accept"], ids=[c["name"] for c in _D26["accept"]])
+def test_d26_source_accepts(case, tmp_path):
+    assert compile_from_source(_write(tmp_path, case)).script
+
+
+@pytest.mark.parametrize("case", _D26["refuse"], ids=[c["name"] for c in _D26["refuse"]])
+def test_d26_ir_refuses(case):
+    data = _unchecked_ir(case)
+    assert b'"extractLocktime"' in data
+    with pytest.raises(Exception) as exc:
+        compile_from_ir_bytes(data)
+    assert case["error"] in str(exc.value)
+
+
+@pytest.mark.parametrize("case", _D26["accept"], ids=[c["name"] for c in _D26["accept"]])
+def test_d26_ir_accepts(case, tmp_path):
+    program = compile_source_to_ir(_write(tmp_path, case), disable_constant_folding=True)
+    assert compile_from_ir_bytes(_ir_bytes(program)).script
+
+
+def test_d26_does_not_mask_d14(tmp_path):
+    """N534 is both a D26 gate and a D14 unchecked-extractor refusal: both
+    diagnostics are reported."""
+    src = (_REPO / "conformance/negatives/N534-ts-extractor-bytestring-property.runar.ts").read_text()
+    path = tmp_path / "N534.runar.ts"
+    path.write_text(src)
+    with pytest.raises(CompilationError) as exc:
+        compile_from_source(str(path))
+    msg = str(exc.value)
+    assert "extractLocktime() needs a checked SigHashPreimage" in msg
+    assert "compares extractLocktime against a lower bound without pinning" in msg

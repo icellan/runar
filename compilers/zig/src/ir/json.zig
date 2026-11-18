@@ -14,6 +14,7 @@ const synthetic_array_chain = @import("synthetic_array_chain.zig");
 const rabin_key_provenance = @import("rabin_key_provenance.zig");
 const preimage_rules = @import("preimage_rules.zig");
 const continuation_rules = @import("continuation_rules.zig");
+const locktime_domain = @import("locktime_domain.zig");
 const call_depth = @import("call_depth.zig");
 pub const required_fields = @import("required_fields.zig");
 
@@ -95,6 +96,9 @@ const ParseError = error{
     // D18: a stateful public method writes state behind raw outputs only.
     // Message in lastDiagnostic().
     DroppedContinuation,
+    // D26: a public method compares the locktime against a lower bound on
+    // a path with no asserted domain pin. Message in lastDiagnostic().
+    LocktimeDomain,
     // N-265: a cycle in the method_call graph. `compile-ir` skips the
     // frontend entirely, so frontend/validate.zig's recursion check never
     // ran; stack lowering inlines every method_call with no cycle guard,
@@ -544,6 +548,12 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     // diagnostics, 7 tiers; see preimage_rules.zig).
     preimage_rules.check(allocator, properties, method_list.items) catch |err| switch (err) {
         error.PreimageRuleViolation => return ParseError.PreimageRuleViolation,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    // D26: IR input skips typecheck's locktime-domain rule (stateless and
+    // stateful programs alike; see locktime_domain.zig).
+    locktime_domain.check(allocator, method_list.items) catch |err| switch (err) {
+        error.LocktimeDomain => return ParseError.LocktimeDomain,
         error.OutOfMemory => return error.OutOfMemory,
     };
 

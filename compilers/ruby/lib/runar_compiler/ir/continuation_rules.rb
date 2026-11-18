@@ -13,6 +13,9 @@ require_relative "../frontend/continuation_rules"
 # A = add_output reached}: +if+ unions its arms (a missing arm is identity), a
 # loop unions with skipping it, a method_call to a private method composes
 # with that method's exit states. Run after the N-101 stateful-scaffolding check.
+# D27 rides the same walk (bit D = update_prop since the last add_output): a
+# path whose last add_output is followed by an update_prop is refused with
+# D18's sibling text; D18 wins when a method has both.
 module RunarCompiler
   module IR
     module ContinuationRules
@@ -23,22 +26,23 @@ module RunarCompiler
         end
         (program.methods || []).each do |m|
           next if !m.is_public || m.name == "constructor"
-          next unless drops_continuation?(m, privates)
 
-          return Frontend::ContinuationRules.dropped_continuation_message(m.name)
+          case verdict(m, privates)
+          when :dropped then return Frontend::ContinuationRules.dropped_continuation_message(m.name)
+          when :dead_write then return Frontend::ContinuationRules.dead_state_write_message(m.name)
+          end
         end
         nil
       end
 
-      W = Frontend::ContinuationRules::W
-      A = Frontend::ContinuationRules::A
       ZERO = Frontend::ContinuationRules::ZERO
 
-      def self.drops_continuation?(method, privates)
-        return false unless declares_output?(method, privates)
+      # :dropped (D18), :dead_write (D27) or nil.
+      def self.verdict(method, privates)
+        return nil unless declares_output?(method, privates)
 
         exits = helper_exits(method, privates)
-        Frontend::ContinuationRules.dropped_state?(run(method.body || [], ZERO, privates, exits))
+        Frontend::ContinuationRules.verdict(run(method.body || [], ZERO, privates, exits))
       end
 
       # Any add_output / add_raw_output, at any depth, through method_calls.
@@ -102,10 +106,6 @@ module RunarCompiler
         exits
       end
 
-      def self.or_all(states, bits)
-        states.map { |x| x | bits }.to_set
-      end
-
       def self.run(bindings, states, privates, exits)
         s = states
         bindings.each do |b|
@@ -113,15 +113,10 @@ module RunarCompiler
           next if v.nil?
 
           case v.kind
-          when "update_prop" then s = or_all(s, W)
-          when "add_output" then s = or_all(s, A)
+          when "update_prop" then s = Frontend::ContinuationRules.write(s)
+          when "add_output" then s = Frontend::ContinuationRules.add_output(s)
           when "method_call"
-            if privates[v.method]
-              ex = exits[v.method] || ZERO
-              out = Set.new
-              s.each { |x| ex.each { |y| out.add(x | y) } }
-              s = out
-            end
+            s = Frontend::ContinuationRules.compose(s, exits[v.method] || ZERO) if privates[v.method]
           else
             if v.then.is_a?(Array) || v.else_.is_a?(Array)
               t = v.then.is_a?(Array) ? run(v.then, s, privates, exits) : s

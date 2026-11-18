@@ -685,6 +685,17 @@ For each method:
   be dropped (docs/language-reference.md, "A state write on a path with no
   addOutput"). The `--ir` path re-derives it per path from `update_prop` /
   `add_output` / `add_raw_output`.
+- D27: in the same kind of method, refuse a path that writes a mutable property
+  after its last `addOutput` (a write no later `addOutput` on the path
+  observes): the script commits only the values its `addOutput` calls carry,
+  so the write never reaches the chain (docs/language-reference.md, "A state
+  write after the last addOutput"). D18 is reported instead when both apply.
+- D26: in every public method (stateless or stateful), refuse a path that
+  compares a locktime read (`extractLocktime`, `currentBlockHeight()`, through
+  locals, helper parameters and arithmetic) against a lower bound without an
+  asserted domain pin (`< 500000000n` for heights, `>= 500000000n` for
+  timestamps) on the same path (docs/language-reference.md, "A locktime gate
+  without a domain pin"). The `--ir` path re-derives it from the ANF.
 - #199 (warning only): a `StatefulSmartContract` none of whose public methods is
   terminal or calls `addOutput` / `addRawOutput` can never release its satoshis.
 

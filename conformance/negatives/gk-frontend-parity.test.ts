@@ -33,6 +33,12 @@ import { isCiEnv } from '../env.js';
  *   `.RUNAR.SOL` file is still refused, and a valid TypeScript contract saved
  *   as `.runar.xyz` is refused with the shared unsupported-extension
  *   diagnostic. Each file gets its own directory (macOS is case-insensitive).
+ * - D27: a state write after a path's last addOutput (dead on chain) is
+ *   refused with D18's sibling text. Corpus: dropped-continuation-cases.json
+ *   (`refuse_after_last`).
+ * - D26: a lower-bound compare on extractLocktime with no asserted domain pin
+ *   on its path is refused; either pin (height or timestamp) is accepted.
+ *   Corpus: locktime-domain-cases.json.
  *
  * Does not prove: the library-API "no file name means TypeScript" rule (a CLI
  * always has a name; each tier's unit tests pin it), or that the accepted
@@ -356,9 +362,17 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
     }
   });
 
-  describe('D18: a state write with no state continuation is refused', () => {
+  describe('D18 / D27: a state write no state continuation carries is refused', () => {
     interface DcCase { name: string; file: string; src: string; error?: string }
-    const data = corpus<{ refuse: DcCase[]; accept: DcCase[] }>('dropped-continuation-cases.json');
+    const data = corpus<{ refuse: DcCase[]; refuse_after_last: DcCase[]; accept: DcCase[] }>(
+      'dropped-continuation-cases.json',
+    );
+    // D27 (same family): a write after the path's last addOutput is dead on chain.
+    const D27 = (m: string): string =>
+      `method '${m}' writes contract state after the last addOutput() on a path: a method that declares its own ` +
+      'outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path ' +
+      'the write never reaches the chain and a caller that tracks the final state builds a continuation the ' +
+      'script refuses. Pass the new value to addOutput(...) instead, or remove the write';
     // Pinned literally (the corpus could drift with it).
     const D18 = (m: string): string =>
       `method '${m}' writes contract state on a path that reaches no addOutput(): a method that declares ` +
@@ -367,8 +381,10 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
       '...) on every path that writes state, or stop writing state on a path meant to end the contract';
     it('the corpus carries the pinned text', () => {
       for (const c of data.refuse) expect(c.error, c.name).toBe(D18(/^method '(\w+)'/.exec(c.error!)![1]!));
+      for (const c of data.refuse_after_last) expect(c.error, c.name).toBe(D27(/^method '(\w+)'/.exec(c.error!)![1]!));
+      expect(data.refuse_after_last.length).toBeGreaterThanOrEqual(5);
     });
-    for (const c of data.refuse) {
+    for (const c of [...data.refuse, ...data.refuse_after_last]) {
       for (const tier of TIERS) {
         it(`${tier.id} refuses ${c.name} with the shared diagnostic`, () => {
           const { status, out, diag } = run(tier, writeFile(c.file, c.src));
@@ -400,6 +416,38 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
           expect(diag).toContain(D18(m));
         });
       }
+    }
+  });
+
+  describe('D26: a block-height locktime gate must pin the locktime domain', () => {
+    interface LtCase { name: string; file: string; src: string; error?: string }
+    const data = corpus<{ refuse: LtCase[]; accept: LtCase[] }>('locktime-domain-cases.json');
+    // Pinned literally (the corpus could drift with it).
+    const D26 = (m: string): string =>
+      `method '${m}' compares extractLocktime against a lower bound without pinning the locktime domain: ` +
+      'consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime ' +
+      'passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < ' +
+      '500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate';
+    it('the corpus carries the pinned text', () => {
+      expect(data.refuse.length).toBeGreaterThanOrEqual(10);
+      expect(data.accept.length).toBeGreaterThanOrEqual(10);
+      for (const c of data.refuse) expect(c.error, c.name).toBe(D26(/^method '(\w+)'/.exec(c.error!)![1]!));
+    });
+    for (const c of data.refuse) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${c.name} with the shared diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(c.file, c.src));
+          expect(status, `${tier.id} accepted ${c.name} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(c.error);
+        });
+      }
+    }
+    for (const c of data.accept) {
+      it(`every tier compiles ${c.name} to the same bytes`, () => {
+        const input = writeFile(c.file, c.src);
+        const hexes = new Set(TIERS.map((t) => compileHex(t, input)));
+        expect([...hexes]).toHaveLength(1);
+      });
     }
   });
 

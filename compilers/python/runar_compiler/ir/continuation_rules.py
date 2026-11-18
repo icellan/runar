@@ -8,17 +8,21 @@ through ``if`` arms, loop bodies and ``method_call``s to private methods. Mirror
 ``assertIrNoDroppedContinuation`` in
 packages/runar-compiler/src/passes/continuation-rules.ts. Run for
 StatefulSmartContract programs after the N-101 scaffolding check.
+
+D27 rides the same walk: a path whose last ``add_output`` is followed by an
+``update_prop`` is refused with D18's sibling text (D18 wins in a method that
+has both).
 """
 
 from __future__ import annotations
 
 from runar_compiler.frontend.continuation_rules import (
-    PATH_A,
-    PATH_W,
+    add_output,
     compose,
+    dead_state_write_message,
     dropped_continuation_message,
-    or_all,
-    paths_dropped,
+    verdict,
+    write,
 )
 from runar_compiler.ir.types import ANFBinding, ANFMethod, ANFProgram
 
@@ -28,12 +32,17 @@ def dropped_continuation_error(program: ANFProgram) -> str | None:
         m.name: m for m in program.methods if not m.is_public and m.name != "constructor"
     }
     for m in program.methods:
-        if m.is_public and m.name != "constructor" and _drops(m, privates):
+        if not m.is_public or m.name == "constructor":
+            continue
+        v = _verdict(m, privates)
+        if v == "dropped":
             return dropped_continuation_message(m.name)
+        if v == "dead-write":
+            return dead_state_write_message(m.name)
     return None
 
 
-def _drops(method: ANFMethod, privates: dict[str, ANFMethod]) -> bool:
+def _verdict(method: ANFMethod, privates: dict[str, ANFMethod]) -> str | None:
     """The per-path rule on ANF: update_prop = state write, add_output =
     addOutput, add_raw_output / add_output = a declared output (suppresses the
     auto-continuation). ``if`` unions its arms, a loop body unions with
@@ -56,7 +65,7 @@ def _drops(method: ANFMethod, privates: dict[str, ANFMethod]) -> bool:
         return False
 
     if not declares(method.body, set()):
-        return False
+        return None
 
     exits_of: dict[str, frozenset[int]] = {}
     in_progress: set[str] = set()
@@ -66,9 +75,9 @@ def _drops(method: ANFMethod, privates: dict[str, ANFMethod]) -> bool:
         for b in bindings or []:
             v = b.value
             if v.kind == "update_prop":
-                s = or_all(s, PATH_W)
+                s = write(s)
             elif v.kind == "add_output":
-                s = or_all(s, PATH_A)
+                s = add_output(s)
             elif v.kind == "method_call":
                 t = privates.get(v.method or "")
                 if t is not None:
@@ -90,4 +99,4 @@ def _drops(method: ANFMethod, privates: dict[str, ANFMethod]) -> bool:
                 s = s | run(v.body, s)
         return s
 
-    return paths_dropped(run(method.body, frozenset({0})))
+    return verdict(run(method.body, frozenset({0})))

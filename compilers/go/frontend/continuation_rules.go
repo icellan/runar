@@ -19,6 +19,12 @@ import "fmt"
 // state, so a path that writes state and reaches no addOutput drops its write
 // and the contract's value leaves with the spend. A path that writes nothing
 // is terminal by design and is accepted.
+//
+// D27 (error, typecheck), PER PATH, same family: in such a method a state
+// write after the path's last addOutput is dead on chain (the script commits
+// only the values its addOutput calls carry), so an SDK that builds the
+// continuation from the final state is refused on every honest call. D18 wins
+// when a method has both.
 
 // ReleaseTrapMessage is the shared #199 warning text.
 func ReleaseTrapMessage(contract string) string {
@@ -39,11 +45,23 @@ func DroppedContinuationMessage(method string) string {
 		method)
 }
 
-// Path-state bits: state written / addOutput reached. A set of these (at most
-// four) flows through a method body.
+// DeadStateWriteMessage is the shared D27 error text (D18's sibling).
+func DeadStateWriteMessage(method string) string {
+	return fmt.Sprintf(
+		"method '%s' writes contract state after the last addOutput() on a path: a method that declares its own "+
+			"outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the "+
+			"write never reaches the chain and a caller that tracks the final state builds a continuation the script "+
+			"refuses. Pass the new value to addOutput(...) instead, or remove the write",
+		method)
+}
+
+// Path-state bits: state written / addOutput reached / state written since
+// the path's last addOutput (D27; an addOutput clears it). A set of these (at
+// most eight) flows through a method body.
 const (
 	pathW = 1
 	pathA = 2
+	pathD = 4
 )
 
 type pathSet map[int]bool
@@ -75,11 +93,33 @@ func (s pathSet) union(o pathSet) pathSet {
 	return out
 }
 
+// write: a state write sets W and D.
+func (s pathSet) write() pathSet { return s.orAll(pathW | pathD) }
+
+// addOutput: sets A and clears D.
+func (s pathSet) addOutput() pathSet {
+	out := pathSet{}
+	for x := range s {
+		out[(x|pathA)&^pathD] = true
+	}
+	return out
+}
+
+// PathThen runs a callee's exit state y after the caller's x: an addOutput in
+// the callee clears the caller's pending write.
+func PathThen(x, y int) int {
+	d := (x | y) & pathD
+	if y&pathA != 0 {
+		d = y & pathD
+	}
+	return ((x | y) &^ pathD) | d
+}
+
 func (s pathSet) compose(o pathSet) pathSet {
 	out := pathSet{}
 	for x := range s {
 		for y := range o {
-			out[x|y] = true
+			out[PathThen(x, y)] = true
 		}
 	}
 	return out
@@ -95,15 +135,44 @@ func pathsDropped(s pathSet) bool {
 	return false
 }
 
-// DropsContinuation is the D18 predicate, PER PATH: the method declares a
-// state output somewhere (so it gets no auto-continuation) and some path
-// through it writes state without reaching an addOutput. Mirrors
-// dropsContinuation / SourcePaths in continuation-rules.ts.
-func DropsContinuation(contract *ContractNode, method MethodNode, eff MethodEffects) bool {
-	if !eff.HasStateOutput {
-		return false
+// pathsDeadWrite: some path reached an addOutput and wrote state after its last one (D27).
+func pathsDeadWrite(s pathSet) bool {
+	for x := range s {
+		if x&pathA != 0 && x&pathD != 0 {
+			return true
+		}
 	}
-	return pathsDropped(newSourcePaths(contract).exits(method.Body))
+	return false
+}
+
+// D18 / D27 verdicts of a method's exit states (D18 wins when both apply).
+const (
+	VerdictDropped   = "dropped"
+	VerdictDeadWrite = "dead-write"
+)
+
+// PathVerdict is the D18 / D27 verdict of a set of exit states: VerdictDropped,
+// VerdictDeadWrite or "".
+func PathVerdict(s map[int]bool) string {
+	if pathsDropped(s) {
+		return VerdictDropped
+	}
+	if pathsDeadWrite(s) {
+		return VerdictDeadWrite
+	}
+	return ""
+}
+
+// ContinuationVerdict is the D18 + D27 predicate, PER PATH, in a method that
+// declares a state output somewhere (so it gets no auto-continuation):
+// VerdictDropped when some path writes state and reaches no addOutput, else
+// VerdictDeadWrite when some path writes state after its last addOutput, else
+// "". Mirrors continuationVerdict / SourcePaths in continuation-rules.ts.
+func ContinuationVerdict(contract *ContractNode, method MethodNode, eff MethodEffects) string {
+	if !eff.HasStateOutput {
+		return ""
+	}
+	return PathVerdict(newSourcePaths(contract).exits(method.Body))
 }
 
 type sourcePaths struct {
@@ -160,7 +229,7 @@ func (sp *sourcePaths) stmt(st Statement, states pathSet) (pathSet, pathSet) {
 		out := sp.expr(s.Target, states)
 		out = sp.expr(s.Value, out)
 		if sp.writesMutable(s.Target) {
-			out = out.orAll(pathW)
+			out = out.write()
 		}
 		return out, none
 	case ExpressionStmt:
@@ -214,13 +283,13 @@ func (sp *sourcePaths) expr(e Expression, states pathSet) pathSet {
 	case IncrementExpr:
 		s := sp.expr(x.Operand, states)
 		if sp.writesMutable(x.Operand) {
-			s = s.orAll(pathW)
+			s = s.write()
 		}
 		return s
 	case DecrementExpr:
 		s := sp.expr(x.Operand, states)
 		if sp.writesMutable(x.Operand) {
-			s = s.orAll(pathW)
+			s = s.write()
 		}
 		return s
 	case CallExpr:
@@ -241,7 +310,7 @@ func (sp *sourcePaths) expr(e Expression, states pathSet) pathSet {
 			name = c.Name
 		}
 		if member && name == "addOutput" {
-			return s.orAll(pathA)
+			return s.addOutput()
 		}
 		if helper, ok := sp.privates[name]; ok && name != "" {
 			return s.compose(sp.helper(helper))

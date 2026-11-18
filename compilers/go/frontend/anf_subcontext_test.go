@@ -98,8 +98,9 @@ class NestedPay extends StatefulSmartContract {
   }
 
   public topLevel(amt: bigint): void {
-    this.pay(amt);
+    // The write precedes the paying call: D27 refuses a write after a path's last addOutput.
     this.count = this.count + 1n;
+    this.pay(amt);
   }
 
   public nested(amt: bigint, flag: bigint): void {
@@ -194,8 +195,9 @@ class NestedAlias extends StatefulSmartContract {
   }
 
   public go(a: bigint, f: bigint): void {
-    this.payIf(a, f);
+    // The write precedes the paying call: D27 refuses a write after a path's last addOutput.
     this.count = this.count + 1n;
+    this.payIf(a, f);
   }
 }
 `

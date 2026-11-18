@@ -260,6 +260,7 @@ contract Auction is StatefulSmartContract {
     function close(Sig sig) public {
         require(checkSig(sig, this.auctioneer));
         require(extractLocktime(this.txPreimage) >= this.deadline);
+        require(extractLocktime(this.txPreimage) < 500000000);
     }
 }
 ```

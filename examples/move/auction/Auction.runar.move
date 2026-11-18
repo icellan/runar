@@ -94,6 +94,9 @@ module Auction {
 
         // Enforce that the deadline has passed: nLockTime must be >= deadline
         assert!(extract_locktime(contract.tx_preimage) >= contract.deadline, 0);
+        // ...and that the locktime is a block height: consensus reads an nLockTime of
+        // 500000000 or more as a Unix timestamp, which passes the height gate above at once.
+        assert!(extract_locktime(contract.tx_preimage) < 500000000, 0);
 
         // ...and that consensus actually enforces that nLockTime. A transaction
         // whose inputs are all final (nSequence 0xffffffff) is mineable at any height

@@ -646,9 +646,28 @@ public final class Typecheck {
                 // D18: in a method that declares its own outputs, a path that
                 // writes state and reaches no addOutput drops its write (see
                 // ContinuationRules).
-                if (m.visibility() == Visibility.PUBLIC && ContinuationRules.dropsContinuation(m, contract)) {
+                ContinuationRules.Verdict continuation = m.visibility() == Visibility.PUBLIC
+                    ? ContinuationRules.continuationVerdict(m, contract)
+                    : ContinuationRules.Verdict.NONE;
+                if (continuation == ContinuationRules.Verdict.DROPPED) {
                     errors.add(format(ContinuationRules.droppedContinuationMessage(m.name()), m.sourceLocation()));
                 }
+                // D27: a write after a path's last addOutput is dead on chain
+                // (see ContinuationRules).
+                if (continuation == ContinuationRules.Verdict.DEAD_WRITE) {
+                    errors.add(format(ContinuationRules.deadStateWriteMessage(m.name()), m.sourceLocation()));
+                }
+            }
+
+            // D26: a lower-bound locktime gate needs an asserted domain pin on
+            // its path (LocktimeDomain), in stateless and stateful contracts
+            // alike. Here, beside D18 / D27, so a contract's other typecheck
+            // errors (D14's unchecked-preimage extractor among them) are still
+            // reported with it.
+            if (m.visibility() == Visibility.PUBLIC
+                && LocktimeDomain.contractReadsLocktime(contract)
+                && LocktimeDomain.hasUnpinnedLocktimeGate(contract, m)) {
+                errors.add(format(LocktimeDomain.locktimeDomainMessage(m.name()), m.sourceLocation()));
             }
         }
 

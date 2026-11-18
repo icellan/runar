@@ -912,6 +912,11 @@ at height T + 1000 simply writes a stale locktime. Closing a time window needs a
 time source the contract reads as state, not the spending transaction's own
 locktime.
 
+A `>=` gate also needs its domain pinned: consensus reads an `nLockTime` of
+500000000 or more as a Unix timestamp, so `extractLocktime(p) >= H` for a
+height H passes for any such locktime unless the same path asserts
+`extractLocktime(p) < 500000000n` (D26; `>= 500000000n` for a timestamp gate).
+
 The cross-covenant pattern these compose into is documented in
 [`docs/cross-covenant-pattern.md`](../docs/cross-covenant-pattern.md), and the
 directives that change what a covenant commits to are in

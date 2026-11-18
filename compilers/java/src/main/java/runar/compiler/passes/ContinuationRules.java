@@ -70,50 +70,94 @@ public final class ContinuationRules {
             + "writing state on a path meant to end the contract";
     }
 
+    /** D27: the shared error text (D18's sibling, same family). */
+    public static String deadStateWriteMessage(String method) {
+        return "method '" + method + "' writes contract state after the last addOutput() on a path: a method that declares its own "
+            + "outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the "
+            + "write never reaches the chain and a caller that tracks the final state builds a continuation the script "
+            + "refuses. Pass the new value to addOutput(...) instead, or remove the write";
+    }
+
+    /** D18 / D27 verdict of a method's exit states: D18 wins when both apply. */
+    enum Verdict { NONE, DROPPED, DEAD_WRITE }
+
+    static Verdict verdict(int states) {
+        if (dropped(states)) return Verdict.DROPPED;
+        if (deadWrite(states)) return Verdict.DEAD_WRITE;
+        return Verdict.NONE;
+    }
+
     /**
-     * D18, per path: the method declares a state output somewhere (any
-     * addOutput / addRawOutput, so it gets no auto-continuation) and some path
-     * through it writes state without reaching an addOutput.
+     * D18 + D27, per path, in a method that declares a state output somewhere
+     * (any addOutput / addRawOutput, so it gets no auto-continuation): DROPPED
+     * when some path writes state without reaching an addOutput, else
+     * DEAD_WRITE when some path writes state after its last addOutput.
      */
-    static boolean dropsContinuation(MethodNode m, ContractNode contract) {
-        if (!AnfLower.methodHasAddOutput(m, contract)) return false;
+    static Verdict continuationVerdict(MethodNode m, ContractNode contract) {
+        if (!AnfLower.methodHasAddOutput(m, contract)) return Verdict.NONE;
         SourcePaths p = new SourcePaths(contract);
         p.prepare(m.body());
-        return dropped(p.exits(m.body()));
+        return verdict(p.exits(m.body()));
     }
 
     // ------------------------------------------------------------------
     // Path states
     // ------------------------------------------------------------------
     //
-    // A path state is two bits, W (state written) and A (addOutput reached);
-    // a set of the four possible states is a 4-bit mask (bit x set iff state x
-    // is live). Every call in an expression runs; if unions its arms; a loop
-    // unions skipping it; a private helper call composes the caller's states
-    // with the helper's exit states (fallthrough + return).
+    // A path state is three bits, W (state written), A (addOutput reached)
+    // and D (state written since the path's last addOutput; D27); a set of the
+    // eight possible states is an 8-bit mask (bit x set iff state x is live).
+    // A write sets W|D, an addOutput sets A and clears D. Every call in an
+    // expression runs; if unions its arms; a loop unions skipping it; a
+    // private helper call composes the caller's states with the helper's exit
+    // states (fallthrough + return) by then(): an addOutput in the helper
+    // clears the caller's D.
 
     static final int W = 1;
     static final int A = 2;
+    static final int D = 4;
     /** The single fresh path {0}. */
     static final int ZERO = 1;
 
-    /** Every live state x becomes x | bits. */
-    static int orAll(int states, int bits) {
+    /** A state write on every live path: W|D. */
+    static int write(int states) {
         int out = 0;
-        for (int x = 0; x < 4; x++) if ((states >> x & 1) != 0) out |= 1 << (x | bits);
+        for (int x = 0; x < 8; x++) if ((states >> x & 1) != 0) out |= 1 << (x | W | D);
         return out;
     }
 
-    /** {x | y : x in states, y in exits}. */
+    /** An addOutput on every live path: A set, D cleared. */
+    static int addOutput(int states) {
+        int out = 0;
+        for (int x = 0; x < 8; x++) if ((states >> x & 1) != 0) out |= 1 << ((x | A) & ~D);
+        return out;
+    }
+
+    /** A callee's exit state y run after the caller's x. */
+    private static int then(int x, int y) {
+        return ((x | y) & ~D) | ((y & A) != 0 ? (y & D) : ((x | y) & D));
+    }
+
+    /** {then(x, y) : x in states, y in exits}. */
     static int compose(int states, int exits) {
         int out = 0;
-        for (int y = 0; y < 4; y++) if ((exits >> y & 1) != 0) out |= orAll(states, y);
+        for (int x = 0; x < 8; x++) {
+            if ((states >> x & 1) == 0) continue;
+            for (int y = 0; y < 8; y++) if ((exits >> y & 1) != 0) out |= 1 << then(x, y);
+        }
         return out;
     }
 
-    /** Some path wrote state (W) and reached no addOutput (not A): state 1. */
+    /** Some path wrote state (W) and reached no addOutput (not A). */
     static boolean dropped(int states) {
-        return (states & (1 << W)) != 0;
+        for (int x = 0; x < 8; x++) if ((states >> x & 1) != 0 && (x & W) != 0 && (x & A) == 0) return true;
+        return false;
+    }
+
+    /** D27: some path reached an addOutput (A) and wrote state after its last one (D). */
+    static boolean deadWrite(int states) {
+        for (int x = 0; x < 8; x++) if ((states >> x & 1) != 0 && (x & A) != 0 && (x & D) != 0) return true;
+        return false;
     }
 
     /** Port of continuation-rules.ts SourcePaths over this tier's AST. */
@@ -197,7 +241,7 @@ public final class ContinuationRules {
         private Flow stmt(Statement st, int states) {
             if (st instanceof AssignmentStatement a) {
                 int s = expr(a.value(), expr(a.target(), states));
-                if (writesMutable(a.target())) s = orAll(s, W);
+                if (writesMutable(a.target())) s = write(s);
                 return new Flow(s, 0);
             }
             if (st instanceof ExpressionStatement es) return new Flow(expr(es.expression(), states), 0);
@@ -232,17 +276,17 @@ public final class ContinuationRules {
             if (e == null) return states;
             if (e instanceof IncrementExpr ie) {
                 int s = expr(ie.operand(), states);
-                return writesMutable(ie.operand()) ? orAll(s, W) : s;
+                return writesMutable(ie.operand()) ? write(s) : s;
             }
             if (e instanceof DecrementExpr de) {
                 int s = expr(de.operand(), states);
-                return writesMutable(de.operand()) ? orAll(s, W) : s;
+                return writesMutable(de.operand()) ? write(s) : s;
             }
             if (e instanceof CallExpr call) {
                 int s = states;
                 if (call.callee() != null && !(call.callee() instanceof Identifier)) s = expr(call.callee(), s);
                 for (Expression a : call.args()) s = expr(a, s);
-                if (isAddOutputCallee(call.callee())) return orAll(s, A);
+                if (isAddOutputCallee(call.callee())) return addOutput(s);
                 MethodNode helper = AnfLower.lookupPrivateMethod(contract, calleeName(call.callee()));
                 if (helper == null) return s;
                 Integer ex = exits.get(helper.name());
@@ -444,16 +488,20 @@ public final class ContinuationRules {
         }
         for (AnfMethod m : methods) {
             if (!m.isPublic() || "constructor".equals(m.name())) continue;
-            if (irDropsContinuation(m, privates)) {
+            Verdict v = irContinuationVerdict(m, privates);
+            if (v == Verdict.DROPPED) {
                 throw new RuntimeException("IR validation: " + droppedContinuationMessage(m.name()));
+            }
+            if (v == Verdict.DEAD_WRITE) {
+                throw new RuntimeException("IR validation: " + deadStateWriteMessage(m.name()));
             }
         }
     }
 
-    private static boolean irDropsContinuation(AnfMethod method, Map<String, AnfMethod> privates) {
-        if (!irDeclaresOutput(method, privates)) return false;
+    private static Verdict irContinuationVerdict(AnfMethod method, Map<String, AnfMethod> privates) {
+        if (!irDeclaresOutput(method, privates)) return Verdict.NONE;
         Map<String, Integer> exits = irHelperExits(method, privates);
-        return dropped(irRun(method.body(), ZERO, privates, exits));
+        return verdict(irRun(method.body(), ZERO, privates, exits));
     }
 
     /** Any add_output / add_raw_output at any depth, through method_calls (explicit work list). */
@@ -540,8 +588,8 @@ public final class ContinuationRules {
         if (bindings == null) return s;
         for (AnfBinding b : bindings) {
             Object v = b.value();
-            if (v instanceof UpdateProp) s = orAll(s, W);
-            else if (v instanceof AddOutput) s = orAll(s, A);
+            if (v instanceof UpdateProp) s = write(s);
+            else if (v instanceof AddOutput) s = addOutput(s);
             else if (v instanceof MethodCall mc) {
                 if (privates.containsKey(mc.method())) s = compose(s, exits.getOrDefault(mc.method(), ZERO));
             } else if (v instanceof If iff) {

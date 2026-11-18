@@ -226,7 +226,8 @@ describe('W1 — the four 32-bit preimage fields decode UNSIGNED', () => {
 
 /**
  * The report's time-locked vault, verbatim, including the finality guard the
- * compiler's own #131 diagnostic recommends. `checkPreimage` binds `p` to the
+ * compiler's own #131 diagnostic recommends, plus the timestamp-domain pin D26
+ * requires (DEADLINE is a Unix time). `checkPreimage` binds `p` to the
  * spending transaction on chain (BUG-100 construction), so the locktime and
  * sequence the script reads are the ones the node will see.
  */
@@ -247,6 +248,7 @@ export class W1Vault extends SmartContract {
     assert(checkPreimage(p));
     assert(checkSig(sig, this.beneficiary));
     assert(extractLocktime(p) >= this.deadline);
+    assert(extractLocktime(p) >= 500000000n);
     assert(extractSequence(p) < 0xffffffffn);
   }
 }

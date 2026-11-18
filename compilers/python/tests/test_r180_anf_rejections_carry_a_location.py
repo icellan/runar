@@ -97,8 +97,8 @@ export class LoopOp extends SmartContract {
 }
 """
 
-# Both arms declare an output, so every path that writes `count` reaches an
-# addOutput and typecheck's D18 rule passes; the then-arm's local assignments
+# Both arms declare an output after the one write to `count`, so every path
+# that writes reaches an addOutput (D18) and none writes after it (D27); the then-arm's local assignments
 # still reach the ANF "both declares outputs" rejection this case is about.
 COND_OUT = """import { StatefulSmartContract, assert } from 'runar-lang';
 
@@ -113,6 +113,7 @@ export class CondOut extends StatefulSmartContract {
   public go(v: bigint) {
     let na: bigint = 0n;
     let nb: bigint = 0n;
+    this.count = v;
     if (v > 1n) {
       na = v;
       nb = v + 1n;
@@ -120,8 +121,7 @@ export class CondOut extends StatefulSmartContract {
     } else {
       this.addOutput(1000n, this.count);
     }
-    this.count = na + nb;
-    assert(true);
+    assert(na + nb >= 0n);
   }
 }
 """

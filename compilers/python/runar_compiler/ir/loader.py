@@ -15,6 +15,7 @@ from .stateful_scaffold import stateful_scaffold_error
 from .continuation_rules import dropped_continuation_error
 from .synthetic_array_chain import assert_synthetic_array_chains
 from .preimage_rules import assert_preimage_rules, assert_unique_method_names
+from .locktime_domain import locktime_domain_error
 from .rabin_key_provenance import assert_rabin_key_provenance
 from .types import (
     ANFBinding,
@@ -150,6 +151,12 @@ def load_ir(source: str) -> ANFProgram:
     # D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
     # diagnostics, 7 tiers; see preimage_rules.py).
     assert_preimage_rules(program)
+
+    # D26: IR input skips typecheck's locktime-domain rule (stateless and
+    # stateful programs alike; see locktime_domain.py).
+    d26_error = locktime_domain_error(program)
+    if d26_error:
+        raise ValueError(f"IR validation: {d26_error}")
 
     return program
 

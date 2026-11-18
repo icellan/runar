@@ -722,6 +722,42 @@ is accepted (for example `if (c) { this.addRawOutput(...) } else {
 this.addOutput(sats, this.count + 1n) }`); `addDataOutput` keeps the default
 continuation and is no trigger.
 
+#### A state write after the last addOutput (error, D27)
+
+In the same kind of method the script commits only the values passed to its
+`addOutput` calls. A write that no later `addOutput` on its path observes (a
+write after the path's last `addOutput`, directly or in a helper) never reaches
+the chain, and an SDK that builds the next state from the final property values
+would build a continuation the script refuses. Every compiler refuses such a
+path (on the `--ir` path too):
+
+```
+method 'm' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write
+```
+
+Pass the new value to `addOutput(...)` instead. A write between two
+`addOutput` calls is observed by the second one and is accepted.
+
+#### A locktime gate without a domain pin (error, D26)
+
+Consensus reads an `nLockTime` below 500000000 as a block height and one at or
+above it as a Unix timestamp. A height gate `extractLocktime(p) >= deadline` is
+therefore passed at once by any locktime of 500000000 or more. Every path
+through a public method that compares a locktime read (`extractLocktime`,
+`currentBlockHeight()`, a local or helper parameter bound to one, or a value
+computed from one) against a lower bound must also assert its domain:
+`assert(extractLocktime(p) < 500000000n)` for a height gate, or
+`assert(extractLocktime(p) >= 500000000n)` for a timestamp gate. The pin
+counts only as an asserted condition or a top-level `&&` conjunct of one, on
+a plain read; a pin on a computed value, under `!` or `||`, or on the other
+branch does not count. A lower bound that is itself a timestamp literal
+(`>= 1700000000n`) pins the domain on its own, and a vacuous bound (`>= 0n`)
+is no gate. Every compiler refuses an unpinned path (on the `--ir` path too):
+
+```
+method 'm' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate
+```
+
 ### Oracle
 
 | Function | Signature | Description |

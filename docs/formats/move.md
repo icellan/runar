@@ -349,6 +349,7 @@ module Auction {
     public fun close(contract: &mut Auction, sig: Sig) {
         assert!(check_sig(sig, contract.auctioneer), 0);
         assert!(extract_locktime(contract.tx_preimage) >= contract.deadline, 0);
+        assert!(extract_locktime(contract.tx_preimage) < 500000000, 0);
     }
 }
 ```

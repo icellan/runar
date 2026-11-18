@@ -648,6 +648,7 @@ func (c *Auction) Bid(bidder runar.PubKey, bidAmount int64) {
 func (c *Auction) Close(sig runar.Sig) {
     runar.Assert(runar.CheckSig(sig, c.Auctioneer))
     runar.Assert(runar.ExtractLocktime(c.TxPreimage) >= c.Deadline)
+    runar.Assert(runar.ExtractLocktime(c.TxPreimage) < 500000000)
 }
 ```
 

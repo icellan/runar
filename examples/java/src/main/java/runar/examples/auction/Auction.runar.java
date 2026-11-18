@@ -90,6 +90,9 @@ class Auction extends StatefulSmartContract {
     void close(Sig sig) {
         assertThat(checkSig(sig, this.auctioneer));
         assertThat(Bigint.of(extractLocktime(this.txPreimage)).ge(this.deadline));
+        // ...and that the locktime is a block height: consensus reads an nLockTime of
+        // 500000000 or more as a Unix timestamp, which passes the height gate above at once.
+        assertThat(Bigint.of(extractLocktime(this.txPreimage)).lt(Bigint.of(500000000L)));
         // ...and that consensus actually enforces that nLockTime. A transaction
         // whose inputs are all final (nSequence 0xffffffff) is mineable at any
         // height with nLockTime ignored, so without this the assert above is

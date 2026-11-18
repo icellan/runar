@@ -95,6 +95,9 @@ func (c *Auction) Close(sig runar.Sig) {
 
 	// Enforce that the deadline has passed: nLockTime must be >= Deadline
 	runar.Assert(runar.ExtractLocktime(c.TxPreimage) >= c.Deadline)
+	// ...and that the locktime is a block height: consensus reads an nLockTime of
+	// 500000000 or more as a Unix timestamp, which passes the height gate above at once.
+	runar.Assert(runar.ExtractLocktime(c.TxPreimage) < 500000000)
 
 	// ...and that consensus actually enforces that nLockTime. A transaction
 	// whose inputs are all final (nSequence 0xffffffff) is mineable at any height

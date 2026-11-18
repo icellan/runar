@@ -1,4 +1,4 @@
-//! D18 on the `--ir` path. `--ir` skips typecheck, where the source path
+//! D18 (and D27, a write after a path's last add_output) on the `--ir` path. `--ir` skips typecheck, where the source path
 //! refuses a public stateful method that declares its own outputs and has a
 //! path that writes state but reaches no `addOutput` (that write would be
 //! dropped and the contract's satoshis would leave with the spend).
@@ -10,7 +10,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{ANFBinding, ANFMethod, ANFProgram, ANFValue};
-use crate::frontend::continuation_rules::{dropped_continuation_message, PathSet, PATH_A, PATH_W};
+use crate::frontend::continuation_rules::{
+    dead_state_write_message, dropped_continuation_message, ContinuationVerdict, PathSet,
+};
 
 pub fn assert_no_dropped_continuation(program: &ANFProgram) -> Result<(), String> {
     let privates: HashMap<&str, &ANFMethod> = program
@@ -20,24 +22,29 @@ pub fn assert_no_dropped_continuation(program: &ANFProgram) -> Result<(), String
         .map(|m| (m.name.as_str(), m))
         .collect();
     for m in &program.methods {
-        if m.is_public && m.name != "constructor" && drops(m, &privates) {
-            return Err(dropped_continuation_message(&m.name));
+        if !m.is_public || m.name == "constructor" {
+            continue;
+        }
+        match verdict(m, &privates) {
+            Some(ContinuationVerdict::Dropped) => return Err(dropped_continuation_message(&m.name)),
+            Some(ContinuationVerdict::DeadWrite) => return Err(dead_state_write_message(&m.name)),
+            None => {}
         }
     }
     Ok(())
 }
 
-/// The per-path rule on ANF: `update_prop` = state write, `add_output` =
+/// The per-path D18 / D27 rule on ANF: `update_prop` = state write, `add_output` =
 /// addOutput, `add_raw_output` / `add_output` = a declared output (suppresses
 /// the auto-continuation). `if` unions its arms, a loop body unions with
 /// skipping it, a `method_call` to a private method composes with that
 /// method's exits.
-fn drops(method: &ANFMethod, privates: &HashMap<&str, &ANFMethod>) -> bool {
+fn verdict(method: &ANFMethod, privates: &HashMap<&str, &ANFMethod>) -> Option<ContinuationVerdict> {
     if !declares(&method.body, privates, &mut HashSet::new()) {
-        return false;
+        return None;
     }
     let mut exits_of = HashMap::new();
-    run(&method.body, PathSet::FRESH, privates, &mut exits_of, &mut HashSet::new()).dropped()
+    run(&method.body, PathSet::FRESH, privates, &mut exits_of, &mut HashSet::new()).verdict()
 }
 
 fn declares<'a>(bindings: &'a [ANFBinding], privates: &HashMap<&str, &'a ANFMethod>, seen: &mut HashSet<&'a str>) -> bool {
@@ -65,8 +72,8 @@ fn run<'a>(
     let mut s = states;
     for b in bindings {
         match &b.value {
-            ANFValue::UpdateProp { .. } => s = s.or_all(PATH_W),
-            ANFValue::AddOutput { .. } => s = s.or_all(PATH_A),
+            ANFValue::UpdateProp { .. } => s = s.write(),
+            ANFValue::AddOutput { .. } => s = s.add_output(),
             ANFValue::MethodCall { method, .. } => {
                 if let Some(t) = privates.get(method.as_str()) {
                     let name = t.name.as_str();

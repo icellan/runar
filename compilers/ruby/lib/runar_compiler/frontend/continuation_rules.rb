@@ -34,6 +34,14 @@ module RunarCompiler
           "writing state on a path meant to end the contract"
       end
 
+      # D27: the shared error text (D18's sibling, same family).
+      def self.dead_state_write_message(method)
+        "method '#{method}' writes contract state after the last addOutput() on a path: a method that declares its own " \
+          "outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the " \
+          "write never reaches the chain and a caller that tracks the final state builds a continuation the script " \
+          "refuses. Pass the new value to addOutput(...) instead, or remove the write"
+      end
+
       def self.fe
         require_relative "anf_lower"
         RunarCompiler::Frontend
@@ -90,17 +98,20 @@ module RunarCompiler
         fe.send(:_child_expressions, expr).any? { |e| expr_writes_element?(e, mutable_props, contract, q) }
       end
 
-      # D18, per path: the method declares a state output somewhere (any
-      # addOutput / addRawOutput, so it gets no auto-continuation) and some path
-      # through it writes state without reaching an addOutput.
-      def self.drops_continuation?(method, contract)
-        return false unless fe.send(:_method_has_add_output, method, contract)
+      # D18 + D27, per path, in a method that declares a state output
+      # somewhere (any addOutput / addRawOutput, so it gets no
+      # auto-continuation): :dropped when some path writes state without
+      # reaching an addOutput, else :dead_write when some path writes state
+      # after its last addOutput (D27), else nil.
+      def self.continuation_verdict(method, contract)
+        return nil unless fe.send(:_method_has_add_output, method, contract)
 
-        SourcePaths.new(contract).dropped?(method.body || [])
+        SourcePaths.new(contract).verdict(method.body || [])
       end
 
       W = 1 # path wrote state
       A = 2 # path reached addOutput
+      D = 4 # path wrote state since its last addOutput (D27; addOutput clears it)
       ZERO = Set[0].freeze
 
       # True iff some path state wrote state and reached no addOutput.
@@ -108,8 +119,42 @@ module RunarCompiler
         states.any? { |x| (x & W) != 0 && (x & A).zero? }
       end
 
-      # Port of continuation-rules.ts SourcePaths. A path state is two bits
-      # {W, A}; a set of at most four flows through a body. Every call in an
+      # D27: some path reached an addOutput and wrote state after its last one.
+      def self.dead_write_state?(states)
+        states.any? { |x| (x & A) != 0 && (x & D) != 0 }
+      end
+
+      # D18 wins when both apply.
+      def self.verdict(states)
+        return :dropped if dropped_state?(states)
+        return :dead_write if dead_write_state?(states)
+
+        nil
+      end
+
+      def self.write(states)
+        states.map { |x| x | W | D }.to_set
+      end
+
+      def self.add_output(states)
+        states.map { |x| (x | A) & ~D }.to_set
+      end
+
+      # Run a callee's exit state +y+ after the caller's +x+: an addOutput in
+      # the callee clears the caller's pending write.
+      def self.then_state(x, y)
+        pending = (y & A) != 0 ? (y & D) : ((x | y) & D)
+        ((x | y) & ~D) | pending
+      end
+
+      def self.compose(xs, ys)
+        out = Set.new
+        xs.each { |x| ys.each { |y| out.add(then_state(x, y)) } }
+        out
+      end
+
+      # Port of continuation-rules.ts SourcePaths. A path state is three bits
+      # {W, A, D}; a set of at most eight flows through a body. Every call in an
       # expression runs; +if+ unions its arms; a loop unions skipping it; a
       # private helper call composes the caller's states with the helper's
       # exit states (fallthrough + return). Callee matching mirrors
@@ -126,9 +171,9 @@ module RunarCompiler
           @missing = nil
         end
 
-        def dropped?(body)
+        def verdict(body)
           prepare(body)
-          ContinuationRules.dropped_state?(exits(body))
+          ContinuationRules.verdict(exits(body))
         end
 
         # Exit states of a body entered with a fresh path.
@@ -185,7 +230,7 @@ module RunarCompiler
           case st
           when AssignmentStmt
             s = expr(st.value, expr(st.target, states))
-            s = or_all(s, W) if writes_mutable?(st.target)
+            s = ContinuationRules.write(s) if writes_mutable?(st.target)
             [s, none]
           when ExpressionStmt then [expr(st.expr, states), none]
           when VariableDeclStmt then [expr(st.init, states), none]
@@ -211,20 +256,16 @@ module RunarCompiler
           t.is_a?(PropertyAccessExpr) && @mutable.include?(t.property)
         end
 
-        def or_all(states, bits)
-          states.map { |x| x | bits }.to_set
-        end
-
         def expr(e, states)
           case e
           when IncrementExpr, DecrementExpr
             s = expr(e.operand, states)
-            writes_mutable?(e.operand) ? or_all(s, W) : s
+            writes_mutable?(e.operand) ? ContinuationRules.write(s) : s
           when CallExpr
             s = states
             s = expr(e.callee, s) if e.callee && !e.callee.is_a?(Identifier)
             (e.args || []).each { |a| s = expr(a, s) }
-            return or_all(s, A) if add_output_callee?(e.callee)
+            return ContinuationRules.add_output(s) if add_output_callee?(e.callee)
 
             helper = ContinuationRules.fe.send(:_resolve_private_method, e.callee, @contract)
             return s if helper.nil?
@@ -234,9 +275,7 @@ module RunarCompiler
               @missing << helper if @missing
               ex = ZERO
             end
-            out = Set.new
-            s.each { |x| ex.each { |y| out.add(x | y) } }
-            out
+            ContinuationRules.compose(s, ex)
           when BinaryExpr then expr(e.right, expr(e.left, states))
           when UnaryExpr then expr(e.operand, states)
           when TernaryExpr

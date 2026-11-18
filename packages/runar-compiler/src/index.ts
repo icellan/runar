@@ -140,6 +140,7 @@ import { builtinArityViolation } from './ir/builtin-arity.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
 import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
 import { assertIrNoDroppedContinuation } from './passes/continuation-rules.js';
+import { assertIrLocktimeDomain } from './passes/locktime-domain.js';
 import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -695,6 +696,10 @@ export function compileFromANF(
   // property), GK-GAP-010 and D14 (extractors read only a checked preimage) are
   // re-derived on the ANF here; see ir-preimage-rules.ts for what ANF cannot carry.
   assertIrPreimageRules(anf);
+
+  // D26: IR input skips 02-validate's locktime-domain rule (stateless and
+  // stateful programs alike); see locktime-domain.ts.
+  assertIrLocktimeDomain(anf);
 
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.
