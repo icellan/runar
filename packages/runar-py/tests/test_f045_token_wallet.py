@@ -6,13 +6,13 @@ read for its supply and left unspent), and ``transfer`` built and discarded a
 preliminary tx and passed the Base58 recipient address verbatim as the 20-byte
 ``Addr`` argument.
 
-Oracle: bsv-sdk's ``Spend`` cannot replay a Rúnar OP_PUSH_TX covenant in this
-tier (see ``test_g1_raw_outputs_spend.py``), so the stateful token inputs are
-not script-executed here. Instead every signature the wallet's signer made for
+Oracle: every signature the wallet's signer made for
 a TOKEN input must have been computed over a tx whose BIP-143-relevant fields
 (version, every outpoint + sequence, every output, locktime) equal the
 broadcast tx's; BIP-143 reads nothing else except the subscript and amount,
-taken from the spent UTXO. The on-chain verdict for the same flow is proven by
+taken from the spent UTXO. (MockProvider also runs the token inputs through
+bsv-sdk ``Spend`` since bsv-sdk 2.5.0 fixed py-sdk#247, but this test asserts
+nothing about which inputs it executed.) The on-chain verdict for the same flow is proven by
 the TS/Go F-045 tests.
 
 Proves: each token-input signature covers the broadcast tx; merge spends both
