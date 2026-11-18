@@ -12,11 +12,10 @@ arity check, the SDK's ANF auto-state step receives the witness it holds (it
 used to fail closed with "requires witness bytes for '_prevOutScript_0'"),
 and the broadcast tx carries the witness push. The funding input is
 script-validated by bsv-sdk ``Spend``.
-Does not prove: the covenant input's script validity. The Python MockProvider
-counts OP_PUSH_TX covenant inputs as ``unvalidatable`` (bsv-sdk ``Spend``
-rejects the push-tx OP_CHECKSIGVERIFY; see ``_COVENANT_PUSHTX_MARKER`` in
-runar/sdk/provider.py), so a wrong witness would not be caught here. The TS
-tier's end-to-end test covers script validity. The ``_serialisedOutputs`` path
+Does not prove: the covenant input's script validity. MockProvider runs every
+known input through bsv-sdk ``Spend`` (covenant inputs too, since bsv-sdk 2.5.0
+fixed py-sdk#247), but this test only asserts that at least one input was
+validated. The TS tier's end-to-end test covers script validity. The ``_serialisedOutputs`` path
 is not exercised here either.
 """
 
