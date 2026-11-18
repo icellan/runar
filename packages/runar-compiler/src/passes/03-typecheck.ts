@@ -334,7 +334,9 @@ function checkExtractorsReadCheckedPreimages(contract: ContractNode): CompilerDi
     );
     const isChecked = (e: Expression, checked: ReadonlySet<string>): boolean => {
       if (e.kind === 'identifier') return checked.has(e.name) && !reassigned.has(e.name);
-      if (isConstructor || !implicitTxPreimage) return false;
+      // The implicit preimage only where no parameter of this method takes
+      // its name (reserved-name rules refuse one; never rely on that alone).
+      if (isConstructor || !implicitTxPreimage || m.params.some((p) => p.name === 'txPreimage')) return false;
       if (e.kind === 'property_access') return e.property === 'txPreimage';
       return (
         e.kind === 'member_expr' && e.property === 'txPreimage' &&

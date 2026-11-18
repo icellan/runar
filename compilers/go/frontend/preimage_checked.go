@@ -377,6 +377,14 @@ func checkExtractorsReadCheckedPreimages(contract *ContractNode) []Diagnostic {
 		loc := m.SourceLocation
 		reassigned := collectReassigned(m.Body, map[string]bool{})
 		ctxParams := map[string]bool{}
+		// The implicit preimage only where no parameter of this method takes
+		// its name (reserved-name rules refuse one; never rely on that alone).
+		implicitHere := implicit
+		for _, p := range m.Params {
+			if p.Name == "txPreimage" {
+				implicitHere = false
+			}
+		}
 		for _, p := range m.Params {
 			if ct, ok := p.Type.(CustomType); ok && ct.Name == "StatefulContext" {
 				ctxParams[p.Name] = true
@@ -389,10 +397,10 @@ func checkExtractorsReadCheckedPreimages(contract *ContractNode) []Diagnostic {
 			case *Identifier:
 				return x != nil && checked[x.Name] && !reassigned[x.Name]
 			case PropertyAccessExpr:
-				return implicit && x.Property == "txPreimage"
+				return implicitHere && x.Property == "txPreimage"
 			case MemberExpr:
 				if id, ok := x.Object.(Identifier); ok {
-					return implicit && x.Property == "txPreimage" && ctxParams[id.Name]
+					return implicitHere && x.Property == "txPreimage" && ctxParams[id.Name]
 				}
 			}
 			return false

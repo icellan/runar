@@ -118,6 +118,11 @@ final class ExtractorPreimage {
 
     private boolean isChecked(Expression e, Set<String> checked) {
         if (e instanceof Identifier id) return checked.contains(id.name()) && !reassigned.contains(id.name());
+        // The implicit preimage only where no parameter of this method takes
+        // its name (reserved-name rules refuse one; never rely on that alone).
+        for (ParamNode p : method.params()) {
+            if (p.name().equals("txPreimage")) return false;
+        }
         if (e instanceof PropertyAccessExpr pa) return implicit && pa.property().equals("txPreimage");
         if (e instanceof MemberExpr me) {
             return implicit && me.property().equals("txPreimage")

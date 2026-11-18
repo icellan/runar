@@ -427,6 +427,13 @@ const ExtractorCheck = struct {
         return null;
     }
 
+    /// The implicit preimage only where no parameter of this method takes its
+    /// name (reserved-name rules refuse one; never rely on that alone).
+    fn isOwnParam(self: *ExtractorCheck, name: []const u8) bool {
+        for (self.method.params) |p| if (std.mem.eql(u8, p.name, name)) return true;
+        return false;
+    }
+
     fn isCtxParam(self: *ExtractorCheck, name: []const u8) bool {
         for (self.method.params) |p| {
             if (std.mem.eql(u8, p.name, name) and std.mem.eql(u8, p.type_name, "StatefulContext")) return true;
@@ -437,7 +444,7 @@ const ExtractorCheck = struct {
     fn isChecked(self: *ExtractorCheck, e: Expression, checked: *const NameSet) bool {
         return switch (e) {
             .identifier => |n| checked.contains(n) and !self.reassigned.contains(n),
-            .property_access => |pa| self.implicit and std.mem.eql(u8, pa.property, "txPreimage") and
+            .property_access => |pa| self.implicit and !self.isOwnParam("txPreimage") and std.mem.eql(u8, pa.property, "txPreimage") and
                 (std.mem.eql(u8, pa.object, "this") or self.isCtxParam(pa.object)),
             else => false,
         };

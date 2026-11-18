@@ -354,7 +354,9 @@ def check_extractors_read_checked_preimages(contract: ContractNode) -> list[Diag
         def is_checked(e: Expression | None, checked: set[str]) -> bool:
             if isinstance(e, Identifier):
                 return e.name in checked and e.name not in reassigned
-            if not implicit:
+            # The implicit preimage only where no parameter of this method
+            # takes its name (reserved-name rules refuse one; never rely on that).
+            if not implicit or any(p.name == "txPreimage" for p in m.params):
                 return False
             if isinstance(e, PropertyAccessExpr):
                 return e.property == "txPreimage"

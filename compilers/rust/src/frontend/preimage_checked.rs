@@ -503,7 +503,9 @@ pub fn check_extractors_read_checked_preimages(contract: &ContractNode) -> Vec<D
             m.params.iter().filter(|p| is_preimage(&p.param_type)).map(|p| p.name.clone()).collect();
         let mut c = ExtractorCheck {
             privates: privates.clone(),
-            implicit,
+            // The implicit preimage only where no parameter of this method
+            // takes its name (reserved-name rules refuse one; never rely on that).
+            implicit: implicit && !m.params.iter().any(|p| p.name == "txPreimage"),
             reassigned,
             ctx_params,
             method: m,

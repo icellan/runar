@@ -534,12 +534,15 @@ module RunarCompiler
         reassigned = collect_reassigned.call(m.body)
         ctx_params = (m.params || []).select { |p| p.type.is_a?(CustomType) && p.type.name == "StatefulContext" }
                                      .map(&:name).to_set
+        # The implicit preimage only where no parameter of this method takes
+        # its name (reserved-name rules refuse one; never rely on that alone).
+        implicit_here = implicit && (m.params || []).none? { |p| p.name == "txPreimage" }
         checked_p = lambda do |e, checked|
           case e
           when Identifier then checked.include?(e.name) && !reassigned.include?(e.name)
-          when PropertyAccessExpr then implicit && e.property == "txPreimage"
+          when PropertyAccessExpr then implicit_here && e.property == "txPreimage"
           when MemberExpr
-            implicit && e.property == "txPreimage" && e.object.is_a?(Identifier) && ctx_params.include?(e.object.name)
+            implicit_here && e.property == "txPreimage" && e.object.is_a?(Identifier) && ctx_params.include?(e.object.name)
           else false
           end
         end
