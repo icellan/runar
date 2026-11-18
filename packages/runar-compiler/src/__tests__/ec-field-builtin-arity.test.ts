@@ -193,10 +193,15 @@ export class Probe extends SmartContract {
       // other eight digests are unchanged, which is the control that the guard
       // stayed confined to pNNNAdd (p384Add is not pinned here; p384Negate does
       // not take the guard).
-      ecAdd: '77e995b4398cf150ed9475ddeb8c6672fb414eda2b81d2ecb1fe2d6c0169f65f',
-      ecPointX: '53726c95e164ce324e32889a6934902ad9eadd2a25ba5bfe3c813408cbe3ca87',
-      p256Add: '9a8b40c3157ca3243a4673929d849ed129b3cbc2b9ca1e3df985f71d9a14fa54',
-      p384Negate: '84da75c3c5ceef1ada452b1156d1af554ce2d54f731d2527cd21bdd05775b7f2',
+      //
+      // PR B (#180/#213) re-stamps the four rows whose probe takes a Point /
+      // P256Point / P384Point parameter: each gains the entry width gate
+      // (`OP_DUP|OP_OVER OP_SIZE <64|96> OP_NUMEQUALVERIFY OP_DROP`, 6 B per
+      // param). Gate-only delta.
+      ecAdd: 'f0493e08930d2b679e6fe2a318ba485d4587f38c7c9f73d17cfd425953ba2744',
+      ecPointX: 'f895c19642c55e0b5dcca160378a5b59963f0bcc0d33281c1a5daf004332086a',
+      p256Add: '870d93eed7d18dd1edc557f384cdf1b8c5b5f50affe3fa7101add30795d35ed5',
+      p384Negate: '6c3946855242521b8cd0e1b1a8984c03997613ad77ec29756a024b9d26c9ff66',
       bn254FieldAdd: '06a7ea3aa48ecd1cdd81aa2865055861b90a246547e3da832b943eded50bcd7a',
       bn254FieldNeg: '10edf181d703fb76a418265963985ded6072cf9fef2a4b457ae73b392f84027a',
       bbFieldAdd: 'bfe2ec39a830c67de5dd52820078146d368123d98c29dea482e4f16c59117e10',

@@ -207,6 +207,15 @@ fn hexOf(a: std.mem.Allocator, source: []const u8, file_name: []const u8) ![]con
     return r.script_hex;
 }
 
+/// #180 / #213: the default-mode script carries the `_changePKH` entry width
+/// gate (`<d> OP_PICK OP_SIZE 0x14 OP_NUMEQUALVERIFY OP_DROP`, 7 bytes) right
+/// after the `61ab` prologue; a SINGLE continuation drops `_changePKH`, so it
+/// has none. Remove it so the two prologues line up byte-for-byte again.
+fn stripChangePkhGate(a: std.mem.Allocator, dflt: []const u8) ![]u8 {
+    try std.testing.expectEqualStrings("8201149d75", dflt[8..18]);
+    return std.mem.concat(a, u8, &.{ dflt[0..4], dflt[18..] });
+}
+
 /// Positions (in BYTES, not hex chars) where `mode` differs from `base`. Each
 /// difference must be exactly `from` -> `to`; anything else fails loudly rather
 /// than being counted, so an unrelated codegen change cannot be absorbed.
@@ -354,12 +363,14 @@ test "N-086 FixedArray SINGLE differs from default at exactly the binding-flag b
     // checked in place. The scripts must also differ in length (the dropped
     // change segment), which the drop would also erase.
     try std.testing.expect(single.len < dflt.len);
-    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 480], single[0 .. 2 * 480], "41", "43");
+    const dflt_ng = try stripChangePkhGate(a, dflt);
+    defer a.free(dflt_ng);
+    const moved = try flagSwapPositions(a, dflt_ng[0 .. 2 * 480], single[0 .. 2 * 480], "41", "43");
     defer a.free(moved);
     try std.testing.expectEqualSlices(usize, &[_]usize{388}, moved);
     try std.testing.expectEqualStrings("01437e21038ff83d8cf1", single[2 * 387 .. 2 * 397]);
     try std.testing.expectEqualStrings("01439d", single[2 * 515 .. 2 * 518]);
-    try std.testing.expectEqualStrings("01419d", dflt[2 * 515 .. 2 * 518]);
+    try std.testing.expectEqualStrings("01419d", dflt_ng[2 * 515 .. 2 * 518]);
 }
 
 test "N-086 control: no-FixedArray SINGLE moves the same two flag bytes" {
@@ -372,11 +383,13 @@ test "N-086 control: no-FixedArray SINGLE moves the same two flag bytes" {
     // N-038 (R64): compared over the prologue only (see the test above); the
     // sighash-type assert push's flag byte sits at 515 in this contract.
     try std.testing.expect(single.len < dflt.len);
-    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 480], single[0 .. 2 * 480], "41", "43");
+    const dflt_ng = try stripChangePkhGate(a, dflt);
+    defer a.free(dflt_ng);
+    const moved = try flagSwapPositions(a, dflt_ng[0 .. 2 * 480], single[0 .. 2 * 480], "41", "43");
     defer a.free(moved);
     try std.testing.expectEqual(@as(usize, 1), moved.len);
     try std.testing.expectEqualStrings("01439d", single[2 * 514 .. 2 * 517]);
-    try std.testing.expectEqualStrings("01419d", dflt[2 * 514 .. 2 * 517]);
+    try std.testing.expectEqualStrings("01419d", dflt_ng[2 * 514 .. 2 * 517]);
 }
 
 // ---------------------------------------------------------------------------

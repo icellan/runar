@@ -814,6 +814,15 @@ pub(crate) fn check_fixed_width_value(value: &SdkValue, field_type: &str, what: 
     Ok(())
 }
 
+/// #213 (defence in depth): push-encode the compiler-injected `_changePKH`
+/// arg of a stateful method, refusing anything that is not exactly 20 bytes
+/// of hex. Every change-PKH push site goes through it. The covenant gates the
+/// width on chain; this is the off-chain refusal.
+pub(crate) fn encode_change_pkh(change_pkh_hex: &str) -> Result<String, String> {
+    check_fixed_width_value(&SdkValue::Bytes(change_pkh_hex.to_string()), "Ripemd160", "changePKH")?;
+    Ok(encode_push_data(change_pkh_hex))
+}
+
 fn decode_state_value(
     hex: &str,
     offset: usize,
@@ -1759,5 +1768,41 @@ mod state_range_guard_tests {
         assert_eq!(encode(SdkValue::Int(-127)), "7f00000000000080");
         assert_eq!(encode(SdkValue::Int(128)), "8000000000000000");
         assert_eq!(encode(SdkValue::Int(-128)), "8000000000000080");
+    }
+}
+
+/// #213, SDK side — defence in depth only. A stateful method's unlocking
+/// script pushes the compiler-injected `_changePKH` (a Ripemd160, exactly 20
+/// bytes); the covenant gates its width on chain. `encode_change_pkh` is the
+/// single encoder every change-PKH push site goes through, and refuses a value
+/// that is not exactly 20 bytes of hex. Proves nothing on chain.
+#[cfg(test)]
+mod pr_b_change_pkh_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_wrong_width() {
+        for n in [19usize, 21, 54] {
+            let err = encode_change_pkh(&"ab".repeat(n)).expect_err("wrong width must be refused");
+            assert!(
+                err.contains("changePKH (Ripemd160) must be exactly 20 bytes"),
+                "{}-byte changePKH: unexpected error {:?}", n, err
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_non_hex() {
+        let err = encode_change_pkh(&"zz".repeat(20)).expect_err("non-hex must be refused");
+        assert!(
+            err.contains("changePKH (Ripemd160) must be exactly 20 bytes of hex, got a non-hex string"),
+            "unexpected error {:?}", err
+        );
+    }
+
+    #[test]
+    fn accepts_20_bytes() {
+        let pkh = "ab".repeat(20);
+        assert_eq!(encode_change_pkh(&pkh).unwrap(), format!("14{}", pkh));
     }
 }

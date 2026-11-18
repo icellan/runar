@@ -62,12 +62,15 @@ import { isCiEnv } from '../env.js';
 /**
  * Three fixtures, so each script stays under ScriptVM's 4 MB limit. `sha256`
  * is of the hex string every tier must emit, both fold modes.
+ * PR B (#180/#213): re-pinned for the entry width gate on each method's Point
+ * param `p` (6 or 7 B per gated method): 2569268 -> 2569282, 2741959 -> 2741972,
+ * 3865980 -> 3866008, 1272263 -> 1272276.
  */
 const FIXTURES = [
-  { file: 'EcFusionLiveness1.runar.ts', sha256: 'b2e314e53a718e00325e9add08cfe46ea670f0c5878c385c445add7c5b8bf371', bytes: 2569268 },
-  { file: 'EcFusionLiveness2.runar.ts', sha256: '03901e252c07f6e1d8d8f78d4ca8b2284f0b1039ada16b25b4956526de6587af', bytes: 2741959 },
-  { file: 'EcFusionLiveness3.runar.ts', sha256: 'd4c81a4c814dbb799b9998f1d5ed413d3b6e197cd10dd568db851364be8d75fc', bytes: 3865980 },
-  { file: 'EcFusionLiveness4.runar.ts', sha256: 'bde66f26a8d63942d54054ae5ef701e3000717016b4d5af0fac111c28f7be21a', bytes: 1272263 },
+  { file: 'EcFusionLiveness1.runar.ts', sha256: 'd56fb4e5900a72d63794a250a1ea4c3fc285d52cde2138944accad3ebadbc565', bytes: 2569282 },
+  { file: 'EcFusionLiveness2.runar.ts', sha256: '2cc825347fcd22db88a7ba54fed80b5b37b5522527a1476a6cbc524d471648d2', bytes: 2741972 },
+  { file: 'EcFusionLiveness3.runar.ts', sha256: 'e351dd1c523eb80f1982e42d99ef67c812f70a479f6179a7030498ce309b60b6', bytes: 3866008 },
+  { file: 'EcFusionLiveness4.runar.ts', sha256: '1d693c3565962751c493778d7eee7569af53bfe0e6f30c1ed50caa035aebf949', bytes: 1272276 },
 ].map((f) => ({ ...f, path: join(__dirname, f.file) }));
 
 type FoldMode = 'fold-on' | 'fold-off';
@@ -123,15 +126,18 @@ const MUST_SHRINK: Record<string, string> = {
  * shapes and source are N-460's measurements (`sharedInnerSource`), so the
  * byte counts are the pre-N-460 ones exactly; with the optimizer off they are
  * 1,296,934 and 1,272,003.
+ * PR B (#180/#213): both pins are +7 B for the entry width gate on the Point
+ * param `p`: 424655 -> 424662, 848169 -> 848176 (the optimizer-off sizes above
+ * are the pre-gate measurements).
  */
 const SHARED_INNER: Record<string, { body: string; bytes: number }> = {
   'R9 twice on one inner, then R11 (the n112 shape)': {
     body: 'const g: Point = ecMul(q, 7n); assert(ecOnCurve(ecAdd(ecMul(g, 2n), ecMul(g, 3n))));',
-    bytes: 424655,
+    bytes: 424662,
   },
   'R9 twice on one inner, both read': {
     body: 'const g: Point = ecMul(q, 7n); const r: Point = ecMul(g, 2n); const s: Point = ecMul(g, 3n); assert(ecPointX(r) === ex && ecPointX(s) === ey);',
-    bytes: 848169,
+    bytes: 848176,
   },
 };
 

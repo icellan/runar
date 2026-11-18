@@ -127,10 +127,12 @@ test "N-142: .sol silent shape keeps the state write" {
     try std.testing.expect(inc.operand == .property_access);
 
     const got = try hexSha(SILENT, "F200Silent.runar.sol");
-    try std.testing.expectEqualStrings("484142b25662c6a0a0126f11b1d4700fd79632224dc38c6ae869c889e5fe30d5", &got);
+    // #180 / #213 re-pin (was 484142b2...): inc gained the `_changePKH` entry width gate; TS reference, same source.
+    try std.testing.expectEqualStrings("6001736ca0dd06f9b6b772cf09952c98d042fdfb65dd4a2f46be69b9d5de3feb", &got);
 }
 
 test "N-142: .sol inter shape compiles to the TS reference bytes" {
     const got = try hexSha(INTER, "F200Inter.runar.sol");
-    try std.testing.expectEqualStrings("29956ebf68e8510b65a74f18a47e5851f322bf6dc2d0981b45ee301f2aaae575", &got);
+    // #180 / #213 re-pin (was 29956ebf...): the `_changePKH` entry width gate; TS reference, same source.
+    try std.testing.expectEqualStrings("18b2efad1bff573669e7aaa7cfa5f5bcd65a1cca23e78672d29f88789a584da9", &got);
 }

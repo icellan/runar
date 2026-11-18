@@ -382,6 +382,10 @@ module Runar
         provider = resolve_provider(provider, 'prepare_call')
         signer   = resolve_signer(signer, 'prepare_call')
         args     = Array(args)
+        # The state this call starts from. prepare_call advances @state to the
+        # post-call state before anything is broadcast; finalize_call restores
+        # this snapshot when the transaction never makes it onto the network.
+        state_before = @state.dup
 
         method = find_method(method_name)
         unless method
@@ -864,7 +868,7 @@ module Runar
 
         sighash = compute_bip143_sighash(final_preimage)
 
-        build_prepared_call(
+        prepared = build_prepared_call(
           sighash, final_preimage, signed_tx,
           sig_indices, method_name, resolved_args, method_selector_hex,
           is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
@@ -876,6 +880,9 @@ module Runar
           parent_stateful: parent_stateful,
           method_uses_code_part: method_uses_code_part
         )
+        prepared.state_before = state_before
+        prepared.state_after  = @state.dup
+        prepared
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
@@ -887,6 +894,28 @@ module Runar
       # @return [Array(String, TransactionData)] [txid, transaction]
       # rubocop:disable Metrics/MethodLength
       def finalize_call(prepared, signatures, provider = nil)
+        # Only a PreparedCall that still spends the tracked UTXO owns the
+        # state: a repeat of one that was already committed must not touch it.
+        spent      = prepared.contract_utxo
+        owns_state = !@current_utxo.nil? && !spent.nil? &&
+                     @current_utxo.txid == spent.txid && @current_utxo.output_index == spent.output_index
+        result = finalize_call_once(prepared, signatures, provider)
+        # A retry of a PreparedCall whose first finalize failed must commit the
+        # post-call state the transaction carries.
+        @state = prepared.state_after.dup if owns_state && prepared.state_after
+        result
+      rescue Exception # rubocop:disable Lint/RescueException
+        # Nothing was broadcast (or the node refused it): the chain is still at
+        # the state this call started from, so the local state must be too.
+        # Before this, a refused call left the state advanced and the next call
+        # was built from a state the chain never reached.
+        @state = prepared.state_before.dup if owns_state && prepared.state_before
+        raise
+      end
+      # rubocop:enable Metrics/MethodLength
+
+      # rubocop:disable Metrics/MethodLength
+      def finalize_call_once(prepared, signatures, provider)
         provider = resolve_provider(provider, 'finalize_call')
 
         # F-247: every declared sig_indices slot MUST be covered by
@@ -922,6 +951,7 @@ module Runar
         [txid, tx]
       end
       # rubocop:enable Metrics/MethodLength
+      private :finalize_call_once
 
       # Reconnect to an existing deployed contract by looking up the transaction
       # on-chain.
@@ -1441,7 +1471,7 @@ module Runar
             args_hex   = resolved_args.map { |a| encode_arg(a) }.join
             change_hex = ''
             if method_needs_change && !change_pkh_hex.empty?
-              change_hex = State.encode_push_data(change_pkh_hex) + State.encode_script_int(0)
+              change_hex = State.encode_change_pkh(change_pkh_hex) + State.encode_script_int(0)
             end
             unlock = build_stateful_prefix('', method_uses_code_part) +
                      args_hex +
@@ -2152,7 +2182,7 @@ module Runar
 
           change_hex = ''
           if prepared.method_needs_change && !prepared.change_pkh_hex.empty?
-            change_hex = State.encode_push_data(prepared.change_pkh_hex) +
+            change_hex = State.encode_change_pkh(prepared.change_pkh_hex) +
                          State.encode_script_int(prepared.change_amount)
           end
 
@@ -2690,7 +2720,7 @@ module Runar
 
         change_hex = ''
         if method_needs_change && !change_pkh_hex.empty?
-          change_hex = State.encode_push_data(change_pkh_hex) + State.encode_script_int(change_amount)
+          change_hex = State.encode_change_pkh(change_pkh_hex) + State.encode_script_int(change_amount)
         end
 
         new_amount_hex = method_needs_new_amount ? State.encode_script_int(new_satoshis) : ''

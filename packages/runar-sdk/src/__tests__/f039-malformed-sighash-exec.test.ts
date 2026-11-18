@@ -150,9 +150,14 @@ describe('F-039 — malformed @sighash: the pre-fix artifact is an ALL|FORKID co
 
   it('the stand-in is the measured pre-fix Rust artifact (script sha1 ca7fb3bd4d…)', () => {
     // The measurement predates the C=1 binding (ports #170), which moved only
-    // the OP_PUSH_TX blob: undo exactly that change (addend, key, s fan-out)
-    // and the stand-in hashes to the measured artifact again.
+    // the OP_PUSH_TX blob, and PR B (#213), which inserted the entry width
+    // gate on `_changePKH` (`<d> OP_PICK OP_SIZE 0x14 OP_NUMEQUALVERIFY
+    // OP_DROP` right after the 61ab prologue): undo exactly those changes
+    // (addend, key, s fan-out; the 7-byte gate) and the stand-in hashes to the
+    // measured artifact again.
+    expect(preFix.script).toMatch(/^61ab5[2-9]798201149d75/);
     const preC1 = preFix.script
+      .replace(/^61ab5[2-9]798201149d75/, '61ab')
       .replace('01007e818b', '01007e8100011f80517e93')
       .replace('038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218',
         '02b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0')

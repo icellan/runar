@@ -50,10 +50,11 @@
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
-/// sha256 of the TS reference hex for PR, fold OFF (1402 hex chars; 1414 at
-/// N-360, before the C=1 binding blob of ports #170).
-const PR_TS_SHA256 = "2d439f924960c54527370c0c700e18807fb3acd634eed4dabd9876da29d7ec05";
-const PR_TS_LEN: usize = 1402;
+/// sha256 of the TS reference hex for PR, fold OFF (1416 hex chars; 1402
+/// before the #180 / #213 `_changePKH` entry width gate, 1414 at N-360, before
+/// the C=1 binding blob of ports #170).
+const PR_TS_SHA256 = "3cc2f9bb26cc8e75f02c7b539eb2d3cc2b8f428a59d2229f88b3545af448741a";
+const PR_TS_LEN: usize = 1416;
 
 /// TS reference hex for SL, fold OFF.
 const SL_TS_HEX = "788b7852937c9d0000a07777";

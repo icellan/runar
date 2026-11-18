@@ -114,7 +114,7 @@ fn n051_artifact_parses_code_part_len_slots() {
     let a = artifact();
     let slots = a.code_part_len_slots.as_ref().expect("codePartLenSlots parsed");
     assert_eq!(slots.len(), 1);
-    assert_eq!(slots[0].byte_offset, 947);
+    assert_eq!(slots[0].byte_offset, 954); // 947 + 7: PR B entry width gate on `post`'s _changePKH
 }
 
 #[test]

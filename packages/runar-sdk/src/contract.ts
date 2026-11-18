@@ -1026,6 +1026,10 @@ export class RunarContract {
     options?: CallOptions,
   ): Promise<PreparedCall> {
     const { provider, signer } = this.resolveProviderSigner();
+    // The state this call starts from. prepareCall advances `this._state` to
+    // the post-call state before anything is broadcast; finalizeCall restores
+    // this snapshot when the transaction never makes it onto the network.
+    const stateBefore = { ...this._state };
     // Funding (and terminal fee) inputs are signed by fundingSigner when set
     // (issue #134). The method's own Sig args stay with the connected signer.
     const fundingSigner = options?.fundingSigner ?? signer;
@@ -2125,6 +2129,7 @@ export class RunarContract {
       _contractOutputs: contractOutputs ?? [],
       _intentWitnessHex: witnessHex,
       _dryRun: options?.dryRun ?? false,
+      _stateBefore: stateBefore,
     };
   }
 
@@ -2136,6 +2141,25 @@ export class RunarContract {
    *                      Each key must be one of `prepared.sigIndices`.
    */
   async finalizeCall(
+    prepared: PreparedCall,
+    signatures: Record<number, string>,
+  ): Promise<{ txid: string; tx: TransactionData }> {
+    // A second finalize of the same PreparedCall is refused below (C29) and
+    // must not touch the state the first one committed.
+    if (consumedPreparedCalls.has(prepared)) return this.finalizeCallOnce(prepared, signatures);
+    try {
+      return await this.finalizeCallOnce(prepared, signatures);
+    } catch (e) {
+      // Nothing was broadcast (or the node refused it): the chain is still at
+      // the state this call started from, so the local state must be too.
+      // Before this, a refused call left `state` advanced and the next call
+      // was built from a state the chain never reached.
+      if (prepared._stateBefore) this._state = prepared._stateBefore;
+      throw e;
+    }
+  }
+
+  private async finalizeCallOnce(
     prepared: PreparedCall,
     signatures: Record<number, string>,
   ): Promise<{ txid: string; tx: TransactionData }> {

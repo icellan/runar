@@ -69,7 +69,8 @@ contract N141Write is StatefulSmartContract {
     }
 }
 `,
-    sha256: '0ceac5aebb538b44b75b8fd857a1f16b00810df2a08f3884acaeedc6fdf1d58d',
+    // PR B (#180/#213): re-pinned, +7 B (entry width gate on `_changePKH`; 702 -> 709 B).
+    sha256: '7096e1be1ad3d65d6063bfb37e4d3f83bc331e8ac107d086866dfd7307c669af',
   },
   'N141Inside.runar.sol': {
     src: `pragma runar ^0.1.0;

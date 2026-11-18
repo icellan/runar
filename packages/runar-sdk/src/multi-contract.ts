@@ -218,6 +218,11 @@ export async function assembleMultiContractCall(
         `assembleMultiContractCall: input ${i}: method '${inp.method}' requires \`changePKH\` (ABI declares _changePKH)`,
       );
     }
+    // #213 (defence in depth): the covenant gates `_changePKH` at exactly 20
+    // bytes; refuse anything else before building a transaction.
+    if (methodNeedsChange) {
+      assertFixedWidthValue(inp.changePKH, 'Ripemd160', `assembleMultiContractCall: input ${i}: changePKH`);
+    }
 
     // OP_PUSH_TX preimage against THIS artifact's codesep layout. BUG-100: the
     // signature is derived on-chain from the preimage, so only the preimage is
