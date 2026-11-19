@@ -657,8 +657,10 @@ func (ctx *expandContext) rewriteExpressionStmt(stmt ExpressionStmt) []Statement
 		assignment := AssignmentStmt{
 			Target: target,
 			Value: BinaryExpr{
-				Op:    incOp,
-				Left:  cloneExpression(target),
+				Op: incOp,
+				// D12 FE-F1: typecheck already required a bigint operand for ++/--.
+				OperandType: newOperandType(OperandNumeric),
+				Left:        cloneExpression(target),
 				Right: BigIntLiteral{Value: big.NewInt(1)},
 			},
 			SourceLocation: stmt.SourceLocation,
@@ -958,8 +960,9 @@ func (ctx *expandContext) tryRewriteReadAsStatements(
 	for i := N - 2; i >= 0; i-- {
 		slot := meta.slotNames[i]
 		cond := BinaryExpr{
-			Op:    "===",
-			Left:  cloneExpression(indexRef),
+			Op:          "===",
+			OperandType: newOperandType(OperandNumeric), // D12 FE-F1: index vs a bigint literal
+			Left:        cloneExpression(indexRef),
 			Right: BigIntLiteral{Value: big.NewInt(int64(i))},
 		}
 		assign := AssignmentStmt{
@@ -996,8 +999,9 @@ func (ctx *expandContext) buildReadDispatchTernary(meta *arrayMeta, indexRef Exp
 	for i := len(meta.slotNames) - 2; i >= 0; i-- {
 		slot := meta.slotNames[i]
 		cond := BinaryExpr{
-			Op:    "===",
-			Left:  cloneExpression(indexRef),
+			Op:          "===",
+			OperandType: newOperandType(OperandNumeric), // D12 FE-F1: index vs a bigint literal
+			Left:        cloneExpression(indexRef),
 			Right: BigIntLiteral{Value: big.NewInt(int64(i))},
 		}
 		branch := PropertyAccessExpr{Property: slot}
@@ -1091,8 +1095,9 @@ func (ctx *expandContext) buildWriteDispatchIf(
 	for i := len(meta.slotNames) - 1; i >= 0; i-- {
 		slot := meta.slotNames[i]
 		cond := BinaryExpr{
-			Op:    "===",
-			Left:  cloneExpression(indexRef),
+			Op:          "===",
+			OperandType: newOperandType(OperandNumeric), // D12 FE-F1: index vs a bigint literal
+			Left:        cloneExpression(indexRef),
 			Right: BigIntLiteral{Value: big.NewInt(int64(i))},
 		}
 		branchAssign := AssignmentStmt{
@@ -1377,14 +1382,16 @@ func cloneExpression(expr Expression) Expression {
 		return PropertyAccessExpr{Property: e.Property}
 	case BinaryExpr:
 		return BinaryExpr{
-			Op:    e.Op,
-			Left:  cloneExpression(e.Left),
-			Right: cloneExpression(e.Right),
+			Op:          e.Op,
+			Left:        cloneExpression(e.Left),
+			Right:       cloneExpression(e.Right),
+			OperandType: e.OperandType, // D12 FE-F1: the clone keeps the checker's tag
 		}
 	case UnaryExpr:
 		return UnaryExpr{
-			Op:      e.Op,
-			Operand: cloneExpression(e.Operand),
+			Op:          e.Op,
+			Operand:     cloneExpression(e.Operand),
+			OperandType: e.OperandType, // D12 FE-F1
 		}
 	case CallExpr:
 		args := make([]Expression, len(e.Args))

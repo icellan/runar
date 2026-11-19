@@ -13,6 +13,7 @@ import type {
   Statement,
   Expression,
   TypeNode,
+  OperandType,
   SourceLocation,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
@@ -955,12 +956,60 @@ class TypeChecker {
     // Build method signature map (for this.method() calls)
     this.methodSigs = new Map();
     for (const method of contract.methods) {
-      this.methodSigs.set(method.name, {
-        params: method.params.map(p => typeNodeToTType(p.type)),
-        returnType: method.visibility === 'public' ? 'void' : inferMethodReturnType(method),
-      });
+      const params = method.params.map(p => typeNodeToTType(p.type));
+      if (method.visibility === 'public') {
+        this.methodSigs.set(method.name, { params, returnType: VOID });
+      } else {
+        // D12 FE-F4: resolved on first use (the declared type, else inferred
+        // from the body with the full environment), so a helper defined
+        // after its caller is still typed.
+        const self = this;
+        this.methodSigs.set(method.name, {
+          params,
+          get returnType(): TType { return self.methodReturnType(method); },
+        });
+      }
     }
   }
+
+  /**
+   * D12 FE-F4: what a call of private method `method` evaluates to.
+   *
+   * A declared return type is authoritative (`checkStatement` enforces it on
+   * every `return`). Without one (Ruby has no syntax for it; TypeScript may
+   * omit it) the body is type-checked by a scratch checker with the real
+   * parameter environment and the types of its `return` values are unified.
+   * Values that do not unify, and a helper reached again while its own type
+   * is being inferred, are `<unknown>`: every operator whose lowering depends
+   * on the type then refuses to compile instead of guessing.
+   */
+  methodReturnType(method: MethodNode): TType {
+    if (method.returnType) return typeNodeToTType(method.returnType);
+    let memo = INFERRED_RETURN_TYPES.get(this.contract);
+    if (!memo) {
+      memo = new Map();
+      INFERRED_RETURN_TYPES.set(this.contract, memo);
+    }
+    const known = memo.get(method);
+    if (known !== undefined) return known;
+    memo.set(method, '<unknown>'); // recursion guard; 02-validate refuses recursion
+    // D12 FE-F4: an inference scratch checker's diagnostics are discarded, so it does no affine-consumption bookkeeping (an empty summary): computing the consumption summary from inside an inference would read the in-progress recursion guard of the helper being inferred and memoize '<unknown>' for its callers.
+    const scratch = new TypeChecker(this.contract, [], new Map());
+    scratch.returnTypeSink = [];
+    scratch.checkMethod(method);
+    const inferred = unifyReturnTypes(scratch.returnTypeSink);
+    memo.set(method, inferred);
+    return inferred;
+  }
+
+  /** Types of the `return` values seen while checking (FE-F4 inference). */
+  private returnTypeSink: TType[] | null = null;
+
+  /** Types of the `return` values of the method being checked (FE-F4). */
+  private currentReturnTypes: TType[] = [];
+
+  /** The declared return type of the method being checked, if any (FE-F4). */
+  private currentMethod: MethodNode | null = null;
 
   /**
    * N-234: a scalar property initializer whose literal type does not match
@@ -1010,11 +1059,13 @@ class TypeChecker {
       env.define(prop.name, typeNodeToTType(prop.type));
     }
 
+    this.currentMethod = null;
     this.checkStatements(ctor.body, env, ctor.sourceLocation);
   }
 
   checkMethod(method: MethodNode): void {
     const env = new TypeEnv();
+    this.currentMethod = method;
 
     // Reset affine tracking for this method
     this.consumedValues = new Set();
@@ -1025,7 +1076,23 @@ class TypeChecker {
       env.define(param.name, typeNodeToTType(param.type));
     }
 
+    this.currentReturnTypes = [];
     this.checkStatements(method.body, env, method.sourceLocation);
+
+    // D12 FE-F4: an undeclared private return type is inferred by unifying the
+    // returned values. Values that do not unify used to be typed by the FIRST
+    // return (so `if (c) return 1n; return true;` was a bigint); now the call
+    // would be `<unknown>`, which `assert` / `if` still accept. Refuse it here.
+    if (method.visibility === 'private' && !method.returnType) {
+      const seen = this.currentReturnTypes;
+      if (seen.length > 0 && !seen.includes('<unknown>') && unifyReturnTypes(seen) === '<unknown>') {
+        this.errors.push(makeDiagnostic(
+          incompatibleReturnTypesMessage(method.name, [...new Set(seen)]),
+          'error',
+          method.sourceLocation,
+        ));
+      }
+    }
 
     // F-075: every guard below reads the method's effects from the shared
     // side-effect summary, which follows the private-helper call graph. That is
@@ -1304,7 +1371,22 @@ class TypeChecker {
 
       case 'return_statement':
         if (stmt.value) {
-          this.inferExprType(stmt.value, env);
+          const valueType = this.inferExprType(stmt.value, env);
+          this.returnTypeSink?.push(valueType);
+          this.currentReturnTypes.push(valueType);
+          // D12 FE-F4: the declared return type is enforced, strictly — an
+          // unresolved value is not assignable to anything here.
+          const declared = this.currentMethod?.returnType;
+          if (declared) {
+            const declaredType = typeNodeToTType(declared);
+            if (valueType === '<unknown>' || !isSubtype(valueType, declaredType)) {
+              this.errors.push(makeDiagnostic(
+                declaredReturnMismatchMessage(this.currentMethod!.name, valueType, declaredType),
+                'error',
+                stmt.sourceLocation,
+              ));
+            }
+          }
         }
         break;
     }
@@ -1529,6 +1611,25 @@ class TypeChecker {
     const leftType = this.inferExprType(expr.left, env);
     const rightType = this.inferExprType(expr.right, env);
 
+    // D12 FE-F1: the operators whose opcode depends on the operand family
+    // record the family the TYPE CHECKER resolved; ANF lowering reads it and
+    // nothing else. `+` and `& | ^` already refuse an operand that is neither
+    // a byte string nor a number (below); equality accepted `<unknown>`, so it
+    // is refused here rather than lowered as a guess.
+    if (TYPED_BINARY_OPS.has(expr.op)) {
+      const lf = operandFamily(leftType);
+      const rf = operandFamily(rightType);
+      if (lf !== null && lf === rf) {
+        expr.operandType = lf;
+      } else if ((lf === null || rf === null) && (expr.op === '===' || expr.op === '!==')) {
+        this.errors.push(makeDiagnostic(
+          unresolvedOperandTypesMessage(expr.op, leftType, rightType),
+          'error',
+          expr.sourceLocation ?? this.currentStmtLoc,
+        ));
+      }
+    }
+
     // ByteString concatenation: ByteString + ByteString -> ByteString (via OP_CAT)
     if (expr.op === '+') {
       if (isByteFamily(leftType) && isByteFamily(rightType)) {
@@ -1686,9 +1787,12 @@ class TypeChecker {
         return BIGINT;
 
       case '~':
+        // D12 FE-F1: see checkBinaryExpr.
         if (isByteFamily(operandType)) {
+          expr.operandType = 'bytes';
           return BYTESTRING;
         }
+        if (isBigintFamily(operandType)) expr.operandType = 'numeric';
         if (!isBigintFamily(operandType)) {
           this.errors.push(makeDiagnostic(
             `Operand of '~' must be bigint or ByteString, got '${operandType}'`,
@@ -2755,66 +2859,47 @@ function typeNodeToTType(node: TypeNode): TType {
 }
 
 /**
- * Attempt to infer a private method's return type from its body.
- * Walks all return statements and infers the type of their return
- * expressions using a lightweight expression type inference. Returns
- * the unified type if all return expressions agree, or 'void' if
- * there are no return statements with values.
+ * D12 FE-F4: unify the types of a private method's `return` values (inferred
+ * with the full environment). No value-returning `return` = void; values in
+ * one family unify to that family; anything else is `<unknown>` — never a
+ * best-effort pick, because every typed operator refuses `<unknown>`.
  */
-function inferMethodReturnType(method: MethodNode): TType {
-  const returnTypes = collectReturnTypes(method.body);
-
-  if (returnTypes.length === 0) {
-    return VOID;
-  }
-
-  // Unify: if all return types agree, return that type.
-  // Otherwise fall back to the first one (best effort).
+function unifyReturnTypes(returnTypes: TType[]): TType {
+  if (returnTypes.length === 0) return VOID;
   const first = returnTypes[0]!;
-  const allSame = returnTypes.every(t => t === first);
-  if (allSame) {
-    return first;
-  }
-
-  // Check if all are in the same type family
-  const allBigint = returnTypes.every(t => BIGINT_SUBTYPES.has(t));
-  if (allBigint) return BIGINT;
-
-  const allBytes = returnTypes.every(t => BYTESTRING_SUBTYPES.has(t));
-  if (allBytes) return BYTESTRING;
-
-  const allBool = returnTypes.every(t => t === BOOLEAN);
-  if (allBool) return BOOLEAN;
-
-  // Mixed types -- return the first as a best effort
-  return first;
+  if (returnTypes.every(t => t === first)) return first;
+  if (returnTypes.every(t => BIGINT_SUBTYPES.has(t))) return BIGINT;
+  if (returnTypes.every(t => BYTESTRING_SUBTYPES.has(t))) return BYTESTRING;
+  return '<unknown>';
 }
 
-/**
- * Collect inferred types from all return statements in a statement list,
- * recursively descending into if/else and for bodies.
- */
-function collectReturnTypes(stmts: Statement[]): TType[] {
-  const types: TType[] = [];
-  for (const stmt of stmts) {
-    switch (stmt.kind) {
-      case 'return_statement':
-        if (stmt.value) {
-          types.push(inferExprTypeStatic(stmt.value));
-        }
-        break;
-      case 'if_statement':
-        types.push(...collectReturnTypes(stmt.then));
-        if (stmt.else) {
-          types.push(...collectReturnTypes(stmt.else));
-        }
-        break;
-      case 'for_statement':
-        types.push(...collectReturnTypes(stmt.body));
-        break;
-    }
-  }
-  return types;
+/** Inferred return types of undeclared private methods, per contract (FE-F4). */
+const INFERRED_RETURN_TYPES = new WeakMap<ContractNode, Map<MethodNode, TType>>();
+
+/** Binary operators whose lowering depends on the operand family (FE-F1). */
+const TYPED_BINARY_OPS = new Set<string>(['+', '===', '!==', '&', '|', '^']);
+
+/** The lowering family of a resolved type: bytes, a script number, or none. */
+function operandFamily(t: TType): OperandType | null {
+  if (BYTESTRING_SUBTYPES.has(t)) return 'bytes';
+  if (BIGINT_SUBTYPES.has(t) || t === BOOLEAN) return 'numeric';
+  return null;
+}
+
+/** D12 FE-F1: the one wording every tier emits. */
+export function unresolvedOperandTypesMessage(op: string, left: string, right: string): string {
+  return `Cannot resolve the operand types of '${op}' (got '${left}' and '${right}'): ` +
+    'it must be known whether the operands are byte strings or numbers';
+}
+
+/** D12 FE-F4: the one wording every tier emits (types in first-seen order). */
+export function incompatibleReturnTypesMessage(method: string, types: string[]): string {
+  return `Method '${method}' returns values of incompatible types (${types.map((t) => `'${t}'`).join(', ')}); declare its return type`;
+}
+
+/** D12 FE-F4: the one wording every tier emits. */
+export function declaredReturnMismatchMessage(method: string, actual: string, declared: string): string {
+  return `Method '${method}' returns '${actual}', which is not assignable to its declared return type '${declared}'`;
 }
 
 /**

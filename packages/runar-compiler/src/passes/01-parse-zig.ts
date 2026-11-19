@@ -30,7 +30,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { checkReturnType, makeDiagnostic, staticMethodMessage, unexpectedStructBodyTokenMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA, ZIG_STRUCT_INIT_DOT } from '../errors.js';
+import { checkReturnType, declaredReturnType, makeDiagnostic, staticMethodMessage, unexpectedStructBodyTokenMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA, ZIG_STRUCT_INIT_DOT } from '../errors.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
@@ -568,6 +568,7 @@ class ZigParser extends ParserCore<ZigToken> {
     // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
     // native spelling of the `@sighash` directive (natively it is `void`).
     const sighashSpecs: Array<string | null> = [];
+    let declaredReturn: TypeNode | undefined;
     if (this.current().type === 'ident' && this.current().value === 'runar' &&
         this.tokens[this.pos + 1]?.type === '.' &&
         this.tokens[this.pos + 2]?.type === 'ident' && this.tokens[this.pos + 2]?.value === 'Sighash') {
@@ -587,10 +588,14 @@ class ZigParser extends ParserCore<ZigToken> {
       this.expect(')');
       sighashSpecs.push(count === 1 && arg.type === 'string' ? arg.value : null);
     } else if (this.current().type !== '{') {
-      // The AST keeps no return type; N-331 refuses an unknown name. `init`
-      // returns the contract struct itself, which is not a type to check.
+      // N-331 refuses an unknown name. `init` returns the contract struct
+      // itself, which is not a type to check. D12 FE-F4: the declared type is
+      // kept on the method for the type checker.
       const returnType = this.parseType();
-      if (name !== 'init') checkReturnType(returnType.type, name, sourceLocation, this.errors, isPublic);
+      if (name !== 'init') {
+        checkReturnType(returnType.type, name, sourceLocation, this.errors, isPublic);
+        declaredReturn = declaredReturnType(returnType.type);
+      }
     }
 
     const previousSelfNames = this.selfNames;
@@ -633,6 +638,7 @@ class ZigParser extends ParserCore<ZigToken> {
       body,
       visibility: isPublic ? 'public' : 'private',
       ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+      ...(declaredReturn !== undefined ? { returnType: declaredReturn } : {}),
       sourceLocation,
     };
   }

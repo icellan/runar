@@ -21,6 +21,7 @@ export type {
   UnaryOp,
   BinaryExpr,
   UnaryExpr,
+  OperandType,
   CallExpr,
   MemberExpr,
   Identifier,

@@ -33,7 +33,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{char_index_positions, lex_error_at_index, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{char_index_positions, lex_error_at_index, declared_return_type, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_move_attribute_message};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
@@ -1110,13 +1110,15 @@ impl<'a> MoveParser<'a> {
 
         // Optional return type
         let mut has_return_type = false;
+        let mut return_type = None;
         if *self.peek() == Token::Colon {
             self.advance();
-            // The AST keeps no return type; N-331 refuses an unknown name.
+            // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
             let ret_type = self.parse_type();
             if let Some(msg) = unknown_return_type_message(&ret_type, &name, visibility == Visibility::Public) {
                 self.errors.push(Diagnostic::error(msg, Some(location.clone())));
             }
+            return_type = declared_return_type(&ret_type);
             has_return_type = true;
         }
 
@@ -1171,6 +1173,7 @@ impl<'a> MoveParser<'a> {
         };
 
         MethodNode {
+            return_type,
             name,
             params,
             body,
@@ -1301,6 +1304,7 @@ impl<'a> MoveParser<'a> {
                         let rhs = self.parse_expression();
                         let target = self.convert_self_to_this(expr);
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Add,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
@@ -1318,6 +1322,7 @@ impl<'a> MoveParser<'a> {
                         let rhs = self.parse_expression();
                         let target = self.convert_self_to_this(expr);
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Sub,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
@@ -1335,6 +1340,7 @@ impl<'a> MoveParser<'a> {
                         let rhs = self.parse_expression();
                         let target = self.convert_self_to_this(expr);
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Mul,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
@@ -1388,13 +1394,15 @@ impl<'a> MoveParser<'a> {
                     }
                 }
             }
-            Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
+            Expression::BinaryExpr { op, left, right, source_location, ..  } => Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op,
                 left: Box::new(self.convert_self_to_this(*left)),
                 right: Box::new(self.convert_self_to_this(*right)),
                 source_location: source_location,
             },
-            Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
+            Expression::UnaryExpr { op, operand, source_location, ..  } => Expression::UnaryExpr {
+                operand_type: Default::default(),
                 op,
                 operand: Box::new(self.convert_self_to_this(*operand)),
                 source_location: source_location,
@@ -1524,6 +1532,7 @@ impl<'a> MoveParser<'a> {
                     source_location: None,
                 }),
                 args: vec![Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: BinaryOp::StrictEq,
                     left: Box::new(left),
                     right: Box::new(right),
@@ -1693,6 +1702,7 @@ impl<'a> MoveParser<'a> {
             let right = self.parse_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1711,6 +1721,7 @@ impl<'a> MoveParser<'a> {
             let right = self.parse_bit_or();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1729,6 +1740,7 @@ impl<'a> MoveParser<'a> {
             let right = self.parse_bit_xor();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1747,6 +1759,7 @@ impl<'a> MoveParser<'a> {
             let right = self.parse_bit_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1765,6 +1778,7 @@ impl<'a> MoveParser<'a> {
             let right = self.parse_equality();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1786,6 +1800,7 @@ impl<'a> MoveParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1798,6 +1813,7 @@ impl<'a> MoveParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1821,6 +1837,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1832,6 +1849,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1843,6 +1861,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1854,6 +1873,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1877,6 +1897,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1888,6 +1909,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1911,6 +1933,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1922,6 +1945,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1945,6 +1969,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1956,6 +1981,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1967,6 +1993,7 @@ impl<'a> MoveParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1986,6 +2013,7 @@ impl<'a> MoveParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -1995,6 +2023,7 @@ impl<'a> MoveParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2004,6 +2033,7 @@ impl<'a> MoveParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2217,6 +2247,7 @@ fn build_constructor(properties: &[PropertyNode], loc: SourceLocation) -> Method
     }
 
     MethodNode {
+        return_type: None,
         name: "constructor".to_string(),
         params,
         body,

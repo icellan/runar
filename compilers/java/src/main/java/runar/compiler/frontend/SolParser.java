@@ -848,6 +848,8 @@ public final class SolParser {
                 String unknownReturn = LexDiag.unknownReturnType(pendingRet, name, visibility == Visibility.PUBLIC);
                 if (unknownReturn != null) addError(unknownReturn);
             }
+            // D12 FE-F4: the declared type is kept on the method.
+            TypeNode declaredReturn = MethodNode.declaredReturnType(pendingRet);
 
             List<Statement> body = parseSolBlock();
 
@@ -857,7 +859,7 @@ public final class SolParser {
                 addError(sighash.error());
             }
             return new MethodNode(name, params, body, visibility, location,
-                sighash == null || sighash.isError() ? null : sighash.value());
+                sighash == null || sighash.isError() ? null : sighash.value(), null, declaredReturn);
         }
 
         /**

@@ -49,6 +49,7 @@ import runar.compiler.ir.ast.ContractNode;
 import runar.compiler.ir.ast.CustomType;
 import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.Expression;
+import runar.compiler.ir.ast.OperandTypeSlot;
 import runar.compiler.ir.ast.ExpressionStatement;
 import runar.compiler.ir.ast.FixedArrayType;
 import runar.compiler.ir.ast.ForStatement;
@@ -99,16 +100,51 @@ public final class AnfLower {
     // bindings carry the {@code result_type: "bytes"} annotation.
     // ------------------------------------------------------------------
 
-    // N-076: there is deliberately no list here. Typecheck.BYTESTRING_SUBTYPES
-    // is the authority. The second, hand-maintained copy this replaces carried
-    // "RabinSig" and "RabinPubKey", which Typecheck files under
-    // BIGINT_SUBTYPES -- so === on a Rabin value emitted OP_EQUAL and, far
-    // worse, + on one emitted OP_CAT where the source said addition.
-    //
-    // Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
-    // with OP_ADD.
-    private static boolean isByteType(String typeName) {
-        return Typecheck.isByteStringFamily(typeName);
+    /**
+     * D12 FE-F1: the operand family Typecheck recorded on an operator node.
+     * There is deliberately no fallback. The previous heuristic
+     * ({@code isByteTypedExpr}) defaulted to numeric whenever it could not see
+     * a byte type -- a ternary, a helper result, {@code this.arr[i]}, a
+     * bitwise result, or a local built from one -- and compiled byte-string
+     * {@code +} to OP_ADD and {@code ===} to OP_NUMEQUAL. A node without the
+     * annotation was never type-checked, so it is refused.
+     */
+    private static OperandTypeSlot.OperandType requireOperandType(String op, OperandTypeSlot slot) {
+        OperandTypeSlot.OperandType t = slot.get();
+        if (t == null) {
+            throw new IllegalStateException(
+                "ANF lowering: operator '" + op + "' carries no operand type from the type checker; "
+                    + "run Typecheck on the contract before AnfLower.run() (refusing to guess byte string vs number)");
+        }
+        return t;
+    }
+
+    /** D12 FE-F1: does any operator whose lowering needs an operand type lack one? */
+    static boolean hasUntypedOperator(Object node) {
+        if (node == null) return false;
+        if (node instanceof BinaryExpr be) {
+            if (Typecheck.isTypedBinaryOp(be.op()) && be.operandType().get() == null) return true;
+        } else if (node instanceof UnaryExpr ue) {
+            if (ue.op() == Expression.UnaryOp.BIT_NOT && ue.operandType().get() == null) return true;
+        }
+        if (node instanceof List<?> l) {
+            for (Object x : l) if (hasUntypedOperator(x)) return true;
+            return false;
+        }
+        if (!node.getClass().isRecord()) return false;
+        for (java.lang.reflect.RecordComponent rc : node.getClass().getRecordComponents()) {
+            Class<?> t = rc.getType();
+            if (t.isPrimitive() || t == String.class || t == runar.compiler.ir.ast.SourceLocation.class
+                || t == OperandTypeSlot.class || t == BigInteger.class) {
+                continue;
+            }
+            try {
+                if (hasUntypedOperator(rc.getAccessor().invoke(node))) return true;
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("cannot walk AST record " + node.getClass().getName(), e);
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -117,6 +153,14 @@ public final class AnfLower {
 
     /** Lower a (validated, type-checked) contract AST to ANF IR. */
     public static AnfProgram run(ContractNode contract) {
+        // D12 FE-F1: operator lowering reads the operand family Typecheck
+        // records on the AST. The compile pipeline always type-checks first; a
+        // caller handing this public entry point a contract that never went
+        // through the type checker gets it run here (its diagnostics are the
+        // caller's business), so the types still come from the checker and
+        // never from a guess. A node the checker could not type keeps no
+        // annotation and is refused below.
+        if (hasUntypedOperator(contract)) Typecheck.collect(contract);
         // D25: lower the contract with its continuation binding resolved
         // (SINGLE sighash for a mutate-only contract) and, for a 'bind'
         // contract, the hidden spent-outpoint field. The pipeline applies it
@@ -773,7 +817,6 @@ public final class AnfLower {
         Map<String, String> scopeRenames = new HashMap<>();
         // N-046: source names of the loop variables in scope.
         final Set<String> loopVars = new HashSet<>();
-        final Set<String> localByteVars = new HashSet<>();
         // GAP-002: source location of the AST statement currently being
         // lowered. Stamped onto every AnfBinding the helpers below emit so
         // the artifact's sourceMap survives all the way to Emit.
@@ -982,9 +1025,6 @@ public final class AnfLower {
                 var param = method.params().get(i);
                 String bindingName = declareLocal(param.name());
                 addLocal(bindingName);
-                if (isByteType(typeToString(param.type()))) {
-                    localByteVars.add(bindingName);
-                }
                 emitNamed(bindingName, makeLoadConstString("@ref:" + argRefs.get(i)));
             }
             int startIndex = bindings.size();
@@ -1102,7 +1142,6 @@ public final class AnfLower {
         private record InlinedScopeState(
             Map<String, String> scopeRenames,
             Set<String> localNames,
-            Set<String> localByteVars,
             Map<String, String> localAliases,
             Set<String> loopVars
         ) {}
@@ -1116,7 +1155,6 @@ public final class AnfLower {
             InlinedScopeState saved = new InlinedScopeState(
                 scopeRenames,
                 new HashSet<>(localNames),
-                new HashSet<>(localByteVars),
                 new HashMap<>(localAliases),
                 new HashSet<>(loopVars));
             scopeRenames = new HashMap<>();
@@ -1127,8 +1165,6 @@ public final class AnfLower {
             scopeRenames = saved.scopeRenames();
             localNames.clear();
             localNames.addAll(saved.localNames());
-            localByteVars.clear();
-            localByteVars.addAll(saved.localByteVars());
             localAliases.clear();
             localAliases.putAll(saved.localAliases());
             loopVars.clear();
@@ -1199,7 +1235,6 @@ public final class AnfLower {
             // variables by value, so a rename made inside it ends with it.
             sub.scopeRenames = new HashMap<>(this.scopeRenames);
             sub.loopVars.addAll(this.loopVars);
-            sub.localByteVars.addAll(this.localByteVars);
             // Deep-copy the inlined-param alias stack. inlinePrivateMethodCall
             // pushes the caller's argument refs onto the CURRENT context before
             // lowering the private body; without this, an if arm / loop body /
@@ -1440,16 +1475,10 @@ public final class AnfLower {
 
         void lowerVariableDecl(VariableDeclStatement stmt) {
             String valueRef = lowerExprToRef(stmt.init());
-            // Byte-typedness of the initialiser is judged before the new name
-            // is in scope (the initialiser reads the OUTER binding).
-            boolean isBytes = isByteTypedExpr(stmt.init());
             // N-046 / N-047: a declaration reusing an enclosing binding's name
             // is alpha-renamed (see declareLocal).
             String bindingName = declareLocal(stmt.name());
             addLocal(bindingName);
-            if (isBytes) {
-                localByteVars.add(bindingName);
-            }
             emitNamed(bindingName, makeLoadConstString("@ref:" + valueRef));
         }
 
@@ -2055,16 +2084,12 @@ public final class AnfLower {
                 String rightRef = lowerExprToRef(be.right());
                 String resultType = null;
                 String opCanonical = be.op().canonical();
-                if ((opCanonical.equals("===") || opCanonical.equals("!=="))
-                    && (isByteTypedExpr(be.left()) || isByteTypedExpr(be.right()))) {
-                    resultType = "bytes";
-                }
-                if (opCanonical.equals("+")
-                    && (isByteTypedExpr(be.left()) || isByteTypedExpr(be.right()))) {
-                    resultType = "bytes";
-                }
-                if ((opCanonical.equals("&") || opCanonical.equals("|") || opCanonical.equals("^"))
-                    && (isByteTypedExpr(be.left()) || isByteTypedExpr(be.right()))) {
+                // D12 FE-F1: `+` (OP_CAT / OP_ADD), `===` / `!==` (OP_EQUAL /
+                // OP_NUMEQUAL) and `& | ^` (byte string vs number) are lowered
+                // from the operand family the TYPE CHECKER resolved and
+                // recorded on the node -- never from a guess.
+                if (Typecheck.isTypedBinaryOp(be.op())
+                    && requireOperandType(opCanonical, be.operandType()) == OperandTypeSlot.OperandType.BYTES) {
                     resultType = "bytes";
                 }
                 return emit(new BinOp(opCanonical, leftRef, rightRef, resultType));
@@ -2073,7 +2098,9 @@ public final class AnfLower {
                 String operandRef = lowerExprToRef(ue.operand());
                 String opCanonical = ue.op().canonical();
                 String resultType = null;
-                if (opCanonical.equals("~") && isByteTypedExpr(ue.operand())) {
+                // D12 FE-F1: see the BinaryExpr arm.
+                if (ue.op() == Expression.UnaryOp.BIT_NOT
+                    && requireOperandType("~", ue.operandType()) == OperandTypeSlot.OperandType.BYTES) {
                     resultType = "bytes";
                 }
                 return emit(new UnaryOp(opCanonical, operandRef, resultType));
@@ -2461,24 +2488,10 @@ public final class AnfLower {
                 return emit(new MethodCall(thisRef, me.property(), argRefs));
             }
 
-            // Java-specific: a.equals(b) on a ByteString-subtyped receiver
-            // lowers to the same === bin_op the other compilers' `===`
-            // operator produces. Mirrors the design resolution in
-            // docs/java-tier-plan.md: "the validator coerces a.equals(b)
-            // to the == AST node for ByteString-subtyped values".
-            if (callee instanceof MemberExpr meq
-                && meq.property().equals("equals")
-                && e.args().size() == 1) {
-                Expression receiver = meq.object();
-                Expression other = e.args().get(0);
-                boolean leftBytes = isByteTypedExpr(receiver);
-                boolean rightBytes = isByteTypedExpr(other);
-                if (leftBytes || rightBytes) {
-                    String leftRef = lowerExprToRef(receiver);
-                    String rightRef = lowerExprToRef(other);
-                    return emit(new BinOp("===", leftRef, rightRef, "bytes"));
-                }
-            }
+            // D12 FE-F1: `a.equals(b)` is rewritten to `a === b` by the Java
+            // surface parser (as in the TS reference), so the type checker
+            // records its operand family like any other `===`. The lowering
+            // that used to sit here re-derived it from a heuristic.
 
             // Bare identifier calls
             if (callee instanceof Identifier id3) {
@@ -2631,53 +2644,6 @@ public final class AnfLower {
             return e.prefix() ? result : operandRef;
         }
 
-        // -----------------------------------------------------------
-        // Byte-typed expression detection (uses the lower context for
-        // local-variable typing information).
-        // -----------------------------------------------------------
-
-        private boolean isByteTypedExpr(Expression expr) {
-            if (expr == null) return false;
-            if (expr instanceof ByteStringLiteral) return true;
-            if (expr instanceof Identifier id) {
-                // N-046 / N-047: a renamed (shadowing) declaration is judged by
-                // its own binding, never by the parameter or property it shadows.
-                String renamed = scopeRenames.get(id.name());
-                if (renamed != null) return localByteVars.contains(renamed);
-                String t = getParamType(id.name());
-                if (t != null && isByteType(t)) return true;
-                t = getPropertyType(id.name());
-                if (t != null && isByteType(t)) return true;
-                if (localByteVars.contains(localName(id.name()))) return true;
-                return false;
-            }
-            if (expr instanceof PropertyAccessExpr pa) {
-                String t = getPropertyType(pa.property());
-                return t != null && isByteType(t);
-            }
-            if (expr instanceof MemberExpr me
-                && me.object() instanceof Identifier id2
-                && "this".equals(id2.name())) {
-                String t = getPropertyType(me.property());
-                return t != null && isByteType(t);
-            }
-            if (expr instanceof CallExpr ce) {
-                if (ce.callee() instanceof Identifier cid) {
-                    // Expression-form asm<ByteString>({...}) yields a byte value.
-                    if ("asm".equals(cid.name())) {
-                        return "ByteString".equals(ce.asmReturnType());
-                    }
-                    // N-347: the type checker's return table decides, NOT a
-                    // second hand-written list here (two such lists drifted:
-                    // N-054 swept numeric extractors in, N-345 / N-347 left
-                    // byte-returning builtins out, so === on them compiled to
-                    // OP_NUMEQUAL).
-                    if (Typecheck.isByteReturningBuiltin(cid.name())) return true;
-                }
-                return false;
-            }
-            return false;
-        }
     }
 
     // ------------------------------------------------------------------

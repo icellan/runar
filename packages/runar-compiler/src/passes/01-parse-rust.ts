@@ -36,7 +36,7 @@ import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.j
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { checkReturnType, makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, declaredReturnType, makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -873,10 +873,13 @@ class RustParser extends ParserCore<RustToken> {
 
     // Optional return type: -> Type
     let hasReturnType = false;
+    let declaredReturn: TypeNode | undefined;
     if (this.current().type === '->') {
       this.advance();
-      // The type is not stored (inferred from body); N-331 refuses an unknown name.
-      checkReturnType(this.parseRustType(), name, location, this.errors, isPublic);
+      // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+      const rt = this.parseRustType();
+      checkReturnType(rt, name, location, this.errors, isPublic);
+      declaredReturn = declaredReturnType(rt);
       hasReturnType = true;
     }
 
@@ -910,6 +913,7 @@ class RustParser extends ParserCore<RustToken> {
       params,
       body,
       visibility,
+      ...(declaredReturn !== undefined ? { returnType: declaredReturn } : {}),
       sourceLocation: location,
     };
   }

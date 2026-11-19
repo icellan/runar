@@ -1054,12 +1054,14 @@ const Parser = struct {
             var fa_len: u32 = 0;
             var fa_elem: RunarType = .unknown;
             var fa_nested_len: u32 = 0;
+            var fa_leaf: types.RunarType = .unknown;
             if (type_node == .fixed_array_type) {
                 fa_len = type_node.fixed_array_type.length;
                 const inner = type_node.fixed_array_type.element.*;
                 fa_elem = types.typeNodeToRunarType(inner);
                 if (inner == .fixed_array_type) {
                     fa_nested_len = inner.fixed_array_type.length;
+                    fa_leaf = types.typeNodeToRunarType(inner.fixed_array_type.element.*);
                 }
             }
 
@@ -1091,6 +1093,7 @@ const Parser = struct {
                 .fixed_array_length = fa_len,
                 .fixed_array_element = fa_elem,
                 .fixed_array_nested_length = fa_nested_len,
+                .fixed_array_leaf = fa_leaf,
             }) catch {};
 
             _ = self.match(.comma);
@@ -1297,11 +1300,13 @@ const Parser = struct {
 
         // Optional return type: : Type or : &Type
         var has_return_type = false;
+        var declared_return: ?types.RunarType = null;
         if (self.current.kind == .colon) {
             _ = self.bump();
-            // The AST keeps no return type; N-331 refuses an unknown name.
+            // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
             var ret_spelled: []const u8 = "";
             const ret_ti = self.parseMoveTypeNameNamed(&ret_spelled);
+            declared_return = types.declaredReturnType(ret_ti);
             const ret_unknown = types.spelledIfUnknown(ret_ti, ret_spelled);
             if (ret_unknown.len > 0 and !std.mem.eql(u8, ret_unknown, "unknown")) {
                 self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_unknown, method_name });
@@ -1354,6 +1359,7 @@ const Parser = struct {
             .body = body,
             .sighash_type = sighash_type,
             .source_loc = method_loc,
+            .return_type = declared_return,
         };
     }
 

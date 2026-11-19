@@ -945,12 +945,14 @@ const Parser = struct {
             var fa_len: u32 = 0;
             var fa_elem: types.RunarType = .unknown;
             var fa_nested_len: u32 = 0;
+            var fa_leaf: types.RunarType = .unknown;
             if (type_node == .fixed_array_type) {
                 fa_len = type_node.fixed_array_type.length;
                 const inner = type_node.fixed_array_type.element.*;
                 fa_elem = typeNodeToRunarType(inner);
                 if (inner == .fixed_array_type) {
                     fa_nested_len = inner.fixed_array_type.length;
+                    fa_leaf = types.typeNodeToRunarType(inner.fixed_array_type.element.*);
                 }
             }
 
@@ -962,6 +964,7 @@ const Parser = struct {
                 .fixed_array_length = fa_len,
                 .fixed_array_element = fa_elem,
                 .fixed_array_nested_length = fa_nested_len,
+                .fixed_array_leaf = fa_leaf,
                 .embed_always = embed_always,
                 // N-109: the spelled type name + the field-name token, for the
                 // validator's unsupported-type diagnostic. Diagnostics only.
@@ -1094,11 +1097,16 @@ const Parser = struct {
     fn parseMethod(self: *Parser, name: []const u8, is_public: bool, loc: types.SourceLocation) MethodNode {
         const params = self.parseParams();
 
-        // Optional return type. The AST keeps none; N-331 refuses an unknown name.
+        // Optional return type. N-331 refuses an unknown name; D12 FE-F4 keeps
+        // the declared type on the method for the type checker.
+        var declared_return: ?types.RunarType = null;
+        var declared_return_name: []const u8 = "";
         if (self.current.kind == .colon) {
             _ = self.bump();
             const rt = self.parseTypeAnnotation();
             const rt_ti = typeNodeToRunarType(rt);
+            declared_return = types.declaredReturnTypeNode(rt);
+            declared_return_name = types.declaredReturnTypeName(self.allocator, rt);
             if (rt_ti == .unknown) {
                 const spelled = types.typeNodeName(rt);
                 if (!std.mem.eql(u8, spelled, "unknown")) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ spelled, name });
@@ -1109,7 +1117,7 @@ const Parser = struct {
         }
 
         const body = self.parseBlock();
-        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .source_loc = loc };
+        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .source_loc = loc, .return_type = declared_return, .return_type_name = declared_return_name };
     }
 
     /// N-199: remember the byte span of a member's leading trivia (a slice of

@@ -64,8 +64,10 @@ module RunarCompiler
 
       protected
 
+      # D12 FE-F1: +operand_type+ is a type-checker annotation, not syntax,
+      # so it is not part of equality either.
       def location_blind_key
-        members.reject { |m| m == :source_location }.map { |m| self[m] }
+        members.reject { |m| m == :source_location || m == :operand_type }.map { |m| self[m] }
       end
     end
 
@@ -91,14 +93,19 @@ module RunarCompiler
     # source_location is where the expression starts, including a leading `(`
     # (N-472); every surface parser sets it, nil on a synthesized node (typecheck
     # then falls back to the leftmost leaf).
-    BinaryExpr = Struct.new(:op, :left, :right, :source_location, keyword_init: true) do
+    # +operand_type+ (D12 FE-F1) is the operand family ("bytes" | "numeric")
+    # the TYPE CHECKER resolved for + === !== & | ^. Written by typecheck (and
+    # by expand_fixed_arrays for the nodes it synthesises); ANF lowering reads it
+    # and refuses a typed operator that carries none. Never set by a parser.
+    BinaryExpr = Struct.new(:op, :left, :right, :source_location, :operand_type, keyword_init: true) do
       include LocationBlindEquality
     end
 
     # A unary operation like !a, -a, ~a.
     # op is one of: "!", "-", "~"
     # source_location is the operator token (N-472); every surface parser sets it.
-    UnaryExpr = Struct.new(:op, :operand, :source_location, keyword_init: true) do
+    # +operand_type+: see BinaryExpr (set for ~ only).
+    UnaryExpr = Struct.new(:op, :operand, :source_location, :operand_type, keyword_init: true) do
       include LocationBlindEquality
     end
 
@@ -259,10 +266,15 @@ module RunarCompiler
     # public +.runar.ts+ method. +nil+ = the default lowS; +"all"+ selects the
     # compact non-low-S blob, spendable only when the spending tx has
     # nVersion > 1.
+    #
+    # +return_type+ (D12 FE-F4) is the return type the source declares, when
+    # its surface syntax can spell one (.runar.rb cannot; TypeScript may omit
+    # it). The type checker enforces it on every +return+ and gives it to every
+    # call. +nil+ = inferred from the body by the type checker.
     MethodNode = Struct.new(:name, :params, :body, :visibility, :source_location, :sighash_type, :binding_variant,
-                            keyword_init: true) do
+                            :return_type, keyword_init: true) do
       def initialize(name: "", params: [], body: [], visibility: "public", source_location: SourceLocation.new,
-                     sighash_type: nil, binding_variant: nil)
+                     sighash_type: nil, binding_variant: nil, return_type: nil)
         super
       end
     end

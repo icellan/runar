@@ -1243,6 +1243,8 @@ const Parser = struct {
         element: RunarType = .unknown,
         /// Inner length when the element is itself a FixedArray. Zero otherwise.
         nested_length: u32 = 0,
+        /// D12 FE-F1: leaf type of a nested array (see PropertyNode).
+        leaf: RunarType = .unknown,
     };
 
     /// Parse a Ruby type, mirroring `parser_ruby.rb` / `parser_ruby.go` /
@@ -1278,6 +1280,7 @@ const Parser = struct {
                 .length = size,
                 .element = element_info,
                 .nested_length = if (inner.info == .fixed_array) inner.length else 0,
+                .leaf = if (inner.info == .fixed_array) inner.element else .unknown,
             };
         }
 
@@ -1396,6 +1399,7 @@ const Parser = struct {
             .fixed_array_length = rb_type.length,
             .fixed_array_element = rb_type.element,
             .fixed_array_nested_length = rb_type.nested_length,
+            .fixed_array_leaf = rb_type.leaf,
         };
     }
 

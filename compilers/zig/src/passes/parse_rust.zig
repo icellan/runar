@@ -761,12 +761,14 @@ const Parser = struct {
                                 var fa_len: u32 = 0;
                                 var fa_elem: types.RunarType = .unknown;
                                 var fa_nested_len: u32 = 0;
+                                var fa_leaf: types.RunarType = .unknown;
                                 if (field_type == .fixed_array_type) {
                                     fa_len = field_type.fixed_array_type.length;
                                     const inner = field_type.fixed_array_type.element.*;
                                     fa_elem = types.typeNodeToRunarType(inner);
                                     if (inner == .fixed_array_type) {
                                         fa_nested_len = inner.fixed_array_type.length;
+                                        fa_leaf = types.typeNodeToRunarType(inner.fixed_array_type.element.*);
                                     }
                                 }
                                 properties.append(self.allocator, .{
@@ -782,6 +784,7 @@ const Parser = struct {
                                     .fixed_array_length = fa_len,
                                     .fixed_array_element = fa_elem,
                                     .fixed_array_nested_length = fa_nested_len,
+                                    .fixed_array_leaf = fa_leaf,
                                 }) catch {};
                             }
                         } else {
@@ -1198,11 +1201,15 @@ const Parser = struct {
         if (is_public and !has_self) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{raw_name});
 
         // Optional return type: -> Type
+        var declared_return: ?types.RunarType = null;
+        var declared_return_name: []const u8 = "";
         if (self.current.kind == .arrow) {
             _ = self.bump();
-            // The AST keeps no return type; N-331 refuses an unknown name.
+            // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
             const rt = self.parseRustType();
             const rt_ti = types.typeNodeToRunarType(rt);
+            declared_return = types.declaredReturnTypeNode(rt);
+            declared_return_name = types.declaredReturnTypeName(self.allocator, rt);
             const rt_unknown = types.spelledIfUnknown(rt_ti, types.typeNodeName(rt));
             if (rt_unknown.len > 0) {
                 self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
@@ -1222,7 +1229,7 @@ const Parser = struct {
         }
         _ = self.expect(.rbrace);
 
-        return .{ .name = name, .is_public = is_public, .params = params.items, .body = body.items, .source_loc = method_loc };
+        return .{ .name = name, .is_public = is_public, .params = params.items, .body = body.items, .source_loc = method_loc, .return_type = declared_return, .return_type_name = declared_return_name };
     }
 
     fn skipToNextMember(self: *Parser) void {

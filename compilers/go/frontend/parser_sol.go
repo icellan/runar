@@ -1059,6 +1059,8 @@ func (p *solParser) parseFunction() MethodNode {
 			p.errors = append(p.errors, *d)
 		}
 	}
+	// D12 FE-F4: the declared type is kept on the method for the type checker.
+	returnType := DeclaredReturnType(pendingRet)
 
 	body := p.parseSolBlock()
 
@@ -1074,6 +1076,7 @@ func (p *solParser) parseFunction() MethodNode {
 		Body:           body,
 		Visibility:     visibility,
 		SighashType:    sighashType,
+		ReturnType:     returnType,
 		SourceLocation: loc,
 	}
 }

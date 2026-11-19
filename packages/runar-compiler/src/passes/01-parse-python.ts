@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unexpectedClassBodyTokenMessage, unexpectedTokenAfterClassMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, declaredReturnType, invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unexpectedClassBodyTokenMessage, unexpectedTokenAfterClassMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
@@ -1042,12 +1042,14 @@ class PyParser {
     this.expect(')');
 
     // Optional return type annotation: -> Type
+    let declaredReturn: TypeNode | undefined;
     if (this.match('->')) {
-      // The AST keeps no return type; N-331 refuses an unknown name. `None`
-      // is Python's spelling of "returns nothing".
+      // N-331 refuses an unknown name. `None` is Python's spelling of
+      // "returns nothing". D12 FE-F4: the declared type is kept on the method.
       const returnType = this.parseType();
       if (!(returnType.kind === 'custom_type' && returnType.name === 'None')) {
         checkReturnType(returnType, rawName, loc, this.errors, decorators.includes('public'));
+        declaredReturn = declaredReturnType(returnType);
       }
     }
 
@@ -1091,6 +1093,7 @@ class PyParser {
       body,
       visibility: isPublic ? 'public' : 'private',
       ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+      ...(declaredReturn !== undefined ? { returnType: declaredReturn } : {}),
       sourceLocation: loc,
     };
   }

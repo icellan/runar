@@ -45,6 +45,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import {
   bareJavaPropertyAssignmentMessage,
   checkReturnType,
+  declaredReturnType,
   makeDiagnostic,
   staticMethodMessage,
   UNTERMINATED_STRING_LITERAL,
@@ -667,8 +668,9 @@ class JavaParser {
     isPublic: boolean,
     loc: SourceLocation,
   ): MethodNode {
-    // The AST keeps no return type; N-331 refuses an unknown name here.
+    // N-331 refuses an unknown name here; D12 FE-F4 keeps the declared type.
     checkReturnType(returnType, name, loc, this.errors, isPublic);
+    const declared = declaredReturnType(returnType);
     const params = this.parseParamList();
     // optional throws clause
     if (this.current().type === 'ident' && this.current().value === 'throws') {
@@ -694,6 +696,7 @@ class JavaParser {
       params,
       body,
       visibility: isPublic ? 'public' : 'private',
+      ...(declared !== undefined ? { returnType: declared } : {}),
       sourceLocation: loc,
     };
   }

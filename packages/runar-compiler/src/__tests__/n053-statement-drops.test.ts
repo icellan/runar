@@ -168,7 +168,6 @@ describe('N-053 .runar.rb statements are lowered or refused, never skipped', () 
   const rbHelper = 'assert x == @t\n    x';
   const rbTwins: Array<[string, string]> = [
     ['(_check(x))', '(this.check(x));'],
-    ['!_check(x)', '!this.check(x);'],
     ['-x', '-x;'],
     ['42', '42n;'],
     ['true', 'true;'],
@@ -179,6 +178,17 @@ describe('N-053 .runar.rb statements are lowered or refused, never skipped', () 
       expect(hexOf(rb(`${stmt}\n    assert true`, rbHelper), 'Disc.runar.rb')).toBe(want);
     });
   }
+
+  // D12 FE-F4: `_check` returns a bigint (declared in the twin, inferred from
+  // the body in Ruby), so `!_check(x)` is `!` on a bigint. It used to compile
+  // only because the helper's type was `<unknown>`; both surfaces refuse it.
+  it('`!_check(x)` on a bigint-returning helper is refused on both surfaces', () => {
+    const errs = (src: string, fileName: string): string[] =>
+      compile(src, { fileName }).diagnostics.filter((d) => d.severity === 'error').map((d) => d.message);
+    const want = "Operand of '!' must be boolean, got 'bigint'";
+    expect(errs(tsTwin('!this.check(x);\n    assert(true);', TS_CHECK), 'Disc.runar.ts')).toContain(want);
+    expect(errs(rb('!_check(x)\n    assert true', rbHelper), 'Disc.runar.rb')).toContain(want);
+  });
 
   for (const tok of ['do', 'in', 'class', 'def']) {
     it(`a statement starting with \`${tok}\` is refused with the shared diagnostic`, () => {

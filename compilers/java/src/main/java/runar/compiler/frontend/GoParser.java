@@ -1309,8 +1309,10 @@ public final class GoParser {
             String methodName = idents.declare(funcName, goFieldToCamel(funcName));
             List<ParamNode> params = parseFuncParams();
 
+            TypeNode declaredReturn = null;
             if (!check(Tok.LBRACE)) {
-                checkReturnType(methodName, visibility == Visibility.PUBLIC);
+                // D12 FE-F4: the declared type is kept on the method.
+                declaredReturn = checkReturnType(methodName, visibility == Visibility.PUBLIC);
                 skipReturnType();
             }
             List<Statement> body = parseBlock();
@@ -1320,7 +1322,8 @@ public final class GoParser {
             if (sighash != null && sighash.isError()) addError(sighash.error());
 
             return new FuncDecl(new MethodNode(methodName, params, body, visibility, location,
-                sighash == null || sighash.isError() ? null : sighash.value()), funcName, receiverType);
+                sighash == null || sighash.isError() ? null : sighash.value(), null, declaredReturn),
+                funcName, receiverType);
         }
 
         /**
@@ -1441,9 +1444,10 @@ public final class GoParser {
          * N-331: the AST keeps no return type, so a result type that is not a
          * Rúnar type is refused where it is spelled: a single type, or each
          * entry of a parenthesised result list (named or not). The rest is
-         * left to {@link #skipReturnType()}.
+         * left to {@link #skipReturnType()}. D12 FE-F4: returns the declared
+         * type of a single (unparenthesised) result, else null.
          */
-        void checkReturnType(String methodName, boolean isPublic) {
+        TypeNode checkReturnType(String methodName, boolean isPublic) {
             if (check(Tok.LPAREN)) {
                 advance();
                 while (!check(Tok.RPAREN) && !check(Tok.LBRACE) && !check(Tok.EOF)) {
@@ -1456,9 +1460,12 @@ public final class GoParser {
                     if (!match(Tok.COMMA)) break;
                 }
                 match(Tok.RPAREN);
+                return null;
             } else {
-                String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName, isPublic);
+                TypeNode returnType = parseType();
+                String unknownReturn = LexDiag.unknownReturnType(returnType, methodName, isPublic);
                 if (unknownReturn != null) addError(unknownReturn);
+                return MethodNode.declaredReturnType(returnType);
             }
         }
 

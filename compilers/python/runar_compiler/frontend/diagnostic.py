@@ -151,6 +151,14 @@ def unknown_return_type_message(t, method: str, is_public: bool = False) -> Opti
     return None
 
 
+def declared_return_type(t):
+    """D12 FE-F4: the declared return type a method node carries, or ``None``
+    when the declaration names no usable Rúnar type (an unknown name is refused
+    by ``reject_unknown_return_type``; the parser placeholder ``unknown`` means
+    "not given"). The TS reference's ``declaredReturnType``."""
+    return None if isinstance(t, CustomType) else t
+
+
 def reject_unknown_return_type(
     errors: list, t, method: str, loc: Optional[SourceLocation], is_public: bool = False
 ) -> None:

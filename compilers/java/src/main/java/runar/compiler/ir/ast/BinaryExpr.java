@@ -8,10 +8,24 @@ package runar.compiler.ir.ast;
  * does; a node a parser synthesizes carries {@code null} and typecheck falls
  * back to the leftmost leaf. It is not part of equality.
  */
-public record BinaryExpr(Expression.BinaryOp op, Expression left, Expression right, SourceLocation sourceLocation)
-        implements Expression {
+public record BinaryExpr(
+    Expression.BinaryOp op,
+    Expression left,
+    Expression right,
+    SourceLocation sourceLocation,
+    /** D12 FE-F1: see {@link OperandTypeSlot}. Never null; not part of equality. */
+    OperandTypeSlot operandType
+) implements Expression {
+    public BinaryExpr {
+        if (operandType == null) operandType = new OperandTypeSlot();
+    }
+
+    public BinaryExpr(Expression.BinaryOp op, Expression left, Expression right, SourceLocation sourceLocation) {
+        this(op, left, right, sourceLocation, new OperandTypeSlot());
+    }
+
     public BinaryExpr(Expression.BinaryOp op, Expression left, Expression right) {
-        this(op, left, right, null);
+        this(op, left, right, null, new OperandTypeSlot());
     }
 
     @Override

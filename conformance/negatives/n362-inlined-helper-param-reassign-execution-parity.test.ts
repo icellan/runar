@@ -171,13 +171,28 @@ const SHAPES: Shape[] = [
       },
     ],
   },
+  {
+    // D12 FE-F1: an inlined helper comparing its OWN ByteString params. The
+    // operands are equal but non-minimal as script numbers, so the pre-D12
+    // OP_NUMEQUAL refused this honest spend outright.
+    name: 'InlNoReassignBytes',
+    src: stateful('InlNoReassignBytes', `  private emit(a: ByteString, b: ByteString): void { assert(a === b); this.addOutput(1000n, a); }
+  public m(x: ByteString, y: ByteString) { this.emit(x, y); }`, 'data: ByteString'),
+    ctor: ['00'],
+    runs: [{ args: ['1200', '1200'], right: { data: '1200' }, stale: { data: '00' } }],
+  },
 ];
 
 /** An inlined helper that does NOT reassign: its pre-fix TS bytes must not move. */
 const NO_REASSIGN = stateful('InlNoReassign', `  private emit(a: ByteString, b: ByteString): void { assert(a === b); this.addOutput(1000n, a); }
   public m(x: ByteString, y: ByteString) { this.emit(x, y); }`, 'data: ByteString');
 // PR B (#180/#213): re-pinned, +7 B (entry width gate on `_changePKH`; 835 -> 842 B).
-const NO_REASSIGN_HEAD_SHA16 = '6a2ba3c9b192eb6e';
+// D12 FE-F1: re-pinned again, same length, 6a2ba3c9b192eb6e -> 348909c2628bf514.
+// The helper's own `a === b` on ByteString params was lowered OP_NUMEQUAL: the
+// ANF heuristic looked the inlined helper's params up among the CALLER's
+// params, found nothing and guessed numeric. It is now OP_EQUAL, from the
+// type checker. Executed below as the `InlNoReassignBytes` shape.
+const NO_REASSIGN_HEAD_SHA16 = '348909c2628bf514';
 
 const sha16 = (hex: string) => createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex').slice(0, 16);
 const foldOff = (t: Tier): Tier => ({ ...t, argsFor: (s) => [...t.argsFor(s), '--disable-constant-folding'] });

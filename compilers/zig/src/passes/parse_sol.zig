@@ -741,12 +741,14 @@ const Parser = struct {
         var fa_len: u32 = 0;
         var fa_elem: RunarType = .unknown;
         var fa_nested_len: u32 = 0;
+        var fa_leaf: types.RunarType = .unknown;
         if (type_node == .fixed_array_type) {
             fa_len = type_node.fixed_array_type.length;
             const inner = type_node.fixed_array_type.element.*;
             fa_elem = types.typeNodeToRunarType(inner);
             if (inner == .fixed_array_type) {
                 fa_nested_len = inner.fixed_array_type.length;
+                fa_leaf = types.typeNodeToRunarType(inner.fixed_array_type.element.*);
             }
         }
 
@@ -763,6 +765,7 @@ const Parser = struct {
             .fixed_array_length = fa_len,
             .fixed_array_element = fa_elem,
             .fixed_array_nested_length = fa_nested_len,
+            .fixed_array_leaf = fa_leaf,
         };
     }
 
@@ -1310,8 +1313,11 @@ const Parser = struct {
             } else break;
         }
 
+        var declared_return: ?types.RunarType = null;
         if (pending_ret) |ret_name| {
             const ret_ti = resolveSolType(ret_name);
+            // D12 FE-F4: the declared type is kept on the method.
+            declared_return = types.declaredReturnType(ret_ti);
             if (ret_ti == .unknown) {
                 self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_name, name });
             } else if (is_public and ret_ti != .void) {
@@ -1325,7 +1331,7 @@ const Parser = struct {
             .value => |v| sighash_type = v,
             .err => |e| self.addErrorAtLoc(loc, e),
         };
-        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = loc };
+        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = loc, .return_type = declared_return };
     }
 
     // ---- Parameters: (Type name, Type name, ...) ----

@@ -18,7 +18,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { checkReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, declaredReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -527,11 +527,17 @@ class SolParser {
       break;
     }
 
-    // Return type: the AST keeps none, but N-331 refuses an unknown name.
+    // Return type: N-331 refuses an unknown name; D12 FE-F4 keeps the declared
+    // type on the method for the type checker.
+    let returnType: TypeNode | undefined;
     if (this.current().type === 'ident' && this.current().value === 'returns') {
       this.advance();
       this.expect('(');
-      if (this.current().type === 'ident') checkReturnType(this.parseType(), name, location, this.errors, visibility === 'public');
+      if (this.current().type === 'ident') {
+        const rt = this.parseType();
+        checkReturnType(rt, name, location, this.errors, visibility === 'public');
+        returnType = declaredReturnType(rt);
+      }
       while (this.current().type !== ')' && this.current().type !== 'eof') this.advance();
       this.expect(')');
     }
@@ -550,6 +556,7 @@ class SolParser {
     return {
       kind: 'method', name, params, body, visibility,
       ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+      ...(returnType !== undefined ? { returnType } : {}),
       sourceLocation: location,
     };
   }

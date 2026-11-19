@@ -46,7 +46,7 @@ import type {
   ReturnStatement,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { checkReturnType, makeDiagnostic, OPTIONAL_CHAINING, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, declaredReturnType, makeDiagnostic, OPTIONAL_CHAINING, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral } from './int-literal.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
@@ -514,10 +514,14 @@ function parseMethod(
 
   const params = parseParams(method.getParameters(), file, errors);
 
-  // N-331: the AST keeps no return type, so an unknown name is refused here.
+  // N-331: an unknown name is refused here. D12 FE-F4: the declared type is
+  // kept on the method so the type checker can enforce it.
   const returnTypeNode = method.getReturnTypeNode();
+  let returnType: TypeNode | undefined;
   if (returnTypeNode) {
-    checkReturnType(parseTypeNode(returnTypeNode, file, errors), name, locFromNode(method, file), errors, method.hasModifier(SyntaxKind.PublicKeyword));
+    const rt = parseTypeNode(returnTypeNode, file, errors);
+    checkReturnType(rt, name, locFromNode(method, file), errors, method.hasModifier(SyntaxKind.PublicKeyword));
+    returnType = declaredReturnType(rt);
   }
 
   let visibility: 'public' | 'private' = 'private';
@@ -541,6 +545,7 @@ function parseMethod(
     visibility,
     ...(sighashType !== undefined ? { sighashType } : {}),
     ...(bindingVariant !== undefined ? { bindingVariant } : {}),
+    ...(returnType !== undefined ? { returnType } : {}),
     sourceLocation: locFromNode(method, file),
   };
 }

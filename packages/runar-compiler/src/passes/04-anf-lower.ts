@@ -20,6 +20,7 @@ import type {
   Statement,
   Expression,
   TypeNode,
+  OperandType,
 } from '../ir/index.js';
 import type {
   ANFProgram,
@@ -31,13 +32,13 @@ import type {
   BinOp,
   ANFUnaryOp,
 } from '../ir/index.js';
+import { typecheck } from './03-typecheck.js';
 import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.js';
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
 import { emitOutpointBinding, emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
 import { TWIN_BINDING_FIELD } from './continuation-binding.js';
-import { isByteReturningBuiltin, isByteStringFamilyType } from './03-typecheck.js';
 import { loopOutputIntrinsicMessage, ternaryOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import type { BindingVariant } from '../ir/anf-ir.js';
@@ -54,6 +55,13 @@ const SHADOW_LOCAL_SUFFIX = '@local';
  * Lower a validated Rúnar AST to ANF IR.
  */
 export function lowerToANF(contract: ContractNode): ANFProgram {
+  // D12 FE-F1: operator lowering reads the operand family 03-typecheck records
+  // on the AST. `compile()` always type-checks first; a caller handing this
+  // public entry point a contract that never went through the type checker
+  // gets it run here (its diagnostics are the caller's business), so the
+  // types still come from the checker and never from a guess. A node the
+  // checker could not type keeps no annotation and is refused below.
+  if (hasUntypedOperator(contract)) typecheck(contract);
   const properties = lowerProperties(contract);
   const methods = lowerMethods(contract);
 
@@ -559,7 +567,6 @@ class MethodScope {
 interface InlinedScopeState {
   scopeRenames: Map<string, string>;
   localNames: Set<string>;
-  localByteVars: Set<string>;
   localAliases: Map<string, string>;
   loopVars: Set<string>;
 }
@@ -582,7 +589,6 @@ class LoweringContext {
    */
   private readonly methodParamTypes: Map<string, string> = new Map();
   private readonly localNames: Set<string> = new Set();
-  private readonly localByteVars: Set<string> = new Set();
   private readonly _addOutputRefs: string[] = [];
   private readonly _addDataOutputRefs: string[] = [];
   /**
@@ -732,16 +738,6 @@ class LoweringContext {
     this.localNames.add(name);
   }
 
-  /** Record a local variable as byte-typed. */
-  addLocalByteVar(name: string): void {
-    this.localByteVars.add(name);
-  }
-
-  /** Check if a local variable is byte-typed. */
-  isLocalByteVar(name: string): boolean {
-    return this.localByteVars.has(name);
-  }
-
   isParam(name: string): boolean {
     return this.paramNames.has(name);
   }
@@ -834,7 +830,6 @@ class LoweringContext {
     const saved: InlinedScopeState = {
       scopeRenames: this.scopeRenames,
       localNames: new Set(this.localNames),
-      localByteVars: new Set(this.localByteVars),
       localAliases: new Map(this.localAliases),
       loopVars: new Set(this.loopVars),
     };
@@ -845,7 +840,6 @@ class LoweringContext {
   leaveInlinedScope(saved: InlinedScopeState): void {
     this.scopeRenames = saved.scopeRenames;
     replaceSet(this.localNames, saved.localNames);
-    replaceSet(this.localByteVars, saved.localByteVars);
     replaceSet(this.loopVars, saved.loopVars);
     this.localAliases.clear();
     for (const [k, v] of saved.localAliases) this.localAliases.set(k, v);
@@ -1015,15 +1009,6 @@ class LoweringContext {
     return this.getParamType(name) === 'StatefulContext';
   }
 
-  /** Look up the type of a contract property by name. Returns the type string or null. */
-  getPropertyType(name: string): string | null {
-    for (const p of this.contract.properties) {
-      if (p.name === name) {
-        return typeNodeToString(p.type);
-      }
-    }
-    return null;
-  }
 
   /** Create a sub-context for nested blocks (if/else, loops). */
   subContext(): LoweringContext {
@@ -1041,7 +1026,6 @@ class LoweringContext {
     for (const p of this.paramNames) sub.paramNames.add(p);
     for (const [k, v] of this.methodParamTypes) sub.methodParamTypes.set(k, v);
     for (const l of this.localNames) sub.localNames.add(l);
-    for (const b of this.localByteVars) sub.localByteVars.add(b);
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
     for (const [k, v] of this.renamedPrivateParams) sub.renamedPrivateParams.set(k, v);
     for (const v of this.shadowingLoopVars) sub.shadowingLoopVars.add(v);
@@ -1296,18 +1280,10 @@ function lowerVariableDecl(
   ctx: LoweringContext,
 ): void {
   const valueRef = lowerExprToRef(stmt.init, ctx);
-  // Byte-typedness of the initialiser is judged before the new name is in
-  // scope (the initialiser reads the OUTER binding of a shadowed name).
-  const isBytes = isByteTypedExpr(stmt.init, ctx);
   // N-046 / N-047: a declaration reusing an enclosing binding's name is
   // alpha-renamed (see `declareLocal`).
   const bindingName = ctx.declareLocal(stmt.name);
   ctx.addLocal(bindingName);
-
-  // Track byte-typed locals so equality comparisons use OP_EQUAL
-  if (isBytes) {
-    ctx.addLocalByteVar(bindingName);
-  }
 
   // Emit a binding that aliases the variable name to the computed value.
   // We load the temp as a const reference to the computed value.
@@ -2329,25 +2305,12 @@ function lowerBinaryExpr(
   const leftRef = lowerExprToRef(expr.left, ctx);
   const rightRef = lowerExprToRef(expr.right, ctx);
 
-  // For equality operators, annotate with operand type so stack lowering
-  // can choose OP_EQUAL vs OP_NUMEQUAL.
+  // D12 FE-F1: `+` (OP_CAT / OP_ADD), `===` / `!==` (OP_EQUAL / OP_NUMEQUAL)
+  // and `& | ^` (byte string vs number) are lowered from the operand family
+  // the TYPE CHECKER resolved and recorded on the node — never from a guess.
   const binOp: BinOp = { kind: 'bin_op', op: expr.op, left: leftRef, right: rightRef };
-  if (expr.op === '===' || expr.op === '!==') {
-    if (isByteTypedExpr(expr.left, ctx) || isByteTypedExpr(expr.right, ctx)) {
-      binOp.result_type = 'bytes';
-    }
-  }
-  // For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
-  if (expr.op === '+') {
-    if (isByteTypedExpr(expr.left, ctx) || isByteTypedExpr(expr.right, ctx)) {
-      binOp.result_type = 'bytes';
-    }
-  }
-  // For bitwise &, |, ^, annotate byte-typed operands.
-  if (expr.op === '&' || expr.op === '|' || expr.op === '^') {
-    if (isByteTypedExpr(expr.left, ctx) || isByteTypedExpr(expr.right, ctx)) {
-      binOp.result_type = 'bytes';
-    }
+  if (TYPED_BINARY_OPS.has(expr.op) && requireOperandType(expr.op, expr.operandType) === 'bytes') {
+    binOp.result_type = 'bytes';
   }
   return ctx.emit(binOp);
 }
@@ -2358,8 +2321,8 @@ function lowerUnaryExpr(
 ): string {
   const operandRef = lowerExprToRef(expr.operand, ctx);
   const unaryOp: ANFUnaryOp = { kind: 'unary_op', op: expr.op, operand: operandRef };
-  // For ~, annotate byte-typed operands so downstream passes know the result is bytes.
-  if (expr.op === '~' && isByteTypedExpr(expr.operand, ctx)) {
+  // D12 FE-F1: see lowerBinaryExpr.
+  if (expr.op === '~' && requireOperandType('~', expr.operandType) === 'bytes') {
     unaryOp.result_type = 'bytes';
   }
   return ctx.emit(unaryOp);
@@ -2824,7 +2787,6 @@ function inlinePrivateMethodCall(
     const param = method.params[i]!;
     const bindingName = ctx.declareLocal(param.name);
     ctx.addLocal(bindingName);
-    if (isByteStringFamilyType(typeNodeToString(param.type))) ctx.addLocalByteVar(bindingName);
     ctx.emitNamed(bindingName, { kind: 'load_const', value: `@ref:${argRefs[i]!}` });
   }
   const startIndex = ctx.bindings.length;
@@ -3027,71 +2989,38 @@ function lowerDecrementExpr(
 // Type inference helpers for equality semantics
 // ---------------------------------------------------------------------------
 
-/**
- * Byte-typed primitive names — values that are already byte sequences.
- *
- * N-076: there is deliberately no list here. The type checker's
- * `BYTESTRING_SUBTYPES` is the authority and `isByteStringFamilyType` exposes
- * it; a second, hand-maintained copy is how `RabinSig` / `RabinPubKey` ended
- * up annotated `bytes` in six of seven tiers while every one of those tiers'
- * own type checkers filed them under `BIGINT_SUBTYPES` — which made `===` on a
- * Rabin value emit OP_EQUAL and, far worse, `+` on one emit OP_CAT.
- */
+/** Binary operators whose opcode depends on the operand family (FE-F1). */
+const TYPED_BINARY_OPS = new Set<string>(['+', '===', '!==', '&', '|', '^']);
 
-/**
- * Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).
- * This is a best-effort heuristic used to annotate equality operators.
- */
-function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
-  switch (expr.kind) {
-    case 'bytestring_literal':
-      return true;
-
-    case 'identifier': {
-      // N-046 / N-047: a renamed (shadowing) declaration is judged by its own
-      // binding, never by the parameter or property it shadows.
-      const renamed = ctx.scopeRename(expr.name);
-      if (renamed !== undefined) return ctx.isLocalByteVar(renamed);
-      // Check if it's a parameter or property with a byte type
-      const paramType = ctx.getParamType(expr.name);
-      if (paramType && isByteStringFamilyType(paramType)) return true;
-      const propType = ctx.getPropertyType(expr.name);
-      if (propType && isByteStringFamilyType(propType)) return true;
-      // Check if it's a local variable known to be byte-typed
-      if (ctx.isLocalByteVar(ctx.localName(expr.name))) return true;
-      return false;
-    }
-
-    case 'property_access': {
-      // this.x — check the property type
-      const propType = ctx.getPropertyType(expr.property);
-      if (propType && isByteStringFamilyType(propType)) return true;
-      return false;
-    }
-
-    case 'member_expr': {
-      if (expr.object.kind === 'identifier' && expr.object.name === 'this') {
-        const propType = ctx.getPropertyType(expr.property);
-        if (propType && isByteStringFamilyType(propType)) return true;
-      }
-      return false;
-    }
-
-    case 'call_expr': {
-      // sha256(x), hash160(x), extractOutputHash(p), etc. N-347: decided by
-      // the type checker's return table, NOT a second hand-written list here
-      // (two such lists drifted: N-054 swept numeric extractors in, N-345 and
-      // N-347 left byte-returning builtins out, so `===` on them compiled to
-      // OP_NUMEQUAL). Do not reintroduce one.
-      if (expr.callee.kind === 'identifier' && isByteReturningBuiltin(expr.callee.name)) {
-        return true;
-      }
-      return false;
-    }
-
-    default:
-      return false;
+/** Does any operator whose lowering needs an operand type lack one? */
+function hasUntypedOperator(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasUntypedOperator);
+  if (node === null || typeof node !== 'object') return false;
+  const n = node as { kind?: unknown; op?: unknown; operandType?: unknown };
+  if (n.operandType === undefined &&
+      ((n.kind === 'binary_expr' && TYPED_BINARY_OPS.has(n.op as string)) ||
+       (n.kind === 'unary_expr' && n.op === '~'))) {
+    return true;
   }
+  return Object.values(node).some(hasUntypedOperator);
+}
+
+/**
+ * D12 FE-F1: the operand family 03-typecheck recorded on an operator node.
+ * There is deliberately no fallback. The previous heuristic (`isByteTypedExpr`)
+ * defaulted to numeric whenever it could not see a byte type — a ternary, a
+ * helper result, `this.arr[i]`, a bitwise result, or a local built from one —
+ * and compiled byte-string `+` to OP_ADD and `===` to OP_NUMEQUAL. A node
+ * without the annotation was never type-checked, so it is refused.
+ */
+function requireOperandType(op: string, t: OperandType | undefined): OperandType {
+  if (t === undefined) {
+    throw new Error(
+      `ANF lowering: operator '${op}' carries no operand type from the type checker; ` +
+        'run typecheck() on the contract before lowerToANF() (refusing to guess byte string vs number)',
+    );
+  }
+  return t;
 }
 
 // ---------------------------------------------------------------------------

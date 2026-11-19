@@ -18,6 +18,15 @@ import (
 // LowerToANF lowers a type-checked Rúnar AST to the ANF IR.
 // This matches the TypeScript reference compiler's 04-anf-lower.ts exactly.
 func LowerToANF(contract *ContractNode) *ir.ANFProgram {
+	// D12 FE-F1: operator lowering reads the operand family TypeCheck records
+	// on the AST. The compiler always type-checks first; a caller handing
+	// this public entry point a contract that never went through the type
+	// checker gets it run here (its diagnostics are the caller's business),
+	// so the types still come from the checker and never from a guess. A
+	// node the checker could not type keeps no family and is refused below.
+	if hasUntypedOperator(contract) {
+		TypeCheck(contract)
+	}
 	properties := lowerProperties(contract)
 	methods := lowerMethods(contract)
 
@@ -40,86 +49,20 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	}
 }
 
-// isByteType reports whether a value of this type sits on the stack as a BYTE
-// STRING rather than as a script NUMBER.
-//
-// N-076: there is deliberately no list here. typecheck.go's
-// byteStringSubtypes is the authority. The second, hand-maintained copy this
-// replaces carried "RabinSig" and "RabinPubKey", which typecheck.go files
-// under bigintSubtypes — so `===` on a Rabin value emitted OP_EQUAL and, far
-// worse, `+` on one emitted OP_CAT where the source said addition.
-//
-// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
-// with OP_ADD.
-func isByteType(typeName string) bool {
-	return byteStringSubtypes[typeName]
-}
-
-// isByteReturningBuiltin reports whether the builtin `name` returns a
-// ByteString-family value.
-//
-// N-347: this is read off the returnType column of typecheck.go's
-// builtinFunctions, not a second hand-written list. Two such lists lived here
-// and drifted: N-054 (a name-prefix test swept the six numeric extractors in)
-// and N-345 / N-347 (byte-returning builtins left out — merkleRootSha256,
-// merkleRootHash256, bn254G1Add, bn254G1Negate, bn254G1ScalarMul — so `===`
-// on two of their results compiled to OP_NUMEQUAL). Do not reintroduce one.
-func isByteReturningBuiltin(name string) bool {
-	sig, ok := builtinFunctions[name]
-	return ok && isByteType(sig.returnType)
-}
-
-func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
-	switch e := expr.(type) {
-	case ByteStringLiteral:
-		return true
-
-	case Identifier:
-		// N-046 / N-047: a renamed (shadowing) declaration is judged by its own
-		// binding, never by the parameter or property it shadows.
-		if renamed, ok := ctx.scopeRenames[e.Name]; ok {
-			return ctx.localByteVars[renamed]
-		}
-		if t, ok := ctx.getParamType(e.Name); ok && isByteType(t) {
-			return true
-		}
-		if t, ok := ctx.getPropertyType(e.Name); ok && isByteType(t) {
-			return true
-		}
-		if ctx.localByteVars[ctx.localName(e.Name)] {
-			return true
-		}
-		return false
-
-	case PropertyAccessExpr:
-		if t, ok := ctx.getPropertyType(e.Property); ok && isByteType(t) {
-			return true
-		}
-		return false
-
-	case MemberExpr:
-		if id, ok := e.Object.(Identifier); ok && id.Name == "this" {
-			if t, found := ctx.getPropertyType(e.Property); found && isByteType(t) {
-				return true
-			}
-		}
-		return false
-
-	case CallExpr:
-		if id, ok := e.Callee.(Identifier); ok {
-			// Expression-form asm<ByteString>({...}) yields a byte value.
-			if id.Name == "asm" {
-				return e.AsmReturnType == "ByteString"
-			}
-			if isByteReturningBuiltin(id.Name) {
-				return true
-			}
-		}
-		return false
-
-	default:
-		return false
+// requireOperandType is the operand family TypeCheck recorded on an operator
+// node (D12 FE-F1). There is deliberately no fallback. The previous heuristic
+// (isByteTypedExpr) defaulted to numeric whenever it could not see a byte
+// type — a ternary, a helper result, `this.arr[i]`, a bitwise result, or a
+// local built from one — and compiled byte-string `+` to OP_ADD and `===` to
+// OP_NUMEQUAL. A node without the family was never type-checked, so it is
+// refused.
+func requireOperandType(op string, slot *string) string {
+	t := operandTypeOf(slot)
+	if t == "" {
+		panic(fmt.Sprintf("ANF lowering: operator '%s' carries no operand type from the type checker; "+
+			"run TypeCheck() on the contract before LowerToANF() (refusing to guess byte string vs number)", op))
 	}
+	return t
 }
 
 // ---------------------------------------------------------------------------
@@ -725,7 +668,6 @@ type lowerCtx struct {
 	scopeRenames map[string]string
 	// N-046: source names of the loop variables in scope.
 	loopVars map[string]bool
-	localByteVars     map[string]bool    // tracks local variables known to be byte-typed
 	currentSourceLoc  *ir.SourceLocation // Debug: source location to attach to emitted ANF bindings
 	// Param substitution stack used when inlining a private method's body
 	// directly into this context. Each entry on top is the active alias
@@ -853,7 +795,6 @@ func newLowerCtxWithEffects(contract *ContractNode, summary SideEffectSummary) *
 		paramNames:       make(map[string]bool),
 		methodParamTypes: make(map[string]string),
 		localAliases:     make(map[string]string),
-		localByteVars:    make(map[string]bool),
 		paramAliasStack:  make(map[string][]string),
 		sideEffects:      summary,
 		methodScope:      newMethodScope(),
@@ -1279,7 +1220,6 @@ func (ctx *lowerCtx) addLoopVar(name string) {
 type inlinedScopeState struct {
 	scopeRenames  map[string]string
 	localNames    map[string]bool
-	localByteVars map[string]bool
 	localAliases  map[string]string
 	loopVars      map[string]bool
 }
@@ -1303,7 +1243,6 @@ func (ctx *lowerCtx) enterInlinedScope() inlinedScopeState {
 	saved := inlinedScopeState{
 		scopeRenames:  ctx.scopeRenames,
 		localNames:    copyBoolMap(ctx.localNames),
-		localByteVars: copyBoolMap(ctx.localByteVars),
 		localAliases:  aliases,
 		loopVars:      copyBoolMap(ctx.loopVars),
 	}
@@ -1314,7 +1253,6 @@ func (ctx *lowerCtx) enterInlinedScope() inlinedScopeState {
 func (ctx *lowerCtx) leaveInlinedScope(saved inlinedScopeState) {
 	ctx.scopeRenames = saved.scopeRenames
 	ctx.localNames = saved.localNames
-	ctx.localByteVars = saved.localByteVars
 	ctx.localAliases = saved.localAliases
 	ctx.loopVars = saved.loopVars
 }
@@ -1329,15 +1267,6 @@ func (ctx *lowerCtx) getParamType(name string) (string, bool) {
 	return t, ok
 }
 
-func (ctx *lowerCtx) getPropertyType(name string) (string, bool) {
-	for _, p := range ctx.contract.Properties {
-		if p.Name == name {
-			return typeNodeToString(p.Type), true
-		}
-	}
-	return "", false
-}
-
 // subContext creates a sub-context for nested blocks (if/else, loops).
 // The counter continues from the parent. Local names and param names are shared.
 func (ctx *lowerCtx) subContext() *lowerCtx {
@@ -1348,7 +1277,6 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		paramNames:       make(map[string]bool),
 		methodParamTypes: make(map[string]string),
 		localAliases:     make(map[string]string),
-		localByteVars:    make(map[string]bool),
 		paramAliasStack:  make(map[string][]string),
 		sideEffects:      ctx.sideEffects, // read-only summary — a nested call site must make the same inlining decision as a top-level one
 		methodScope:      ctx.methodScope, // shared pointer — auto-injection registers propagate up
@@ -1372,10 +1300,6 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 	// same current-method param types and not other methods' params.
 	for k, v := range ctx.methodParamTypes {
 		sub.methodParamTypes[k] = v
-	}
-	// Share local byte var set
-	for k := range ctx.localByteVars {
-		sub.localByteVars[k] = true
 	}
 	// Share local aliases
 	for k, v := range ctx.localAliases {
@@ -1640,16 +1564,10 @@ func stmtSourceLoc(stmt Statement) *ir.SourceLocation {
 // a named binding that aliases the variable to the computed value via @ref.
 func (ctx *lowerCtx) lowerVariableDecl(stmt VariableDeclStmt) {
 	valueRef := ctx.lowerExprToRef(stmt.Init)
-	// Byte-typedness of the initialiser is judged before the new name is in
-	// scope (the initialiser reads the OUTER binding of a shadowed name).
-	isBytes := isByteTypedExpr(stmt.Init, ctx)
 	// N-046 / N-047: a declaration reusing an enclosing binding's name is
 	// alpha-renamed (see declareLocal).
 	bindingName := ctx.declareLocal(stmt.Name)
 	ctx.addLocal(bindingName)
-	if isBytes {
-		ctx.localByteVars[bindingName] = true
-	}
 	ctx.emitNamed(bindingName, makeLoadConstString("@ref:"+valueRef))
 }
 
@@ -2388,16 +2306,12 @@ func (ctx *lowerCtx) lowerExprToRef(expr Expression) string {
 		leftRef := ctx.lowerExprToRef(e.Left)
 		rightRef := ctx.lowerExprToRef(e.Right)
 
+		// D12 FE-F1: `+` (OP_CAT / OP_ADD), `===` / `!==` (OP_EQUAL /
+		// OP_NUMEQUAL) and `& | ^` (byte string vs number) are lowered from
+		// the operand family the TYPE CHECKER resolved and recorded on the
+		// node — never from a guess.
 		resultType := ""
-		if (e.Op == "===" || e.Op == "!==") && (isByteTypedExpr(e.Left, ctx) || isByteTypedExpr(e.Right, ctx)) {
-			resultType = "bytes"
-		}
-		// For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
-		if e.Op == "+" && (isByteTypedExpr(e.Left, ctx) || isByteTypedExpr(e.Right, ctx)) {
-			resultType = "bytes"
-		}
-		// For bitwise &, |, ^, annotate byte-typed operands.
-		if (e.Op == "&" || e.Op == "|" || e.Op == "^") && (isByteTypedExpr(e.Left, ctx) || isByteTypedExpr(e.Right, ctx)) {
+		if isTypedBinaryOp(e.Op) && requireOperandType(e.Op, e.OperandType) == OperandBytes {
 			resultType = "bytes"
 		}
 
@@ -2406,8 +2320,8 @@ func (ctx *lowerCtx) lowerExprToRef(expr Expression) string {
 	case UnaryExpr:
 		operandRef := ctx.lowerExprToRef(e.Operand)
 		unaryValue := ir.ANFValue{Kind: "unary_op", Op: e.Op, Operand: operandRef}
-		// For ~, annotate byte-typed operands so downstream passes know the result is bytes.
-		if e.Op == "~" && isByteTypedExpr(e.Operand, ctx) {
+		// D12 FE-F1: see BinaryExpr above.
+		if e.Op == "~" && requireOperandType("~", e.OperandType) == OperandBytes {
 			unaryValue.ResultType = "bytes"
 		}
 		return ctx.emit(unaryValue)
@@ -3171,9 +3085,6 @@ func (ctx *lowerCtx) inlinePrivateMethodCall(methodName string, argRefs []string
 		param := method.Params[i]
 		bindingName := ctx.declareLocal(param.Name)
 		ctx.addLocal(bindingName)
-		if isByteType(typeNodeToString(param.Type)) {
-			ctx.localByteVars[bindingName] = true
-		}
 		ctx.emitNamed(bindingName, makeLoadConstString("@ref:"+argRefs[i]))
 	}
 	startIndex := len(ctx.bindings)

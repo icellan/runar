@@ -207,9 +207,17 @@ class Probe extends SmartContract {
 }
 "#,
     );
+    // D12 FE-F4: the helper DECLARES `ByteString`, and a declared return
+    // type is now authoritative and enforced on every `return`: the call is
+    // typed `ByteString` (so the binding itself is fine) and the bigint
+    // `return x + x` is refused at the helper. The mismatch is still reported,
+    // just where it is (it used to be the binding, via body inference that
+    // ignored the declaration).
     assert!(
-        errors.iter().any(|e| e.contains("is not assignable to type 'ByteString'")),
-        "expected a bigint-vs-ByteString assignability error, got: {:?}",
+        errors.iter().any(|e| e.contains(
+            "Method 'helper' returns 'bigint', which is not assignable to its declared return type 'ByteString'"
+        )),
+        "expected a bigint-vs-ByteString return-type error, got: {:?}",
         errors
     );
 }

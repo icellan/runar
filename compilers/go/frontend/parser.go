@@ -933,7 +933,9 @@ func (p *parseContext) parseConstructor(node *sitter.Node) MethodNode {
 func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 	name := p.getMethodName(node)
 	params := p.parseMethodParams(node)
-	// N-331: the AST keeps no return type, so an unknown name is refused here.
+	// N-331: an unknown name is refused here. D12 FE-F4: the declared type is
+	// kept on the method so the type checker can enforce it.
+	var returnType TypeNode
 	if rt := p.findChildByType(node, "type_annotation"); rt != nil {
 		isPublic := false
 		for i := 0; i < int(node.ChildCount()); i++ {
@@ -941,9 +943,11 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 				isPublic = true
 			}
 		}
-		if d := UnknownReturnTypeDiagnostic(p.parseTypeAnnotation(rt), name, p.loc(node), isPublic); d != nil {
+		rtNode := p.parseTypeAnnotation(rt)
+		if d := UnknownReturnTypeDiagnostic(rtNode, name, p.loc(node), isPublic); d != nil {
 			p.errors = append(p.errors, *d)
 		}
+		returnType = DeclaredReturnType(rtNode)
 	}
 	body := p.parseMethodBody(node)
 
@@ -977,6 +981,7 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 		Visibility:     visibility,
 		SighashType:    sighashType,
 		BindingVariant: bindingVariant,
+		ReturnType:     returnType,
 		SourceLocation: p.loc(node),
 	}
 }

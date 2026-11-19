@@ -493,6 +493,7 @@ impl<'a> ExpandContext<'a> {
     fn rewrite_method(&mut self, method: &MethodNode) -> MethodNode {
         let new_body = self.rewrite_statements(&method.body);
         MethodNode {
+            return_type: None,
             name: method.name.clone(),
             params: method.params.clone(),
             body: new_body,
@@ -840,6 +841,8 @@ impl<'a> ExpandContext<'a> {
                 let assignment = Statement::Assignment {
                     target: target.clone(),
                     value: Expression::BinaryExpr {
+                        // D12 FE-F1: typecheck already required a bigint operand for ++/--.
+                        operand_type: operand_slot(OperandType::Numeric),
                         op,
                         left: Box::new(target),
                         right: Box::new(Expression::BigIntLiteral {
@@ -924,7 +927,7 @@ impl<'a> ExpandContext<'a> {
             Expression::IndexAccess { object, index } => {
                 self.rewrite_index_access(object, index, prelude)
             }
-            Expression::BinaryExpr { op, left, right, .. } => {
+            Expression::BinaryExpr { op, left, right, operand_type, .. } => {
                 let l = self.rewrite_expression(left, prelude);
                 // spec §3.7: the right operand of && / || is conditional.
                 let short_circuit = matches!(op, BinaryOp::And | BinaryOp::Or);
@@ -936,15 +939,19 @@ impl<'a> ExpandContext<'a> {
                     self.order_cond -= 1;
                 }
                 Expression::BinaryExpr {
+                    // D12 FE-F1: the rebuilt node keeps the checker's tag.
+                    operand_type: operand_type.clone(),
                     op: op.clone(),
                     left: Box::new(l),
                     right: Box::new(r),
                     source_location: None,
                 }
             }
-            Expression::UnaryExpr { op, operand, .. } => {
+            Expression::UnaryExpr { op, operand, operand_type, .. } => {
                 let o = self.rewrite_expression(operand, prelude);
                 Expression::UnaryExpr {
+                    // D12 FE-F1: the rebuilt node keeps the checker's tag.
+                    operand_type: operand_type.clone(),
                     op: op.clone(),
                     operand: Box::new(o),
                     source_location: None,
@@ -1219,6 +1226,7 @@ impl<'a> ExpandContext<'a> {
         while i >= 0 {
             let slot = &meta.slot_names[i as usize];
             let cond = Expression::BinaryExpr {
+                operand_type: operand_slot(OperandType::Numeric), // D12 FE-F1: index vs a bigint literal
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
@@ -1262,6 +1270,7 @@ impl<'a> ExpandContext<'a> {
         while i >= 0 {
             let slot = &meta.slot_names[i as usize];
             let cond = Expression::BinaryExpr {
+                operand_type: operand_slot(OperandType::Numeric), // D12 FE-F1: index vs a bigint literal
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
@@ -1379,6 +1388,7 @@ impl<'a> ExpandContext<'a> {
         while i >= 0 {
             let slot = &meta.slot_names[i as usize];
             let cond = Expression::BinaryExpr {
+                operand_type: operand_slot(OperandType::Numeric), // D12 FE-F1: index vs a bigint literal
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),

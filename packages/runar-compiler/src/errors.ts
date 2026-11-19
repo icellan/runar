@@ -157,6 +157,15 @@ export function unknownReturnTypeMessage(typeName: string, methodName: string): 
  * annotation) is a named type that is not a Rúnar type. `unknown` is the
  * missing-annotation placeholder, diagnosed elsewhere.
  */
+/**
+ * D12 FE-F4: the declared return type a method node carries, or undefined when
+ * the declaration names no usable Rúnar type (an unknown name is refused by
+ * `checkReturnType`; the parser placeholder `unknown` means "not given").
+ */
+export function declaredReturnType(type: TypeNode): TypeNode | undefined {
+  return type.kind === 'custom_type' ? undefined : type;
+}
+
 export function checkReturnType(
   type: TypeNode,
   methodName: string,

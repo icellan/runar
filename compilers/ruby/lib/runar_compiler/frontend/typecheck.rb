@@ -270,6 +270,35 @@ module RunarCompiler
       BYTESTRING_SUBTYPES.include?(type_name)
     end
 
+    # Binary operators whose lowering depends on the operand family (D12 FE-F1).
+    TYPED_BINARY_OPS = %w[+ === !== & | ^].freeze
+
+    # D12 FE-F1: the lowering family of a resolved type: "bytes", "numeric"
+    # (a script number), or nil.
+    def self.operand_family(type_name)
+      return "bytes" if BYTESTRING_SUBTYPES.include?(type_name)
+      return "numeric" if BIGINT_SUBTYPES.include?(type_name) || type_name == "boolean"
+
+      nil
+    end
+
+    # D12 FE-F1: the one wording every tier emits.
+    def self.unresolved_operand_types_message(op, left, right)
+      "Cannot resolve the operand types of '#{op}' (got '#{left}' and '#{right}'): " \
+        "it must be known whether the operands are byte strings or numbers"
+    end
+
+    # D12 FE-F4: the one wording every tier emits.
+    # D12 FE-F4: the one wording every tier emits (types in first-seen order).
+    def self.incompatible_return_types_message(method, types)
+      "Method '#{method}' returns values of incompatible types (#{types.map { |t| "'#{t}'" }.join(', ')}); " \
+        "declare its return type"
+    end
+
+    def self.declared_return_mismatch_message(method, actual, declared)
+      "Method '#{method}' returns '#{actual}', which is not assignable to its declared return type '#{declared}'"
+    end
+
     # Type-check a Runar AST. Returns the same AST plus any errors.
     #
     # @param contract [ContractNode]
@@ -758,13 +787,72 @@ module RunarCompiler
           @prop_types["txPreimage"] = "SigHashPreimage"
         end
 
+        # D12 FE-F4: inferred return types of undeclared private methods,
+        # shared with every scratch checker spawned for this contract.
+        @inferred_returns = {}
+        # Types of the +return+ values seen while checking (FE-F4 inference).
+        @return_type_sink = nil
+        # The method being checked (its declared return type is enforced).
+        @current_method = nil
+
         contract.methods.each do |method|
           params = method.params.map { |p| type_node_to_string(p.type) }
-          ret_type = "void"
-          if method.visibility != "public"
-            ret_type = TypeChecker.infer_method_return_type(method)
-          end
-          @method_sigs[method.name] = FuncSig.new(params: params, return_type: ret_type)
+          @method_sigs[method.name] =
+            if method.visibility == "public"
+              FuncSig.new(params: params, return_type: "void")
+            else
+              # D12 FE-F4: resolved on first use (the declared type, else
+              # inferred from the body with the full environment), so a helper
+              # defined after its caller is still typed.
+              LazyMethodSig.new(self, method, params)
+            end
+        end
+      end
+
+      attr_writer :inferred_returns, :return_type_sink, :consumed_params
+      attr_reader :return_type_sink
+
+      # D12 FE-F4: what a call of private method +method+ evaluates to.
+      #
+      # A declared return type is authoritative (+check_statement+ enforces it
+      # on every +return+). Without one (.runar.rb has no syntax for it; other
+      # surfaces may omit it) the body is type-checked by a scratch checker with
+      # the real parameter environment and the types of its +return+ values are
+      # unified. Values that do not unify, and a helper reached again while its
+      # own type is being inferred, are "<unknown>": every operator whose
+      # lowering depends on the type then refuses to compile instead of
+      # guessing. Mirrors +methodReturnType+ in 03-typecheck.ts.
+      def method_return_type(method)
+        return type_node_to_string(method.return_type) unless method.return_type.nil?
+
+        known = @inferred_returns[method.name]
+        return known unless known.nil?
+
+        @inferred_returns[method.name] = "<unknown>" # recursion guard; the validator refuses recursion
+        scratch = TypeChecker.new(@contract)
+        scratch.inferred_returns = @inferred_returns
+        # D12 FE-F4: an inference scratch checker's diagnostics are discarded, so it does no affine-consumption bookkeeping (an empty summary): computing the consumption summary from inside an inference would read the in-progress recursion guard of the helper being inferred and memoize '<unknown>' for its callers.
+        scratch.consumed_params = {}
+        scratch.return_type_sink = []
+        scratch.check_method(method)
+        inferred = TypeChecker.unify_return_types(scratch.return_type_sink)
+        @inferred_returns[method.name] = inferred
+        inferred
+      end
+
+      # A private method's signature whose return type is resolved lazily by
+      # +TypeChecker#method_return_type+ (D12 FE-F4). Duck-types FuncSig.
+      class LazyMethodSig
+        attr_reader :params
+
+        def initialize(checker, method, params)
+          @checker = checker
+          @method = method
+          @params = params
+        end
+
+        def return_type
+          @checker.method_return_type(@method)
         end
       end
 
@@ -813,6 +901,7 @@ module RunarCompiler
           env.define(prop.name, type_node_to_string(prop.type))
         end
 
+        @current_method = nil
         check_statements(ctor.body, env)
       end
 
@@ -821,6 +910,7 @@ module RunarCompiler
         # circular. Needed for the F-075 transitive effect predicates below.
         require_relative "anf_lower"
         env = TypeEnv.new
+        @current_method = method
 
         # Set current method location for diagnostics
         @current_method_loc = method.source_location
@@ -833,7 +923,20 @@ module RunarCompiler
           env.define(param.name, type_node_to_string(param.type))
         end
 
+        @current_return_types = []
         check_statements(method.body, env)
+
+        # D12 FE-F4: an undeclared private return type is inferred by unifying
+        # the returned values. Values that do not unify used to be typed by the
+        # FIRST return; now the call would be "<unknown>", which assert / if
+        # still accept. Refuse it here.
+        if method.visibility == "private" && method.return_type.nil?
+          seen = @current_return_types
+          if !seen.empty? && !seen.include?("<unknown>") && TypeChecker.unify_return_types(seen) == "<unknown>"
+            @errors << Diagnostic.new(message: Frontend.incompatible_return_types_message(method.name, seen.uniq),
+                                      severity: Severity::ERROR, loc: method.source_location)
+          end
+        end
 
         # Crit-3 -- reject mixing requireOutputP2PKH with addDataOutput in the
         # same method body. The intrinsic's compile-time output-offset
@@ -929,39 +1032,20 @@ module RunarCompiler
       # Private method return type inference (class-level)
       # -------------------------------------------------------------------
 
-      def self.infer_method_return_type(method)
-        return_types = collect_return_types(method.body)
+      # D12 FE-F4: unify the types of a private method's +return+ values
+      # (inferred with the full environment). No value-returning +return+ =
+      # void; values in one family unify to that family; anything else is
+      # "<unknown>" -- never a best-effort pick, because every typed operator
+      # refuses "<unknown>".
+      def self.unify_return_types(return_types)
         return "void" if return_types.empty?
 
         first = return_types[0]
         return first if return_types.all? { |t| t == first }
-
-        # Check if all are in the bigint family
         return "bigint" if return_types.all? { |t| BIGINT_SUBTYPES.include?(t) }
-
-        # Check if all are in the ByteString family
         return "ByteString" if return_types.all? { |t| BYTESTRING_SUBTYPES.include?(t) }
 
-        # Check if all are boolean
-        return "boolean" if return_types.all? { |t| t == "boolean" }
-
-        first
-      end
-
-      def self.collect_return_types(stmts)
-        types = []
-        stmts.each do |stmt|
-          case stmt
-          when ReturnStmt
-            types << infer_expr_type_static(stmt.value) unless stmt.value.nil?
-          when IfStmt
-            types.concat(collect_return_types(stmt.then))
-            types.concat(collect_return_types(stmt.else_)) unless stmt.else_.empty?
-          when ForStmt
-            types.concat(collect_return_types(stmt.body))
-          end
-        end
-        types
+        "<unknown>"
       end
 
       def self.infer_expr_type_static(expr)
@@ -1353,7 +1437,19 @@ module RunarCompiler
           infer_expr_type(stmt.expr, env)
 
         when ReturnStmt
-          infer_expr_type(stmt.value, env) unless stmt.value.nil?
+          unless stmt.value.nil?
+            value_type = infer_expr_type(stmt.value, env)
+            @return_type_sink << value_type unless @return_type_sink.nil?
+            (@current_return_types ||= []) << value_type
+            # D12 FE-F4: the declared return type is enforced, strictly -- an
+            # unresolved value is not assignable to anything here.
+            if @current_method && @current_method.return_type
+              declared_type = type_node_to_string(@current_method.return_type)
+              if value_type == "<unknown>" || !Frontend.subtype?(value_type, declared_type)
+                add_error(Frontend.declared_return_mismatch_message(@current_method.name, value_type, declared_type))
+              end
+            end
+          end
         end
 
         # Restore previous statement location
@@ -1551,6 +1647,21 @@ module RunarCompiler
         left_type = infer_expr_type(expr.left, env)
         right_type = infer_expr_type(expr.right, env)
 
+        # D12 FE-F1: the operators whose opcode depends on the operand family
+        # record the family the TYPE CHECKER resolved; ANF lowering reads it
+        # and nothing else. `+` and `& | ^` already refuse an operand that is
+        # neither a byte string nor a number (below); equality accepted
+        # "<unknown>", so it is refused here rather than lowered as a guess.
+        if TYPED_BINARY_OPS.include?(expr.op)
+          lf = Frontend.operand_family(left_type)
+          rf = Frontend.operand_family(right_type)
+          if !lf.nil? && lf == rf
+            expr.operand_type = lf
+          elsif (lf.nil? || rf.nil?) && (expr.op == "===" || expr.op == "!==")
+            add_error(Frontend.unresolved_operand_types_message(expr.op, left_type, right_type), expr)
+          end
+        end
+
         # ByteString concatenation: ByteString + ByteString -> ByteString (via OP_CAT)
         if expr.op == "+" && Frontend.byte_family?(left_type) && Frontend.byte_family?(right_type)
           return "ByteString"
@@ -1652,7 +1763,12 @@ module RunarCompiler
           "bigint"
 
         when "~"
-          return "ByteString" if Frontend.byte_family?(operand_type)
+          # D12 FE-F1: see check_binary_expr.
+          if Frontend.byte_family?(operand_type)
+            expr.operand_type = "bytes"
+            return "ByteString"
+          end
+          expr.operand_type = "numeric" if Frontend.bigint_family?(operand_type)
           unless Frontend.bigint_family?(operand_type)
             add_error("operand of '~' must be bigint or ByteString, got '#{operand_type}'", expr)
           end
@@ -1999,7 +2115,7 @@ module RunarCompiler
           # parameter positions that method consumes.
           return if BUILTIN_FUNCTIONS.key?(func_name) || !@method_sigs.key?(func_name)
 
-          @consumed_params ||= TypeChecker.consumed_param_summary(@contract)
+          @consumed_params ||= TypeChecker.consumed_param_summary(@contract, @inferred_returns)
           consumed_indices, consumed_props = @consumed_params[func_name] || [[], []]
         end
 
@@ -2046,14 +2162,18 @@ module RunarCompiler
       # as summaries grow, so iterating until no entry changes terminates, also
       # for recursive call graphs (refused separately by the validator).
       # Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
-      def self.consumed_param_summary(contract)
+      # +inferred_returns+ (D12 FE-F4) is the caller's return-type memo, shared
+      # so the scratch checkers do not re-infer every helper chain.
+      def self.consumed_param_summary(contract, inferred_returns = nil)
         summary = {}
         contract.methods.each { |m| summary[m.name] = [[], []] }
         changed = true
         while changed
           changed = false
           contract.methods.each do |method|
-            consumed = TypeChecker.new(contract).send(:consumed_param_indices, method, summary)
+            scratch = TypeChecker.new(contract)
+            scratch.inferred_returns = inferred_returns if inferred_returns
+            consumed = scratch.send(:consumed_param_indices, method, summary)
             prev = summary[method.name]
             next if consumed[0].length == prev[0].length && consumed[1].length == prev[1].length
 

@@ -6,6 +6,8 @@ Hand-written tokenizer + recursive descent parser.
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -1005,11 +1007,14 @@ class _RustParser:
 
         # Optional return type
         has_return_type = False
+        declared_ret = None
         if self.check(TOK_ARROW):
             has_return_type = True
             self.advance()
-            # The AST keeps no return type; N-331 refuses an unknown name.
-            reject_unknown_return_type(self.errors, self.parse_rust_type(), raw_name, func_loc, visibility == "public")
+            # N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+            ret_type = self.parse_rust_type()
+            reject_unknown_return_type(self.errors, ret_type, raw_name, func_loc, visibility == "public")
+            declared_ret = declared_return_type(ret_type)
 
         self.expect(TOK_LBRACE)
         body: list[Statement] = []
@@ -1029,6 +1034,7 @@ class _RustParser:
             params=params,
             body=body,
             visibility=visibility,
+            return_type=declared_ret,
             source_location=func_loc,
         )
 

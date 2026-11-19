@@ -121,6 +121,13 @@ type MethodNode struct {
 	// selects the compact non-low-S blob, spendable only when the spending tx
 	// has nVersion > 1.
 	BindingVariant string
+
+	// ReturnType is the return type the source declares (D12 FE-F4), when
+	// its surface syntax can spell one (Ruby cannot; TypeScript may omit it).
+	// Nil = not declared: the type checker infers it from the body with the
+	// full environment. The type checker enforces a declared type on every
+	// `return` and gives it to every call.
+	ReturnType TypeNode
 }
 
 // ParamNode represents a method parameter.
@@ -209,6 +216,15 @@ type BinaryExpr struct {
 	Op    string // "+", "-", "*", "/", "%", "===", "!==", "<", "<=", ">", ">=", "&&", "||", "&", "|", "^"
 	Left  Expression
 	Right Expression
+	// OperandType is the operand family the TYPE CHECKER resolved (D12
+	// FE-F1) for an operator whose lowering depends on it: `+` (OP_CAT vs
+	// OP_ADD), `===` / `!==` (OP_EQUAL vs OP_NUMEQUAL), `& | ^` (bytes vs
+	// number). AST nodes are values held in interfaces, so the checker
+	// cannot write into the node itself: the slot is a pointer allocated by
+	// the checker's first pass (allocateOperandSlots) and shared by every
+	// value copy of the node, so later copies (03b) keep the tag. Nil or ""
+	// = untagged, which ANF lowering refuses. Never set by a parser.
+	OperandType *string
 	// SourceLocation is where the expression starts, including a leading
 	// `(` (N-472). Every surface parser sets it, as the TS reference
 	// does; a synthesized node carries zero and exprLoc falls back to the
@@ -222,11 +238,43 @@ func (BinaryExpr) exprMarker() {}
 type UnaryExpr struct {
 	Op      string // "!", "-", "~"
 	Operand Expression
+	// OperandType: see BinaryExpr.OperandType (D12 FE-F1); used for `~`.
+	OperandType *string
 	// SourceLocation is the operator token (N-472); every surface parser sets it.
 	SourceLocation SourceLocation
 }
 
 func (UnaryExpr) exprMarker() {}
+
+// D12 FE-F1: the two operand families the type checker records.
+const (
+	OperandBytes   = "bytes"
+	OperandNumeric = "numeric"
+)
+
+// operandTypeOf reads an operator node's recorded operand family ("" = none).
+func operandTypeOf(slot *string) string {
+	if slot == nil {
+		return ""
+	}
+	return *slot
+}
+
+// newOperandType allocates a slot already holding family t (for nodes a pass
+// synthesises after the type checker ran, e.g. 03b's index dispatch).
+func newOperandType(t string) *string {
+	return &t
+}
+
+// isTypedBinaryOp reports whether a binary operator's lowering depends on the
+// operand family (D12 FE-F1).
+func isTypedBinaryOp(op string) bool {
+	switch op {
+	case "+", "===", "!==", "&", "|", "^":
+		return true
+	}
+	return false
+}
 
 // CallExpr represents a function/method call.
 type CallExpr struct {

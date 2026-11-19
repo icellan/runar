@@ -1267,12 +1267,14 @@ const Parser = struct {
         var fa_len: u32 = 0;
         var fa_elem: types.RunarType = .unknown;
         var fa_nested_len: u32 = 0;
+        var fa_leaf: types.RunarType = .unknown;
         if (type_node == .fixed_array_type) {
             fa_len = type_node.fixed_array_type.length;
             const inner = type_node.fixed_array_type.element.*;
             fa_elem = typeNodeToRunarType(inner);
             if (inner == .fixed_array_type) {
                 fa_nested_len = inner.fixed_array_type.length;
+                fa_leaf = types.typeNodeToRunarType(inner.fixed_array_type.element.*);
             }
         }
 
@@ -1289,6 +1291,7 @@ const Parser = struct {
             .fixed_array_length = fa_len,
             .fixed_array_element = fa_elem,
             .fixed_array_nested_length = fa_nested_len,
+            .fixed_array_leaf = fa_leaf,
         };
     }
 
@@ -1520,10 +1523,15 @@ const Parser = struct {
 
         const params = self.parsePyParams();
 
-        // Optional return type: -> Type. The AST keeps none; N-331 refuses an
-        // unknown name. `None` is Python's spelling of "returns nothing".
+        // Optional return type: -> Type. N-331 refuses an unknown name. `None`
+        // is Python's spelling of "returns nothing". D12 FE-F4: the declared
+        // type is kept on the method (`None` is not: it spells no type).
+        var declared_return: ?types.RunarType = null;
+        var declared_return_name: []const u8 = "";
         if (self.match(.arrow)) {
             const rt = self.parsePyTypeAnnotation();
+            declared_return = types.declaredReturnTypeNode(rt);
+            declared_return_name = types.declaredReturnTypeName(self.allocator, rt);
             const rt_unknown = types.spelledIfUnknown(typeNodeToRunarType(rt), types.typeNodeName(rt));
             if (rt_unknown.len > 0 and !std.mem.eql(u8, rt_unknown, "None")) {
                 self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
@@ -1538,7 +1546,7 @@ const Parser = struct {
 
         const is_public = std.mem.eql(u8, visibility, "public");
 
-        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .source_loc = method_loc };
+        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .source_loc = method_loc, .return_type = declared_return, .return_type_name = declared_return_name };
     }
 
     // ---- Parameter parsing: (self, param: Type, ...) ----

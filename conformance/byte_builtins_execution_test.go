@@ -219,6 +219,22 @@ func TestByteBuiltins_ReverseBytes_Boundaries(t *testing.T) {
 		})
 	}
 
+	// D12 BM-F3: past 520 bytes the unrolled loop leaves a remainder. It used
+	// to be dropped unchecked, so a 521+ byte input "reversed" to the reverse
+	// of its first 520 bytes. The script now aborts instead: neither the true
+	// reverse nor the truncated one is accepted.
+	for _, n := range []int{521, 600} {
+		in := seq(n)
+		t.Run("over 520 aborts "+lenName(n), func(t *testing.T) {
+			if spendByteBuiltins(t, bbCheckReverse, encodePushBytes(in), encodePushBytes(rev(in))) {
+				t.Fatalf("reverseBytes of %d bytes accepted the full reverse; the script must abort", n)
+			}
+			if spendByteBuiltins(t, bbCheckReverse, encodePushBytes(in), encodePushBytes(rev(in[:520]))) {
+				t.Fatalf("reverseBytes of %d bytes accepted the reverse of its first 520 bytes", n)
+			}
+		})
+	}
+
 	// Teeth. A reverse that is a no-op passes for a palindrome and for the
 	// empty string, so the negatives have to use inputs that are neither.
 	t.Run("identity is not a reverse", func(t *testing.T) {

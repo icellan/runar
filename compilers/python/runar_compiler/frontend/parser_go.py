@@ -6,6 +6,8 @@ Hand-written tokenizer + recursive descent parser for Go contract syntax.
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 import re
 
 from runar_compiler.frontend.ast_nodes import (
@@ -1165,9 +1167,10 @@ class _GoParser:
         # Parse parameters
         params = self._parse_func_params()
 
-        # Parse optional return type
+        # Parse optional return type (D12 FE-F4: kept on the method)
+        declared_ret = None
         if not self.check(TOK_LBRACE):
-            self._check_return_type(method_name, location, visibility == "public")
+            declared_ret = self._check_return_type(method_name, location, visibility == "public")
 
         # Parse body
         body = self._parse_block()
@@ -1185,6 +1188,7 @@ class _GoParser:
                 body=body,
                 visibility=visibility,
                 sighash_type=sighash.value if sighash is not None else None,
+                return_type=declared_ret,
                 source_location=location,
             ),
             func_name,
@@ -1310,13 +1314,15 @@ class _GoParser:
 
         return tok.value[0].islower()
 
-    def _check_return_type(self, method_name: str, location: SourceLocation, is_public: bool = False) -> None:
+    def _check_return_type(self, method_name: str, location: SourceLocation, is_public: bool = False):
         """Consume a return type specification before the function body.
 
-        The AST keeps no return type, so N-331 refuses an unknown type name
-        here, where it is spelled (single type or a parenthesised result list,
-        named or not).
+        N-331 refuses an unknown type name here, where it is spelled (single
+        type or a parenthesised result list, named or not). D12 FE-F4: a single
+        (unparenthesised) Rúnar type is returned so the method keeps it; a
+        result list keeps none.
         """
+        declared = None
         if self.check(TOK_LPAREN):
             self.advance()
             while not self.check(TOK_RPAREN) and not self.check(TOK_LBRACE) and not self.check(TOK_EOF):
@@ -1328,10 +1334,13 @@ class _GoParser:
                     break
             self.expect(TOK_RPAREN)
         else:
-            reject_unknown_return_type(self.errors, self.parse_type(), method_name, location, is_public)
+            ret_type = self.parse_type()
+            reject_unknown_return_type(self.errors, ret_type, method_name, location, is_public)
+            declared = declared_return_type(ret_type)
         # Anything left before the body is not a type to check.
         while not self.check(TOK_LBRACE) and not self.check(TOK_EOF):
             self.advance()
+        return declared
 
     def _skip_return_type(self) -> None:
         """Skip a return type specification before the function body."""

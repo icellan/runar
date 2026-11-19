@@ -1099,12 +1099,15 @@ module RunarCompiler
         expect(TOK_RPAREN)
 
         # Optional return type
+        declared_ret = nil
         unless check(TOK_LBRACE)
-          # The AST keeps no return type; N-331 refuses an unknown name.
-          Frontend.reject_unknown_return_type(@errors, parse_go_type, func_name, location,
+          # N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+          ret_type = parse_go_type
+          Frontend.reject_unknown_return_type(@errors, ret_type, func_name, location,
                                           has_receiver && !func_name.empty? &&
                                           func_name[0] == func_name[0].upcase &&
                                           func_name[0] != func_name[0].downcase)
+          declared_ret = Frontend.declared_return_type(ret_type)
         end
 
         # Body
@@ -1143,7 +1146,8 @@ module RunarCompiler
           body: body,
           visibility: visibility,
           source_location: location,
-          sighash_type: sighash && sighash[:value]
+          sighash_type: sighash && sighash[:value],
+          return_type: declared_ret
         )
         # F-010: parse_contract checks receiver_type against the contract.
         { method: method, go_name: func_name, receiver_type: receiver_type }

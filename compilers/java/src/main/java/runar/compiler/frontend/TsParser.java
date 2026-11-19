@@ -1101,11 +1101,14 @@ public final class TsParser {
                                String leadingComments) throws ParseException {
             List<ParamNode> params = parseParams();
 
+            TypeNode declaredReturn = null;
             if (check(TOK_COLON)) {
                 advance();
-                // The AST keeps no return type; N-331 refuses an unknown name.
-                String unknownReturn = LexDiag.unknownReturnType(parseType(), name, visibility.equals("public"));
+                // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+                TypeNode returnType = parseType();
+                String unknownReturn = LexDiag.unknownReturnType(returnType, name, visibility.equals("public"));
                 if (unknownReturn != null) addError(unknownReturn);
+                declaredReturn = MethodNode.declaredReturnType(returnType);
             }
 
             List<Statement> body = parseBlock();
@@ -1114,7 +1117,7 @@ public final class TsParser {
             Integer sighashType = parseSighashDirective(name, vis, leadingComments, location);
             // `/** @bindingVariant <lowS|all> */` -> per-method binding construction (ports #170).
             String bindingVariant = parseBindingVariantDirective(name, vis, leadingComments, location);
-            return new MethodNode(name, params, body, vis, location, sighashType, bindingVariant);
+            return new MethodNode(name, params, body, vis, location, sighashType, bindingVariant, declaredReturn);
         }
 
         /**
