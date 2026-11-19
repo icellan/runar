@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from .required_fields import assert_required_ir_fields
-from .stateful_scaffold import stateful_scaffold_error
+from .stateful_scaffold import continuation_binding_error, stateful_scaffold_error
 from .continuation_rules import dropped_continuation_error
 from .synthetic_array_chain import assert_synthetic_array_chains
 from .preimage_rules import assert_preimage_rules, assert_unique_method_names
@@ -157,6 +157,15 @@ def load_ir(source: str) -> ANFProgram:
     d26_error = locktime_domain_error(program)
     if d26_error:
         raise ValueError(f"IR validation: {d26_error}")
+
+    # D25: a StatefulSmartContract's continuations must be bound to their
+    # input (SINGLE, or the hidden spent-outpoint field); checked last among
+    # the IR frontend rules so every earlier, more specific diagnostic keeps
+    # precedence. See ir/stateful_scaffold.py.
+    if _effective_parent_class(program) == "StatefulSmartContract":
+        d25_error = continuation_binding_error(program)
+        if d25_error:
+            raise ValueError(d25_error)
 
     return program
 

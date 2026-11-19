@@ -565,6 +565,14 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					// Single-output continuation: build raw output bytes, then
 					// splice in any declared data outputs, then concat with
 					// change, then hash.
+					// D25: a 'bind' contract first records the spent outpoint
+					// in its hidden last state field, so this continuation
+					// differs from every other input's and no two inputs can
+					// share one output list.
+					if methodCtx.bindsOutpoint() {
+						bindingRef := emitOutpointBinding(methodCtx)
+						methodCtx.emit(makeUpdateProp(TwinBindingField, bindingRef))
+					}
 					stateScriptRef := methodCtx.emit(ir.ANFValue{Kind: "get_state_script"})
 					preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					newAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
@@ -809,6 +817,29 @@ func (ms *methodScopeT) recordAutoInjectedParam(name, typ string) {
 	}
 	ms.autoInjectedSet[name] = true
 	ms.autoInjectedParams = append(ms.autoInjectedParams, ir.ANFParam{Name: name, Type: typ})
+}
+
+// bindsOutpoint (D25): the contract carries the hidden spent-outpoint field
+// ('bind' class).
+func (ctx *lowerCtx) bindsOutpoint() bool {
+	if ctx.contract == nil {
+		return false
+	}
+	for _, p := range ctx.contract.Properties {
+		if p.Name == TwinBindingField {
+			return true
+		}
+	}
+	return false
+}
+
+// emitOutpointBinding (D25): `sha256(extractOutpoint(txPreimage))`, the value a
+// 'bind' contract stores in its hidden last state field in every continuation
+// it makes. Mirrors emitOutpointBinding in stateful-scaffold.ts.
+func emitOutpointBinding(ctx *lowerCtx) string {
+	preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+	outpointRef := ctx.emit(makeCall("extractOutpoint", []string{preimageRef}))
+	return ctx.emit(makeCall("sha256", []string{outpointRef}))
 }
 
 func newLowerCtx(contract *ContractNode) *lowerCtx {
@@ -2727,6 +2758,10 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		argRefs := ctx.lowerArgs(flatArgs)
 		satoshis := argRefs[0]
 		stateValues := argRefs[1:]
+		// D25: a 'bind' contract's hidden last state field is the spent outpoint.
+		if ctx.bindsOutpoint() {
+			stateValues = append(append([]string{}, stateValues...), emitOutpointBinding(ctx))
+		}
 		ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: ""})
 		ctx.addOutputRef(ref)
 		return ref
@@ -2737,6 +2772,10 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 			argRefs := ctx.lowerArgs(flatArgs)
 			satoshis := argRefs[0]
 			stateValues := argRefs[1:]
+			// D25: a 'bind' contract's hidden last state field is the spent outpoint.
+			if ctx.bindsOutpoint() {
+				stateValues = append(append([]string{}, stateValues...), emitOutpointBinding(ctx))
+			}
 			ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: ""})
 			ctx.addOutputRef(ref)
 			return ref

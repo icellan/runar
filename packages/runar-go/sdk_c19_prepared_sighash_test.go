@@ -10,8 +10,10 @@ import (
 	"testing"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
+	bsvscript "github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/script/interpreter"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 )
 
 // Deep-review finding C19 (P1): `PreparedCall.Sighash` stored only
@@ -131,9 +133,27 @@ func TestPreparedCall_Sighash_IsBip143Hash256_C19(t *testing.T) {
 		t.Fatal("expected a non-empty BIP-143 preimage for a stateful call")
 	}
 
-	preimageBytes, err := hex.DecodeString(prepared.Preimage)
+	// D25: SigCounter is mutate-only, so its covenant preimage is
+	// SIGHASH_SINGLE (0x43); a user Sig is ALL|FORKID, so its digest comes
+	// from the ALL preimage of the same tx and subscript, built here by the
+	// go-sdk itself (not by the SDK helper under test).
+	callTx, err := transaction.NewTransactionFromHex(prepared.TxHex)
 	if err != nil {
-		t.Fatalf("decode preimage: %v", err)
+		t.Fatalf("parse prepared tx: %v", err)
+	}
+	utxo := c.GetCurrentUtxo()
+	sep := c.getCodeSepIndex(c.findMethodIndex("inc"))
+	if sep < 0 {
+		t.Fatal("no OP_CODESEPARATOR for inc")
+	}
+	sub, err := bsvscript.NewFromHex(utxo.Script[(sep+1)*2:])
+	if err != nil {
+		t.Fatalf("subscript: %v", err)
+	}
+	callTx.Inputs[0].SetSourceTxOutput(&transaction.TransactionOutput{Satoshis: uint64(utxo.Satoshis), LockingScript: sub})
+	preimageBytes, err := callTx.CalcInputPreimage(0, sighash.AllForkID)
+	if err != nil {
+		t.Fatalf("ALL|FORKID preimage: %v", err)
 	}
 	single := sha256.Sum256(preimageBytes)
 	double := sha256.Sum256(single[:])
@@ -146,7 +166,7 @@ func TestPreparedCall_Sighash_IsBip143Hash256_C19(t *testing.T) {
 			prepared.Sighash, wantHash256)
 	}
 	if prepared.Sighash != wantHash256 {
-		t.Fatalf("PreparedCall.Sighash = %s, want hash256(preimage) = %s", prepared.Sighash, wantHash256)
+		t.Fatalf("PreparedCall.Sighash = %s, want hash256(ALL|FORKID preimage) = %s", prepared.Sighash, wantHash256)
 	}
 }
 

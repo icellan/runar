@@ -4,7 +4,7 @@ Verifies the Python SDK builds the BIP-143 preimage under the method's declared
 sighash mode (from ABI ``sigHashType``): the appended sighash flag byte matches,
 and the zeroed BIP-143 digest fields match the mode. Parity target: the preimage
 sighash byte equals the TS reference (0x43 for SINGLE|FORKID, 0xC1 for
-ALL|ANYONECANPAY|FORKID, 0x41 for the default / no directive).
+ALL|ANYONECANPAY|FORKID (0xC3 under D25 for a mutate-only contract), 0x41 for the default / no directive).
 """
 
 from __future__ import annotations
@@ -69,12 +69,15 @@ class Pay extends StatefulSmartContract {
         assert settle.sig_hash_type == 0x43
 
     def test_default_omitted(self):
+        # D25: the addOutput sibling keeps the contract on ALL (a contract
+        # whose continuation methods are all mutate-only defaults to SINGLE).
         art = _artifact(
             """
 class Counter extends StatefulSmartContract {
   n: bigint;
   constructor(n: bigint) { super(n); this.n = n; }
   public bump(): void { this.n = this.n + 1n; }
+  public put(): void { this.addOutput(1n, this.n); }
 }""",
             "Counter.runar.ts",
         )
@@ -176,12 +179,14 @@ class TestEndToEndSighashByte:
         return prepared
 
     def test_default_preimage_byte_is_0x41(self):
+        # D25: the addOutput sibling keeps the contract on ALL (see above).
         art = _artifact(
             """
 class Counter extends StatefulSmartContract {
   n: bigint;
   constructor(n: bigint) { super(n); this.n = n; }
   public bump(): void { this.n = this.n + 1n; }
+  public put(): void { this.addOutput(1n, this.n); }
 }""",
             "Counter.runar.ts",
         )
@@ -189,7 +194,10 @@ class Counter extends StatefulSmartContract {
         assert prepared.preimage
         assert _sighash_byte_of(prepared.preimage) == 0x41
 
-    def test_anyonecanpay_preimage_byte_is_0xC1(self):
+    def test_anyonecanpay_preimage_byte_is_0xC3(self):
+        # D25: in a contract whose continuation methods are all mutate-only
+        # the ALL base becomes SINGLE (ALL|ACP|FORKID -> SINGLE|ACP|FORKID =
+        # 0xC3), so the pledge commits only its own same-index continuation.
         art = _artifact(
             """
 class Fund extends StatefulSmartContract {
@@ -200,9 +208,10 @@ class Fund extends StatefulSmartContract {
 }""",
             "Fund.runar.ts",
         )
+        assert next(m for m in art.abi.methods if m.name == "pledge").sig_hash_type == 0xC3
         prepared = self._deploy_and_prepare(art, [0], "pledge", [7])
         assert prepared.preimage
-        assert _sighash_byte_of(prepared.preimage) == 0xC1
+        assert _sighash_byte_of(prepared.preimage) == 0xC3
 
     def test_single_addoutput_preimage_byte_is_0x43(self):
         art = _artifact(

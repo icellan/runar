@@ -923,6 +923,22 @@ class RunarContract:
                 "resulting tx would be invalid"
             )
 
+        # D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+        # continuation methods are all mutate-only) commits ONE output per
+        # input, at that input's index. A call that spends extra contract
+        # inputs into the one continuation (a many-to-one merge) is exactly the
+        # twin-input shape SINGLE refuses: every extra input would need its own
+        # continuation at its own index, so the tx cannot verify. Fail closed
+        # before building it.
+        if extra_contract_utxos and (self._method_sig_hash_type(method_name) & 0x1F) == 0x03:
+            raise ValueError(
+                f"RunarContract.call({method_name}): additionalContractInputs cannot be spent into one "
+                "continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation "
+                "methods are all mutate-only, D25): SINGLE commits each input to its own output at its own "
+                "index. Merge with an addOutput method instead (see FungibleToken.merge), or build each "
+                "input's continuation with assembleMultiContractCall"
+            )
+
         # Normalize outputs
         has_multi_output = opts.outputs is not None and len(opts.outputs) > 0
 
@@ -1601,7 +1617,10 @@ class RunarContract:
 
         # Compute sighash from preimage (C19: the true BIP-143 digest external
         # signers must sign -- hash256(preimage), NOT sha256(preimage)).
-        sighash = _compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = self._user_sig_digest(
+            final_preimage, signed_tx, contract_utxo, code_sep_idx, method_sig_hash_type,
+        )
 
         return PreparedCall(
             sighash=sighash,
@@ -2184,7 +2203,10 @@ class RunarContract:
 
         # Compute sighash from preimage (C19: the true BIP-143 digest external
         # signers must sign -- hash256(preimage), NOT sha256(preimage)).
-        sighash = _compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = self._user_sig_digest(
+            final_preimage, term_tx, contract_utxo, term_code_sep_idx, term_sig_hash_type,
+        )
 
         return PreparedCall(
             sighash=sighash,
@@ -2427,6 +2449,31 @@ class RunarContract:
 
     def _get_public_methods(self):
         return [m for m in self.artifact.abi.methods if m.is_public]
+
+    def _user_sig_digest(
+        self,
+        covenant_preimage: str,
+        tx_hex: str,
+        utxo: Utxo,
+        code_sep_idx: int,
+        sig_hash_type: int,
+    ) -> str:
+        """D25: the digest an external signer signs for a user ``Sig``
+        argument (TS ``userSigDigest``). User signatures are ALL|FORKID (the
+        byte every signer appends), so when the method's covenant preimage is
+        built under another mode (SIGHASH_SINGLE is the default for a
+        mutate-only contract) the digest is recomputed over the same tx,
+        subscript and code separator under ALL|FORKID. The covenant's own
+        preimage (``PreparedCall.preimage``) is unchanged.
+        """
+        if not covenant_preimage:
+            return ''
+        if sig_hash_type == 0x41:
+            return _compute_bip143_sighash(covenant_preimage)
+        preimage = compute_op_push_tx_preimage(
+            tx_hex, 0, utxo.script, utxo.satoshis, code_sep_idx, 0x41,
+        )
+        return _compute_bip143_sighash(preimage)
 
     def _method_sig_hash_type(self, method_name: str) -> int:
         """Issue #123: resolve the BIP-143 sighash type for ``method_name`` from

@@ -1217,6 +1217,23 @@ func (c *RunarContract) prepareCallInner(
 		)
 	}
 
+	// D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+	// continuation methods are all mutate-only) commits ONE output per input,
+	// at that input's index. A call that spends extra contract inputs into the
+	// one continuation (a many-to-one merge) is exactly the twin-input shape
+	// SINGLE refuses: every extra input would need its own continuation at its
+	// own index, so the tx cannot verify. Fail closed before building it.
+	if len(extraContractUtxos) > 0 && c.methodSigHashType(methodName)&0x1f == 0x03 {
+		return nil, fmt.Errorf(
+			"RunarContract.call(%s): additionalContractInputs cannot be spent into one "+
+				"continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation "+
+				"methods are all mutate-only, D25): SINGLE commits each input to its own output at its own "+
+				"index. Merge with an addOutput method instead (see FungibleToken.merge), or build each "+
+				"input's continuation with assembleMultiContractCall",
+			methodName,
+		)
+	}
+
 	// Build contract outputs
 	var contractOutputs []ContractOutput
 	hasMultiOutput := options != nil && len(options.Outputs) > 0
@@ -2060,8 +2077,13 @@ func (c *RunarContract) prepareCallInner(
 	}
 
 	// Compute sighash from preimage (C19: the true BIP-143 digest external
-	// signers must sign — hash256(preimage), NOT sha256(preimage)).
-	sighash := computeBip143Sighash(finalPreimage)
+	// signers must sign — hash256(preimage), NOT sha256(preimage)). D25: the
+	// digest of a user Sig (always ALL|FORKID), which differs from the
+	// covenant preimage's when the method commits under another mode.
+	sighash, sighashErr := c.userSigDigest(finalPreimage, signedTx, contractUtxo, codeSepIdx, sigHashType)
+	if sighashErr != nil {
+		return nil, fmt.Errorf("RunarContract.PrepareCall: %w", sighashErr)
+	}
 
 	return &PreparedCall{
 		Sighash:              sighash,
@@ -3259,8 +3281,12 @@ func (c *RunarContract) prepareCallTerminal(
 	}
 
 	// Compute sighash from preimage (C19: the true BIP-143 digest external
-	// signers must sign — hash256(preimage), NOT sha256(preimage)).
-	sighash := computeBip143Sighash(finalPreimage)
+	// signers must sign — hash256(preimage), NOT sha256(preimage)). D25: the
+	// user-Sig (ALL|FORKID) digest when the method's mode differs.
+	sighash, sighashErr := c.userSigDigest(finalPreimage, termTx, contractUtxo, termCodeSepIdx, termSigHashType)
+	if sighashErr != nil {
+		return nil, fmt.Errorf("RunarContract.PrepareCall terminal: %w", sighashErr)
+	}
 
 	return &PreparedCall{
 		Sighash:              sighash,
@@ -3352,6 +3378,27 @@ func readVarintBytes(data []byte, offset int) (uint64, int) {
 // value, such a signer signs the wrong message and the node's real OP_CHECKSIG
 // rejects the spend. Mirrors computeBip143Sighash in
 // packages/runar-sdk/src/contract.ts.
+// userSigDigest (D25, TS RunarContract.userSigDigest): the digest an external
+// signer signs for a user Sig argument. User signatures are ALL|FORKID (the
+// byte every signer appends), so when the method's covenant preimage is built
+// under another mode (SIGHASH_SINGLE is the default for a mutate-only
+// contract) the digest is recomputed over the same tx, subscript and code
+// separator under ALL|FORKID. The covenant's own preimage
+// (PreparedCall.Preimage) is unchanged.
+func (c *RunarContract) userSigDigest(covenantPreimage, txHex string, utxo UTXO, codeSepIdx, sigHashType int) (string, error) {
+	if covenantPreimage == "" {
+		return computeBip143Sighash(covenantPreimage), nil
+	}
+	if sigHashType == 0x41 {
+		return computeBip143Sighash(covenantPreimage), nil
+	}
+	pre, err := ComputeOpPushTxPreimageWithSigHash(txHex, 0, utxo.Script, utxo.Satoshis, codeSepIdx, 0x41)
+	if err != nil {
+		return "", fmt.Errorf("user-signature (ALL|FORKID) digest: %w", err)
+	}
+	return computeBip143Sighash(hex.EncodeToString(pre)), nil
+}
+
 func computeBip143Sighash(preimageHex string) string {
 	if preimageHex == "" {
 		return ""

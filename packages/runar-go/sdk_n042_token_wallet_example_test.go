@@ -1,10 +1,10 @@
 package runar
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -17,8 +17,8 @@ import (
 // of every input (f045ValidateAll; real ECDSA / BIP-143).
 //
 // Proves: the shipped example compiles in the Go tier and every input of the
-// txs TokenWallet broadcasts executes; Merge spends both token outpoints once
-// and the continuation holds the summed supply.
+// txs TokenWallet broadcasts executes; Merge (a mutate-only, hence D25
+// SIGHASH_SINGLE, two-input merge) is refused before anything is broadcast.
 // Does NOT prove: node acceptance, or that the example is a sound token (its
 // header documents that transfer keeps the holder and merge is inflatable).
 
@@ -61,29 +61,23 @@ func TestN042_TokenWalletDrivesShippedExample(t *testing.T) {
 		}
 	})
 
+	// D25: WalletToken's continuation method (merge) is mutate-only, so it
+	// commits under SIGHASH_SINGLE, one output per input; a two-input merge
+	// into one continuation is the twin-input shape SINGLE closes, refused up
+	// front.
 	t.Run("merge", func(t *testing.T) {
-		provider, wallet, tokens, known := f045Setup(t, art, []int64{100, 250}, 5000, 200000)
-		if _, err := wallet.Merge(); err != nil {
-			t.Fatalf("Merge: %v", err)
+		provider, wallet, _, _ := f045Setup(t, art, []int64{100, 250}, 5000, 200000)
+		if bal, err := wallet.GetBalance(); err != nil || bal != 350 {
+			t.Fatalf("GetBalance = %d, %v; want 350", bal, err)
 		}
-		txs := provider.GetBroadcastedTxs()
-		tx := f045ValidateAll(t, txs[len(txs)-1], known)
-		spent := f045Spent(tx)
-		seen := map[string]int{}
-		for _, s := range spent {
-			seen[s]++
+		before := len(provider.GetBroadcastedTxs())
+		_, err := wallet.Merge()
+		if err == nil || !strings.Contains(err.Error(), "additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method") {
+			t.Fatalf("Merge: want the D25 refusal, got %v", err)
 		}
-		for _, u := range tokens {
-			if seen[u.Txid+":0"] != 1 {
-				t.Fatalf("token %s spent %d times, want 1 (inputs %v)", u.Txid, seen[u.Txid+":0"], spent)
-			}
-		}
-		merged, err := FromUtxo(art, UTXO{Txid: "00", OutputIndex: 0, Satoshis: int64(tx.Outputs[0].Satoshis), Script: hex.EncodeToString(*tx.Outputs[0].LockingScript)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := anfToBigInt(merged.GetState()["supply"]).Int64(); got != 350 {
-			t.Fatalf("merged supply = %d, want 350", got)
+		if after := len(provider.GetBroadcastedTxs()); after != before {
+			t.Fatalf("Merge broadcast %d tx(s) before refusing", after-before)
 		}
 	})
+
 }

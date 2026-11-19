@@ -609,7 +609,9 @@ func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptio
 	// see only scalar properties and direct-access / dispatch-chain
 	// expressions, so no further FixedArray plumbing is required in
 	// ANF, stack, or emit.
-	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	// D25: a 'bind' contract gains its hidden spent-outpoint state field here
+	// (after typecheck, so user-facing arity rules never see it).
+	expandResult := frontend.ExpandFixedArrays(frontend.InjectContinuationBinding(parseResult.Contract))
 	if len(expandResult.Errors) > 0 {
 		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
@@ -770,7 +772,9 @@ func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptio
 		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
-	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	// D25: a 'bind' contract gains its hidden spent-outpoint state field here
+	// (after typecheck, so user-facing arity rules never see it).
+	expandResult := frontend.ExpandFixedArrays(frontend.InjectContinuationBinding(parseResult.Contract))
 	if len(expandResult.Errors) > 0 {
 		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
@@ -936,7 +940,8 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 	}
 
 	// Pass 3b: Expand FixedArray properties.
-	expandResult := frontend.ExpandFixedArrays(result.Contract)
+	// D25: inject the hidden spent-outpoint field of a 'bind' contract.
+	expandResult := frontend.ExpandFixedArrays(frontend.InjectContinuationBinding(result.Contract))
 	result.Diagnostics = append(result.Diagnostics, expandResult.Errors...)
 	if hasErrors(result.Diagnostics) {
 		return result
