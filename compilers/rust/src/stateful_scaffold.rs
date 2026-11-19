@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::frontend::continuation_binding::TWIN_BINDING_FIELD;
 use crate::ir::{parse_const_value, ANFBinding, ANFMethod, ANFProgram, ANFValue, ConstValue};
 
 const SIGHASH_DEFAULT: i64 = 0x41;
@@ -84,12 +85,20 @@ fn prologue(e: &mut Emitter, sighash_mode: i64, has_mutable_state: bool) {
     }
 }
 
+/// D25: `sha256(extractOutpoint(txPreimage))` (stateful-scaffold.ts `emitOutpointBinding`).
+fn outpoint_binding(e: &mut Emitter) -> String {
+    let p = e.emit(load_param("txPreimage"));
+    let o = e.emit(call("extractOutpoint", &[&p]));
+    e.emit(call("sha256", &[&o]))
+}
+
 fn continuation(
     e: &mut Emitter,
     needs_change: bool,
     includes_change: bool,
     state_refs: &[String],
     data_refs: &[String],
+    binds_outpoint: bool,
 ) {
     if !needs_change {
         return;
@@ -124,6 +133,11 @@ fn continuation(
         }
         acc
     } else {
+        // D25: a 'bind' contract records the spent outpoint first.
+        if binds_outpoint {
+            let b = outpoint_binding(e);
+            e.emit(ANFValue::UpdateProp { name: TWIN_BINDING_FIELD.to_string(), value: b });
+        }
         let script = e.emit(ANFValue::GetStateScript {});
         let p = e.emit(load_param("txPreimage"));
         let na = e.emit(load_param("_newAmount"));
@@ -216,6 +230,7 @@ fn describe(v: &ANFValue) -> String {
         ANFValue::Assert { .. } => "assert".to_string(),
         ANFValue::DeserializeState { .. } => "deserialize_state".to_string(),
         ANFValue::GetStateScript {} => "get_state_script".to_string(),
+        ANFValue::UpdateProp { .. } => "update_prop".to_string(),
         ANFValue::If { .. } => "if".to_string(),
         _ => "binding".to_string(),
     }
@@ -266,6 +281,9 @@ impl Matcher {
                 eo == ao && self.r(el, al) && self.r(er, ar) && norm(et) == norm(at)
             }
             (ANFValue::DeserializeState { preimage: e }, ANFValue::DeserializeState { preimage: a }) => self.r(e, a),
+            (ANFValue::UpdateProp { name: en, value: ev }, ANFValue::UpdateProp { name: an, value: av }) => {
+                en == an && self.r(ev, av)
+            }
             (ANFValue::GetStateScript {}, ANFValue::GetStateScript {}) => true,
             (
                 ANFValue::If { cond: ec, then: et, else_branch: ee, .. },
@@ -329,6 +347,7 @@ fn scaffold_error(method: &str, detail: String) -> String {
 pub(crate) fn check_ir_stateful_scaffolding(program: &ANFProgram) -> Result<(), String> {
     let has_mutable = program.properties.iter().any(|p| !p.readonly);
     let props: HashSet<&str> = program.properties.iter().map(|p| p.name.as_str()).collect();
+    let binds_outpoint = props.contains(TWIN_BINDING_FIELD);
 
     for m in &program.methods {
         if !m.is_public || m.name == "constructor" {
@@ -399,7 +418,7 @@ pub(crate) fn check_ir_stateful_scaffolding(program: &ANFProgram) -> Result<(), 
         let state_refs: Vec<String> = state_out.iter().map(|b| b.name.clone()).collect();
         let data_refs: Vec<String> = data_out.iter().map(|b| b.name.clone()).collect();
         let mut tail = Emitter::new(&taken, &next);
-        continuation(&mut tail, needs_change, includes_change, &state_refs, &data_refs);
+        continuation(&mut tail, needs_change, includes_change, &state_refs, &data_refs, binds_outpoint);
         let offset = rest.len() as isize - tail.out.len() as isize;
         for (i, e) in tail.out.iter().enumerate() {
             let idx = offset + i as isize;
@@ -440,6 +459,100 @@ pub(crate) fn check_ir_stateful_scaffolding(program: &ANFProgram) -> Result<(), 
                     m.name, b.name
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// D25: the --ir check of the contract-level continuation binding
+// ---------------------------------------------------------------------------
+
+/// D25: the shared --ir diagnostic for a continuation that is not bound to its input.
+pub(crate) fn ir_unbound_continuation_message(detail: &str) -> String {
+    format!(
+        "IR validation: StatefulSmartContract continuation is not bound to its input (twin-input theft): {}",
+        detail
+    )
+}
+
+/// D25: an `--ir` program must carry the binding the frontend would give it
+/// (frontend/continuation_binding.rs). Without the hidden `_spentOutpointHash`
+/// field, a program with an auto-continuation method must commit every
+/// continuation under a SINGLE base, from auto-continuation methods only. With
+/// the field, it must be the LAST property, mutable, `Sha256`, zero at deploy,
+/// and every `add_output` must carry `sha256(extractOutpoint(txPreimage))` as
+/// its last state value (the auto-continuation's write is checked by N-101).
+/// Mirrors stateful-scaffold.ts `assertIrContinuationBinding`.
+pub(crate) fn check_ir_continuation_binding(program: &ANFProgram) -> Result<(), String> {
+    let binds_outpoint = program.properties.iter().any(|p| p.name == TWIN_BINDING_FIELD);
+    if binds_outpoint {
+        let zero = "00".repeat(32);
+        let field = program.properties.last().expect("non-empty: holds the binding field");
+        let init_ok = field.initial_value.as_ref().and_then(|v| v.as_str()) == Some(zero.as_str());
+        if field.name != TWIN_BINDING_FIELD || field.readonly || field.prop_type != "Sha256" || !init_ok {
+            return Err(ir_unbound_continuation_message(&format!(
+                "'{}' must be the last property, mutable, of type Sha256, with initial value 32 zero bytes",
+                TWIN_BINDING_FIELD
+            )));
+        }
+        for m in &program.methods {
+            let mut by_name: HashMap<&str, &ANFValue> = HashMap::new();
+            fn index<'b>(bs: &'b [ANFBinding], by_name: &mut HashMap<&'b str, &'b ANFValue>) {
+                for b in bs {
+                    by_name.insert(b.name.as_str(), &b.value);
+                    for n in nested(&b.value) {
+                        index(n, by_name);
+                    }
+                }
+            }
+            index(&m.body, &mut by_name);
+            let unary_call = |r: Option<&str>, func: &str| -> Option<String> {
+                match r.and_then(|r| by_name.get(r)) {
+                    Some(ANFValue::Call { func: f, args }) if f == func && args.len() == 1 => Some(args[0].clone()),
+                    _ => None,
+                }
+            };
+            let mut stack: Vec<&Vec<ANFBinding>> = vec![&m.body];
+            while let Some(bs) = stack.pop() {
+                for b in bs {
+                    if let ANFValue::AddOutput { state_values, .. } = &b.value {
+                        let sha = unary_call(state_values.last().map(|s| s.as_str()), "sha256");
+                        let pre = unary_call(sha.as_deref(), "extractOutpoint");
+                        let ok = matches!(
+                            pre.as_deref().and_then(|p| by_name.get(p)),
+                            Some(ANFValue::LoadParam { name }) if name == "txPreimage"
+                        );
+                        if !ok {
+                            return Err(ir_unbound_continuation_message(&format!(
+                                "method '{}': every add_output must carry sha256(extractOutpoint(txPreimage)) as its last state value",
+                                m.name
+                            )));
+                        }
+                    }
+                    stack.extend(nested(&b.value));
+                }
+            }
+        }
+        return Ok(());
+    }
+    let shapes: Vec<(&ANFMethod, (bool, bool, bool))> = program
+        .methods
+        .iter()
+        .filter(|m| m.is_public && m.name != "constructor")
+        .map(|m| (m, shape(program, m)))
+        .filter(|(_, s)| s.0)
+        .collect();
+    if !shapes.iter().any(|(_, s)| s.2) {
+        return Ok(());
+    }
+    for (m, (_, _, needs_new_amount)) in shapes {
+        let single = (m.sighash_type.unwrap_or(SIGHASH_DEFAULT) & 0x1f) == 0x03;
+        if !needs_new_amount || !single {
+            return Err(ir_unbound_continuation_message(&format!(
+                "method '{}': a program with an auto-continuation method and no '{}' field must commit every continuation under a SIGHASH_SINGLE base, from auto-continuation methods only",
+                m.name, TWIN_BINDING_FIELD
+            )));
         }
     }
     Ok(())

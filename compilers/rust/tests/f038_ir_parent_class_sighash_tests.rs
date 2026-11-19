@@ -32,6 +32,9 @@ class AllReadonly extends StatefulSmartContract {
 }
 "#;
 
+// D25: addOutput bodies keep both methods on an ALL base (a contract whose
+// continuation methods are all mutate-only defaults to SINGLE and refuses an
+// explicit ALL|FORKID sibling).
 const SIGHASH_COUNTER: &str = r#"import { StatefulSmartContract, assert } from 'runar-lang';
 
 class SighashCounter extends StatefulSmartContract {
@@ -44,13 +47,13 @@ class SighashCounter extends StatefulSmartContract {
 
   /** @sighash ALL|ANYONECANPAY|FORKID */
   public increment(): void {
-    this.count = this.count + 1n;
+    this.addOutput(1n, this.count + 1n);
     assert(true);
   }
 
   /** @sighash ALL|FORKID */
   public bump(): void {
-    this.count = this.count + 2n;
+    this.addOutput(1n, this.count + 2n);
     assert(true);
   }
 }

@@ -302,6 +302,32 @@ fn auto_non_sig_arg_error(where_: &str, param: &AbiParam, index: usize) -> Strin
 /// DIRECTLY with no further hashing. Handed the single-hashed value, such a
 /// signer signs the wrong message and the node's real `OP_CHECKSIG` rejects the
 /// spend. Mirrors `computeBip143Sighash` in `packages/runar-sdk/src/contract.ts`.
+/// D25: the digest an external signer signs for a user `Sig` argument
+/// (`PreparedCall::sighash`). User signatures are ALL|FORKID (the byte every
+/// signer appends), so when the method's covenant preimage is built under
+/// another mode (SIGHASH_SINGLE is the default for a mutate-only contract)
+/// the digest is recomputed over the same tx, subscript and code separator
+/// under ALL|FORKID. The covenant's own preimage (`PreparedCall::preimage`)
+/// is unchanged. Mirrors the TS reference `userSigDigest` (contract.ts).
+fn user_sig_digest(
+    covenant_preimage: &str,
+    tx_hex: &str,
+    subscript: &str,
+    satoshis: i64,
+    code_sep_idx: i64,
+    sig_hash_type: u32,
+) -> Result<String, String> {
+    if covenant_preimage.is_empty() {
+        return Ok(String::new());
+    }
+    if sig_hash_type == 0x41 {
+        return Ok(compute_bip143_sighash(covenant_preimage));
+    }
+    let all_preimage =
+        compute_op_push_tx_preimage_with_code_sep_sighash(tx_hex, 0, subscript, satoshis, code_sep_idx, 0x41)?;
+    Ok(compute_bip143_sighash(&all_preimage))
+}
+
 fn compute_bip143_sighash(preimage_hex: &str) -> String {
     if preimage_hex.is_empty() {
         return String::new();
@@ -1074,6 +1100,26 @@ impl RunarContract {
                  call — only a StatefulSmartContract (with an SDK-derived preimage) builds a real \
                  unlock for each extra contract input; any other path would ship a placeholder \
                  unlock and the resulting tx would be invalid",
+                method_name,
+            ));
+        }
+
+        // D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+        // continuation methods are all mutate-only) commits ONE output per
+        // input, at that input's index. A call that spends extra contract
+        // inputs into the one continuation (a many-to-one merge) is exactly the
+        // twin-input shape SINGLE refuses: every extra input would need its own
+        // continuation at its own index, so the tx cannot verify. Fail closed
+        // before building it. Text shared with the TS reference (contract.ts).
+        if !extra_contract_utxos.is_empty()
+            && (self.get_sig_hash_type(self.find_method_index(method_name)) & 0x1f) == 0x03
+        {
+            return Err(format!(
+                "RunarContract.call({}): additionalContractInputs cannot be spent into one \
+                 continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation \
+                 methods are all mutate-only, D25): SINGLE commits each input to its own output at its own \
+                 index. Merge with an addOutput method instead (see FungibleToken.merge), or build each \
+                 input's continuation with assembleMultiContractCall",
                 method_name,
             ));
         }
@@ -1974,7 +2020,12 @@ impl RunarContract {
 
         // Compute sighash from preimage (C19: the true BIP-143 digest external
         // signers must sign — hash256(preimage), NOT sha256(preimage)).
-        let sighash = compute_bip143_sighash(&final_preimage);
+        // D25: user Sigs are ALL|FORKID, so under another covenant mode the
+        // digest is recomputed over the same tx under ALL|FORKID.
+        let sighash = user_sig_digest(
+            &final_preimage, &signed_tx, &current_utxo.script, current_utxo.satoshis,
+            code_sep_idx, sig_hash_type,
+        )?;
 
         // Convert contract_outputs to ContractOutputEntry for PreparedCall
         let prepared_contract_outputs: Vec<ContractOutputEntry> = contract_outputs
@@ -2400,7 +2451,11 @@ impl RunarContract {
 
         // Compute sighash from preimage (C19: the true BIP-143 digest external
         // signers must sign — hash256(preimage), NOT sha256(preimage)).
-        let sighash = compute_bip143_sighash(&final_preimage);
+        // D25: the ALL|FORKID digest for user Sigs (see user_sig_digest).
+        let sighash = user_sig_digest(
+            &final_preimage, &term_tx, &current_utxo.script, current_utxo.satoshis,
+            term_code_sep_idx, term_sig_hash_type,
+        )?;
 
         Ok(PreparedCall {
             sighash,

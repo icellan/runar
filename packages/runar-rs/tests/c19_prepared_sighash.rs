@@ -142,10 +142,45 @@ fn deploy() -> (RunarContract, MockProvider, LocalSigner) {
     (contract, call_provider, signer)
 }
 
-/// `PreparedCall.sighash` must be `hash256(preimage)`, never `sha256(preimage)`.
+/// Byte offset of the first real OP_CODESEPARATOR (push data skipped).
+fn first_codesep(script_hex: &str) -> i64 {
+    let b = hex_to_bytes(script_hex);
+    let mut i = 0usize;
+    while i < b.len() {
+        let op = b[i];
+        if op == 0xab {
+            return i as i64;
+        }
+        i += 1 + match op {
+            0x01..=0x4b => op as usize,
+            0x4c => 1 + b[i + 1] as usize,
+            0x4d => 2 + (b[i + 1] as usize | (b[i + 2] as usize) << 8),
+            0x4e => 4 + (0..4).map(|k| (b[i + 1 + k] as usize) << (8 * k)).sum::<usize>(),
+            _ => 0,
+        };
+    }
+    -1
+}
+
+/// D25: the BIP-143 preimage a user `Sig` (always ALL|FORKID) commits to for
+/// input 0 of `tx_hex`: same tx, subscript and code separator as the covenant
+/// preimage, but under ALL|FORKID. SigCounter is mutate-only, so its covenant
+/// preimage itself is SIGHASH_SINGLE (0x43).
+fn user_sig_preimage(tx_hex: &str, utxo: &Utxo) -> Vec<u8> {
+    let pre = runar_lang::sdk::oppushtx::compute_op_push_tx_preimage_with_code_sep_sighash(
+        tx_hex, 0, &utxo.script, utxo.satoshis, first_codesep(&utxo.script), 0x41,
+    )
+    .expect("ALL|FORKID preimage");
+    hex_to_bytes(&pre)
+}
+
+/// `PreparedCall.sighash` must be `hash256(preimage)`, never `sha256(preimage)`
+/// — of the preimage the user Sig commits to (D25: ALL|FORKID, also when the
+/// covenant runs under SIGHASH_SINGLE).
 #[test]
 fn prepared_call_sighash_is_bip143_hash256() {
     let (mut contract, mut provider, signer) = deploy();
+    let utxo = contract.get_utxo().unwrap().clone();
 
     let prepared = contract
         .prepare_call("inc", &[SdkValue::Auto], &mut provider, &signer, None)
@@ -155,10 +190,20 @@ fn prepared_call_sighash_is_bip143_hash256() {
         !prepared.preimage.is_empty(),
         "a stateful call must carry a BIP-143 preimage"
     );
+    assert!(
+        prepared.preimage.ends_with("43000000"),
+        "D25: a mutate-only contract's covenant preimage is SIGHASH_SINGLE|FORKID"
+    );
 
-    let preimage = hex_to_bytes(&prepared.preimage);
+    let preimage = user_sig_preimage(&prepared.tx_hex, &utxo);
     let want = bytes_to_hex(&sha256d(&preimage));
     let wrong_single = bytes_to_hex(&sha256_once(&preimage));
+    assert_ne!(
+        prepared.sighash,
+        bytes_to_hex(&sha256d(&hex_to_bytes(&prepared.preimage))),
+        "D25: PreparedCall.sighash is the SINGLE covenant digest; a user Sig carries 0x41 \
+         and OP_CHECKSIG verifies it against the ALL|FORKID digest"
+    );
 
     assert_ne!(
         prepared.sighash, wrong_single,
@@ -178,6 +223,7 @@ fn prepared_call_sighash_is_bip143_hash256() {
 #[test]
 fn external_sign_hash_wallet_signature_verifies_on_chain_digest() {
     let (mut contract, mut provider, signer) = deploy();
+    let utxo = contract.get_utxo().unwrap().clone();
 
     let prepared = contract
         .prepare_call("inc", &[SdkValue::Auto], &mut provider, &signer, None)
@@ -207,8 +253,21 @@ fn external_sign_hash_wallet_signature_verifies_on_chain_digest() {
     let sig_hex = bytes_to_hex(&der);
     // --- end external wallet ---
 
-    // What OP_CHECKSIG actually verifies against on-chain.
-    let on_chain_digest = sha256d(&hex_to_bytes(&prepared.preimage));
+    // What OP_CHECKSIG actually verifies against on-chain: the ALL|FORKID
+    // digest the 0x41 sighash byte names (D25: not the SINGLE covenant one).
+    let on_chain_digest = sha256d(&user_sig_preimage(&prepared.tx_hex, &utxo));
+    // ...which is also the digest the default call() path's LocalSigner signs.
+    let mut sub = utxo.script.clone();
+    sub = sub[((first_codesep(&utxo.script) + 1) * 2) as usize..].to_string();
+    let local = hex_to_bytes(&signer.sign(&prepared.tx_hex, 0, &sub, utxo.satoshis, None).unwrap());
+    let local_sig = Signature::from_der(&local[..local.len() - 1]).unwrap();
+    assert!(
+        VerifyingKey::from_sec1_bytes(&hex_to_bytes(&signer.get_public_key().unwrap()))
+            .unwrap()
+            .verify_prehash(&on_chain_digest, &local_sig)
+            .is_ok(),
+        "LocalSigner (the call() path) must sign the same ALL|FORKID digest"
+    );
     let verifying_key =
         VerifyingKey::from_sec1_bytes(&hex_to_bytes(&signer.get_public_key().unwrap())).unwrap();
     assert!(

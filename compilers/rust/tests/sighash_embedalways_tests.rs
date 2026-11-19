@@ -117,9 +117,12 @@ fn rule3_none_rejects_state_continuation() {
     );
 }
 
-// Rule 4: SINGLE → reject the value-skimmable mutate-only auto-continuation.
+// Rule 4 (D25): the #123 F1 refusal of a mutate-only SINGLE continuation
+// predated the F-024 `_newAmount` floor and N-038; SINGLE hashes the whole
+// same-index output, value included, so it is sound (and the default for a
+// contract whose continuation methods are all mutate-only).
 #[test]
-fn rule4_single_rejects_mutate_only_continuation() {
+fn rule4_single_accepts_mutate_only_continuation() {
     let src = r#"
     class Counter extends StatefulSmartContract {
       n: bigint;
@@ -127,14 +130,8 @@ fn rule4_single_rejects_mutate_only_continuation() {
       /** @sighash SINGLE|FORKID */
       public bump(): void { this.n = this.n + 1n; }
     }"#;
-    assert!(
-        errors_of(src).iter().any(|e|
-            e.contains("mutate-only SINGLE continuation is unsound")
-                || e.contains("sized by the caller-chosen _newAmount")),
-        "expected SINGLE mutate-only value-skim rejection, got: {:?}",
-        errors_of(src)
-    );
-    assert!(!compiles(src));
+    assert_eq!(errors_of(src), Vec::<String>::new());
+    assert!(compiles(src));
 }
 
 // ===========================================================================
@@ -306,8 +303,10 @@ fn anyonecanpay_script_contains_0xc1_flag() {
         n: bigint;
         constructor(n: bigint) { super(n); this.n = n; }
         /** @sighash ALL|ANYONECANPAY|FORKID */
-        public bump(): void { this.n = this.n + 1n; }
+        public bump(): void { this.addOutput(1000n, this.n + 1n); }
       }"#;
+    // D25: an addOutput body keeps the ALL base (a mutate-only contract maps
+    // ALL|ANYONECANPAY|FORKID to SINGLE|ANYONECANPAY|FORKID = 0xC3).
     let r = compile(src, "Counter.runar.ts");
     assert!(compiles(src), "ACP counter should compile: {:?}", errors_of(src));
     assert!(
