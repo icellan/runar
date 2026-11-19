@@ -910,7 +910,25 @@ module Runar
         when '+'          then left + right   # concatenation
         when '==', '===' then left == right
         when '!=', '!==' then left != right
-        else ''
+        # D12 BM-F4: OP_AND / OP_OR / OP_XOR on ByteStrings -- bytewise, and
+        # the script aborts when the operands differ in length. This used to
+        # return '' (an invented value the covenant refuses).
+        when '&', '|', '^'
+          a = [left.to_s].pack('H*').bytes
+          b = [right.to_s].pack('H*').bytes
+          if a.length != b.length
+            name = { '&' => 'OP_AND', '|' => 'OP_OR', '^' => 'OP_XOR' }[op]
+            raise "#{name}: operands of #{a.length} and #{b.length} bytes -- the script aborts on a length mismatch"
+          end
+          a.zip(b).map do |x, y|
+            case op
+            when '&' then x & y
+            when '|' then x | y
+            else x ^ y
+            end
+          end.pack('C*').unpack1('H*')
+        else
+          raise "ANF interpreter does not model the binary operator '#{op}' on ByteString operands"
         end
       end
 
@@ -1024,7 +1042,8 @@ module Runar
           nil
 
         # Byte operations.
-        when 'num2bin'
+        # D12 BM-F4: int2str compiles to OP_NUM2BIN, exactly like num2bin.
+        when 'num2bin', 'int2str'
           n      = to_int(args[0])
           length = to_int(args[1]).to_i
           num2bin_hex(n, length)
@@ -1055,6 +1074,12 @@ module Runar
 
         when 'reverseBytes'
           hex_str = (args[0] || '').to_s
+          # D12: the compiled script reverses only the first 520 bytes, so a
+          # longer input has no off-chain answer that matches it.
+          if hex_str.length / 2 > 520
+            raise "reverseBytes: input of #{hex_str.length / 2} bytes exceeds the 520-byte limit " \
+                  'the compiled script reverses'
+          end
           hex_str.scan(/../).reverse.join
 
         when 'len'
@@ -1232,6 +1257,16 @@ module Runar
           mock_bytes = Thread.current[:runar_mock_preimage_bytes]
           (mock_bytes && mock_bytes['scriptCode']) || ''
 
+        # Compiler-synthesized scaffolding (not runar-lang builtins): the SDK
+        # rebuilds these outputs itself, so nil is the correct off-chain
+        # answer (same carve-out as the TS interpreter's A-3 list).
+        when 'computeStateOutput', 'buildChangeOutput', 'buildDataOutput', 'buildRawOutput', 'super'
+          nil
+
+        # An unmodelled builtin (e.g. the Go-scoped BabyBear family, used only
+        # inside asserts) yields nil, as in the Go and Rust interpreters. A nil
+        # that reaches a state field produces a continuation the covenant
+        # refuses, so the call fails closed at broadcast.
         else
           nil
         end
@@ -1632,13 +1667,16 @@ module Runar
           end
         end
 
-        # 2a. Field too narrow for the value: OP_NUM2BIN rejects this outright
-        #     ("impossible encoding"). The interpreter keeps its historical
-        #     truncation rather than growing a new failure mode here; an
+        # 2a. D12 BM-F5: a negative size, or a field too narrow for the value,
+        #     makes OP_NUM2BIN abort ("impossible encoding"). This used to
+        #     truncate, an invented value the covenant refuses. An
         #     equal-length encoding is already final and needs no sign-bit move.
-        if result_bytes.length >= byte_len
-          return result_bytes[0, byte_len].map { |b| format('%02x', b) }.join
+        raise "num2bin: negative size #{byte_len} -- OP_NUM2BIN aborts" if byte_len.negative?
+        if result_bytes.length > byte_len
+          raise "num2bin: #{n} needs #{result_bytes.length} bytes, more than the requested #{byte_len} " \
+                '-- OP_NUM2BIN aborts'
         end
+        return result_bytes.map { |b| format('%02x', b) }.join if result_bytes.length == byte_len
 
         # 2b. Padded: lift the sign bit off the magnitude, zero-extend, and
         #     re-apply it to the byte that is now most significant.

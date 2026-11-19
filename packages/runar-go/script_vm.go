@@ -224,6 +224,9 @@ func (vm *ScriptVM) run(unlocking, locking []byte) ([]StepResult, *VMResult, err
 		interpreter.WithTx(tx, 0, prevOut),
 		interpreter.WithScripts(lockingScript, unlockingScript),
 		interpreter.WithAfterGenesis(),
+		// D12 NIST-F3: every EC / NIST / stateful script uses post-Chronicle
+		// opcodes (OP_2MUL ...); without this the VM aborts on them.
+		interpreter.WithAfterChronicle(),
 		interpreter.WithDebugger(rec),
 	}
 	if vm.opts.ForkID {

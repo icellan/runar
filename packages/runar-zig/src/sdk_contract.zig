@@ -338,6 +338,87 @@ fn checkByteStringCtorArgs(params: []const types.ABIParam, args: []const types.S
     }
 }
 
+/// D12 PQ-F1: pk bytes each post-quantum verifier splits its pk operand at.
+const PQ_PUBKEY_BYTES = [_]struct { func: []const u8, len: usize }{
+    .{ .func = "verifyWOTS", .len = 64 },
+    .{ .func = "verifySLHDSA_SHA2_128s", .len = 32 },
+    .{ .func = "verifySLHDSA_SHA2_128f", .len = 32 },
+    .{ .func = "verifySLHDSA_SHA2_192s", .len = 48 },
+    .{ .func = "verifySLHDSA_SHA2_192f", .len = 48 },
+    .{ .func = "verifySLHDSA_SHA2_256s", .len = 64 },
+    .{ .func = "verifySLHDSA_SHA2_256f", .len = 64 },
+};
+
+fn pqPubkeyLen(func: []const u8) ?usize {
+    for (PQ_PUBKEY_BYTES) |e| if (std.mem.eql(u8, e.func, func)) return e.len;
+    return null;
+}
+
+/// D12 PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA verifier's
+/// public key directly (a property load as the verifier's 3rd arg) when it has
+/// the wrong length -- the compiled verifier splits the key at fixed offsets,
+/// so the deployed output would refuse the owner's valid signature forever.
+/// Only artifacts carrying ANF (stateful) expose the data flow; without ANF
+/// nothing is checked (same scope as the TS/Go/Rust/Java tiers).
+fn checkPqPubkeyCtorArgs(allocator: std.mem.Allocator, artifact: *const types.RunarArtifact, args: []const types.StateValue) ContractError!void {
+    const anf_json = artifact.anf_json orelse return;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, anf_json, .{}) catch return;
+    defer parsed.deinit();
+    const methods = switch (parsed.value) {
+        .object => |o| (o.get("methods") orelse return),
+        else => return,
+    };
+    if (methods != .array) return;
+    for (methods.array.items) |m| {
+        if (m != .object) continue;
+        const body = m.object.get("body") orelse continue;
+        var defs = std.StringHashMap(std.json.ObjectMap).init(allocator);
+        defer defs.deinit();
+        try checkPqBindings(&defs, body, artifact.abi.constructor.params, args);
+    }
+}
+
+fn checkPqBindings(
+    defs: *std.StringHashMap(std.json.ObjectMap),
+    bindings: std.json.Value,
+    params: []const types.ABIParam,
+    args: []const types.StateValue,
+) ContractError!void {
+    if (bindings != .array) return;
+    for (bindings.array.items) |b| {
+        if (b != .object) continue;
+        const name = b.object.get("name") orelse continue;
+        const val = b.object.get("value") orelse continue;
+        if (name != .string or val != .object) continue;
+        defs.put(name.string, val.object) catch return ContractError.OutOfMemory;
+        const kind = val.object.get("kind") orelse continue;
+        if (kind != .string) continue;
+        if (std.mem.eql(u8, kind.string, "if")) {
+            if (val.object.get("then")) |t| try checkPqBindings(defs, t, params, args);
+            if (val.object.get("else")) |e| try checkPqBindings(defs, e, params, args);
+        } else if (std.mem.eql(u8, kind.string, "loop")) {
+            if (val.object.get("body")) |lb| try checkPqBindings(defs, lb, params, args);
+        } else if (std.mem.eql(u8, kind.string, "call")) {
+            const func = val.object.get("func") orelse continue;
+            if (func != .string) continue;
+            const want = pqPubkeyLen(func.string) orelse continue;
+            const call_args = val.object.get("args") orelse continue;
+            if (call_args != .array or call_args.array.items.len < 3) continue;
+            const pk_ref = call_args.array.items[2];
+            if (pk_ref != .string) continue;
+            const src = defs.get(pk_ref.string) orelse continue;
+            const src_kind = src.get("kind") orelse continue;
+            const prop = src.get("name") orelse continue;
+            if (src_kind != .string or prop != .string or !std.mem.eql(u8, src_kind.string, "load_prop")) continue;
+            for (params, args) |p, a| {
+                if (!std.mem.eql(u8, p.name, prop.string)) continue;
+                if (a != .bytes) continue;
+                if (a.bytes.len / 2 != want) return ContractError.InvalidConstructorArg;
+            }
+        }
+    }
+}
+
 /// RunarContract is a runtime wrapper for a compiled Runar contract. It handles
 /// deployment, method invocation, state tracking, and script construction.
 pub const RunarContract = struct {
@@ -369,6 +450,7 @@ pub const RunarContract = struct {
         const expected = artifact.abi.constructor.params.len;
         if (constructor_args.len != expected) return ContractError.ArgCountMismatch;
         try checkByteStringCtorArgs(artifact.abi.constructor.params, constructor_args);
+        try checkPqPubkeyCtorArgs(allocator, artifact, constructor_args);
 
         // Clone constructor args
         var args = try allocator.alloc(types.StateValue, constructor_args.len);
@@ -1114,6 +1196,8 @@ pub const RunarContract = struct {
                 anf_data_outputs = try self.autoComputeState(method_name, user_params, resolved_args, &anf_ordered_outputs, .{
                     .input_amount = contract_utxo.satoshis,
                     .new_amount = new_satoshis,
+                    .locktime = if (options) |o| (o.locktime orelse 0) else 0,
+                    .sequence = if (options) |o| o.sequence else null,
                 });
                 new_locking_script = try self.getLockingScript();
             } else {
@@ -2708,7 +2792,11 @@ pub const RunarContract = struct {
         const preimage_owned = try self.allocator.dupe(u8, ptx_result.preimage_hex);
         const intent_witness_owned = try self.allocator.dupe(u8, witness_hex);
         const state_after = try self.getState();
-        const moved_state_before = state_before;
+        // D12 SDK-F1/F2: prepareCall never leaves the tracked state changed.
+        // The post-call state travels in the PreparedCall (`state_after`) and
+        // finalizeCall commits it only after a successful broadcast, so an
+        // abandoned or superseded PreparedCall needs no cleanup.
+        self.adoptState(state_before.?);
         state_before = null;
 
         return types.PreparedCall{
@@ -2730,7 +2818,7 @@ pub const RunarContract = struct {
             .needs_new_amount = needs_new_amount,
             .code_sep_idx = code_sep_idx,
             .intent_witness_hex = intent_witness_owned,
-            .state_before = moved_state_before,
+            .state_before = null,
             .state_after = state_after,
         };
     }
@@ -2857,14 +2945,9 @@ pub const RunarContract = struct {
             std.mem.eql(u8, u.txid, prepared.contract_utxo.txid) and u.output_index == prepared.contract_utxo.output_index
         else
             false;
-        // Nothing was broadcast (or the node refused it): the chain is still
-        // at the state this call started from, so the local state must be too.
-        errdefer if (owns_state) {
-            if (prepared.state_before) |sb| {
-                self.adoptState(sb);
-                prepared.state_before = null;
-            }
-        };
+        // D12 SDK-F1/F2: prepareCall left `self.state` untouched, so a failed
+        // finalize has nothing to roll back (and must not: restoring a
+        // snapshot would clobber another PreparedCall's commit).
         const prov = prov_arg orelse self.provider orelse return ContractError.NoProviderOrSigner;
 
         if (signatures.len != prepared.sig_indices.len) {
@@ -2949,6 +3032,28 @@ pub const RunarContract = struct {
         }
 
         return txid;
+    }
+
+    /// D12 D2: BIP-143 outpoint of `utxo` -- txid bytes little-endian (the
+    /// reverse of the display hex) followed by the vout as u32 LE.
+    fn outpointHex(allocator: std.mem.Allocator, utxo: types.UTXO) ![]u8 {
+        if (utxo.txid.len != 64) return ContractError.CallFailed;
+        const out = try allocator.alloc(u8, 72);
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            const src = (31 - i) * 2;
+            out[i * 2] = utxo.txid[src];
+            out[i * 2 + 1] = utxo.txid[src + 1];
+        }
+        const vout: u32 = @intCast(utxo.output_index);
+        const hex_chars = "0123456789abcdef";
+        var b: usize = 0;
+        while (b < 4) : (b += 1) {
+            const byte: u8 = @truncate(vout >> @intCast(b * 8));
+            out[64 + b * 2] = hex_chars[byte >> 4];
+            out[64 + b * 2 + 1] = hex_chars[byte & 0x0f];
+        }
+        return out;
     }
 
     /// Replace `self.state` with `vals`, taking ownership of it.
@@ -3473,7 +3578,8 @@ pub const RunarContract = struct {
         ordered_out: ?*std.ArrayListUnmanaged(anf_interp.OrderedOutputEntry),
         // F-024 (R14): the spent UTXO's satoshis (`extractAmount(txPreimage)`)
         // and the continuation's (`continuationAmount()` = `_newAmount`).
-        continuation: struct { input_amount: i64, new_amount: i64 },
+        // D12 D2: the call tx's nLockTime and input-0 nSequence override.
+        continuation: struct { input_amount: i64, new_amount: i64, locktime: u32 = 0, sequence: ?u32 = null },
     ) ![]anf_interp.DataOutputEntry {
         const empty: []anf_interp.DataOutputEntry = &.{};
         const anf_json = self.artifact.anf_json orelse return empty;
@@ -3544,6 +3650,13 @@ pub const RunarContract = struct {
         var mock_env = anf_interp.MockEnv.init(work);
         defer mock_env.deinit();
         mock_env.script_code_hex = script_code_hex;
+        // D12 D2: the real nLockTime / input-0 nSequence / spent outpoint of
+        // the transaction this call builds, instead of the historical dummies
+        // (0 / 0xfffffffe / none) that made a state field derived from them
+        // diverge from the script.
+        mock_env.locktime = continuation.locktime;
+        mock_env.sequence = call_mod.resolveInputSequence(continuation.locktime, continuation.sequence);
+        mock_env.outpoint_hex = try outpointHex(work, self.current_utxo.?);
 
         // Convert constructor_args to ANFValue slice for the interpreter
         var ctor_anf_args = try work.alloc(anf_interp.ANFValue, self.constructor_args.len);

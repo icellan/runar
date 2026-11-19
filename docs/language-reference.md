@@ -119,6 +119,7 @@ count: bigint;
 - Initialized in the constructor. Can be reassigned in public methods.
 - Changes are propagated across transactions using the OP_PUSH_TX pattern.
 - Having any mutable property makes the contract **stateful**. Use `StatefulSmartContract` as the base class.
+- **A `bigint` state field is a fixed 8-byte word.** The continuation serializes it as 8-byte sign-magnitude, so it holds values in `(-2^63, 2^63)`. A method that writes a value with `|v| >= 2^63` to a `bigint` state field cannot be spent: the covenant aborts when it serializes the continuation, and every SDK refuses to build it ("does not fit the fixed 8-byte sign-magnitude state word"). A counter that can grow past `2^63 - 1` makes its output unspendable once it gets there; bound it with an `assert` before the write, or keep the value as a `ByteString`. Intermediate `bigint` values inside a method are not limited this way.
 
 ### Property Initializers
 
@@ -556,7 +557,7 @@ private helper(x: bigint): bigint {
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `len` | `(data: ByteString) => bigint` | `OP_SIZE OP_NIP` |
-| `reverseBytes` | `(data: ByteString) => ByteString` | `OP_SPLIT` / `OP_CAT` loop (bounded) |
+| `reverseBytes` | `(data: ByteString) => ByteString` | `OP_SPLIT` / `OP_CAT` loop, unrolled for at most 520 bytes. A longer input is NOT fully reversed by the compiled script; every SDK interpreter and `TestContract` refuse it |
 | `toByteString` | `(hex: string) => ByteString` | Compile-time literal construction |
 | `cat` | `(a: ByteString, b: ByteString) => ByteString` | `OP_CAT` |
 | `substr` | `(data: ByteString, start: bigint, length: bigint) => ByteString` | `OP_SPLIT` (twice) |

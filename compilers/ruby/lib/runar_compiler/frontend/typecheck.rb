@@ -1515,6 +1515,11 @@ module RunarCompiler
 
         when PropertyAccessExpr
           return @prop_types[expr.property] if @prop_types.key?(expr.property)
+          return "<method>" if @method_sigs.key?(expr.property) || expr.property == "getStateScript"
+          # D12 FE-F2: an undeclared property (a typo such as this.cnt for
+          # this.count) must be an error here, or a write to it reaches no
+          # state field and the method silently loses its continuation.
+          add_error("Property '#{expr.property}' does not exist on the contract")
           "<unknown>"
 
         when MemberExpr

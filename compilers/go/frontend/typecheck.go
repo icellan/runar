@@ -1192,6 +1192,16 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		if t, ok := tc.propTypes[e.Property]; ok {
 			return t
 		}
+		if _, ok := tc.methodSigs[e.Property]; ok {
+			return "<method>"
+		}
+		if e.Property == "getStateScript" {
+			return "<method>"
+		}
+		// D12 FE-F2: an undeclared property (a typo such as this.cnt for
+		// this.count) must be an error here, or a write to it reaches no state
+		// field and the method silently loses its continuation.
+		tc.addError(fmt.Sprintf("Property '%s' does not exist on the contract", e.Property))
 		return "<unknown>"
 
 	case MemberExpr:

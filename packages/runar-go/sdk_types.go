@@ -208,11 +208,10 @@ type PreparedCall struct {
 	contractOutputs      []ContractOutput
 	codeSepIdx           int // adjusted OP_CODESEPARATOR byte offset, -1 if none
 
-	// The local state before PrepareCall advanced it (restored when
-	// FinalizeCall fails) and the post-call state it advanced to (re-applied
-	// when a retried FinalizeCall of the same PreparedCall succeeds).
-	stateBefore map[string]interface{}
-	stateAfter  map[string]interface{}
+	// The post-call state (D12 SDK-F1/F2): PrepareCall leaves the tracked
+	// state untouched and FinalizeCall commits this on a successful broadcast
+	// (also on a retried FinalizeCall of the same PreparedCall).
+	stateAfter map[string]interface{}
 
 	// Mode 3: pre-encoded witness-assisted Groth16 prover bundle hex,
 	// spliced into the unlock script BEFORE the stateful prefix so the

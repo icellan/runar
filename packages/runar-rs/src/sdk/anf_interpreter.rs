@@ -623,7 +623,35 @@ pub fn compute_new_state_and_data_outputs_with_script_code(
     // Lenient mode: any assert() in the body is skipped — the on-chain
     // script handles enforcement, and `run_method` cannot return an
     // AssertionFailureError when `strict = None`.
-    match run_method(anf, method_name, current_state, args, constructor_args, None, script_code) {
+    let tx = TxFields { script_code: script_code.map(str::to_string), ..Default::default() };
+    compute_new_state_and_data_outputs_with_tx_fields(anf, method_name, current_state, args, constructor_args, &tx)
+}
+
+/// D2: the fields of the transaction `prepare_call` builds, read by the
+/// preimage extractors during lenient state derivation: the contract's own
+/// scriptCode (R67, `extractScriptCode`), the tx's nLockTime
+/// (`extractLocktime`), input 0's nSequence (`extractSequence`) and outpoint,
+/// txid little-endian || vout u32 LE, as hex (`extractOutpoint`). A `None`
+/// field keeps the historical dummy.
+#[derive(Debug, Clone, Default)]
+pub struct TxFields {
+    pub script_code: Option<String>,
+    pub locktime: Option<i64>,
+    pub sequence: Option<i64>,
+    pub outpoint: Option<String>,
+}
+
+/// Like [`compute_new_state_and_data_outputs_with_script_code`], with every
+/// [`TxFields`] value the caller knows.
+pub fn compute_new_state_and_data_outputs_with_tx_fields(
+    anf: &ANFProgram,
+    method_name: &str,
+    current_state: &HashMap<String, SdkValue>,
+    args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
+    tx: &TxFields,
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String> {
+    match run_method(anf, method_name, current_state, args, constructor_args, None, Some(tx)) {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(s)) => Err(s),
         // Unreachable: lenient mode never produces strict assertion failures.
@@ -874,7 +902,7 @@ fn run_method(
     // R67: the real off-chain scriptCode for `extractScriptCode`, independent
     // of `strict`/`witness` (see `compute_new_state_and_data_outputs_with_script_code`'s
     // doc comment for why it can't be threaded through `StrictCtx`).
-    script_code: Option<&str>,
+    script_code: Option<&TxFields>,
 ) -> Result<
     Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String>,
     AssertionFailureError,
@@ -1020,7 +1048,7 @@ fn eval_bindings(
     anf: &ANFProgram,
     strict: Option<&StrictCtx>,
     script_bytes: &mut HashMap<String, Vec<u8>>,
-    script_code: Option<&str>,
+    script_code: Option<&TxFields>,
 ) -> Result<(), AssertionFailureError> {
     for binding in bindings {
         let val = eval_value(
@@ -1052,7 +1080,7 @@ fn eval_value(
     strict: Option<&StrictCtx>,
     binding_name: &str,
     script_bytes: &mut HashMap<String, Vec<u8>>,
-    script_code: Option<&str>,
+    script_code: Option<&TxFields>,
 ) -> Result<Val, AssertionFailureError> {
     let kind = match value.get("kind").and_then(|k| k.as_str()) {
         Some(k) => k,
@@ -1293,7 +1321,10 @@ fn eval_value(
             // (zero divisor, the pow exponent guard, sqrt of a negative) fails
             // the spend; surface it through the rejection channel instead of
             // letting `eval_call` invent a value (F-134).
-            if math_builtin_aborts(&func, &args) || split_builtin_aborts(&func, &args) {
+            if math_builtin_aborts(&func, &args)
+                || split_builtin_aborts(&func, &args)
+                || byte_builtin_aborts(&func, &args)
+            {
                 return Err(AssertionFailureError {
                     method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
                     binding_name: binding_name.to_string(),
@@ -1849,7 +1880,23 @@ fn eval_bin_op(op: &str, left: &Val, right: &Val, result_type: &str) -> Result<V
             "+" => Val::Bytes(format!("{}{}", lh, rh)),
             "==" | "===" => Val::Bool(lh == rh),
             "!=" | "!==" => Val::Bool(lh != rh),
-            _ => Val::Bytes(String::new()),
+            // D12 BM-F4: OP_AND / OP_OR / OP_XOR on ByteStrings are byte-wise
+            // over equal-length operands and abort on a length mismatch. This
+            // used to return "", a value the script never produces.
+            "&" | "|" | "^" => {
+                let (a, b) = (hex_to_bytes(&lh), hex_to_bytes(&rh));
+                if a.len() != b.len() || a.len() * 2 != lh.len() || b.len() * 2 != rh.len() {
+                    return Err(());
+                }
+                let out: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| match op {
+                    "&" => x & y,
+                    "|" => x | y,
+                    _ => x ^ y,
+                }).collect();
+                Val::Bytes(bytes_to_hex(&out))
+            }
+            // Not modelled on ByteString operands: refuse rather than invent.
+            _ => return Err(()),
         });
     }
 
@@ -2011,8 +2058,75 @@ fn math_builtin_overflows_i64(func: &str, args: &[Val]) -> bool {
             c != 0 && i64::try_from((arg(0) as i128 * arg(1) as i128) / c).is_err()
         }
         "percentOf" => i64::try_from((arg(0) as i128 * arg(1) as i128) / 10000).is_err(),
+        // D12 BM-F7: gcd(i64::MIN, 0) is 2^63, outside i64.
+        "gcd" => gcd_u64(arg(0), arg(1)) > i64::MAX as u64,
+        // D12 BM-F2: bin2num of a value outside i64 (any ByteString may carry
+        // one, e.g. a 32-byte hash) cannot be represented; it used to wrap.
+        "bin2num" => bin2num_checked(&args.first().map(|v| v.as_hex()).unwrap_or_default()).is_none(),
         _ => false,
     }
+}
+
+/// Euclid on |a|, |b| in u64, so i64::MIN neither panics nor wraps.
+fn gcd_u64(a: i64, b: i64) -> u64 {
+    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Byte length of `n`'s minimal script-number encoding.
+fn minimal_num_len(n: i64) -> i64 {
+    let mag = n.unsigned_abs();
+    if mag == 0 {
+        return 0;
+    }
+    let bits = 64 - mag.leading_zeros() as i64;
+    (bits + 7) / 8 + if bits % 8 == 0 { 1 } else { 0 }
+}
+
+/// D12: byte builtins whose compiled script aborts (or has no faithful
+/// off-chain result) on these operands.
+/// - reverseBytes: the script reverses only the first 520 bytes and drops the
+///   rest, so a longer input is refused.
+/// - num2bin / int2str (BM-F5): OP_NUM2BIN aborts on a negative size or one
+///   narrower than the value's minimal encoding; it does not truncate.
+fn byte_builtin_aborts(func: &str, args: &[Val]) -> bool {
+    match func {
+        "reverseBytes" => args.first().map(|v| v.as_hex().len() / 2).unwrap_or(0) > 520,
+        "num2bin" | "int2str" => {
+            let n = args.first().map(|v| v.to_i64()).unwrap_or(0);
+            let w = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            w < 0 || w < minimal_num_len(n)
+        }
+        _ => false,
+    }
+}
+
+/// Exact script-number decode (sign-magnitude LE, sign = bit 7 of the LAST
+/// byte), or `None` when the value lies outside i64.
+fn bin2num_checked(hex: &str) -> Option<i64> {
+    let mut bytes = hex_to_bytes(hex);
+    let Some(last) = bytes.last_mut() else { return Some(0) };
+    let negative = *last & 0x80 != 0;
+    *last &= 0x7f;
+    while bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    if bytes.len() > 8 {
+        return None;
+    }
+    let mut mag: u64 = 0;
+    for b in bytes.iter().rev() {
+        mag = (mag << 8) | *b as u64;
+    }
+    if mag > i64::MAX as u64 {
+        return None;
+    }
+    Some(if negative { -(mag as i64) } else { mag as i64 })
 }
 
 /// F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
@@ -2058,7 +2172,7 @@ fn eval_call(
     args: &[Val],
     real_crypto: Option<&OnChainCryptoContext>,
     witness: Option<&IntentWitnessContext>,
-    script_code: Option<&str>,
+    script_code: Option<&TxFields>,
 ) -> Val {
     match func {
         // Crypto — mocked unless real-crypto context is present.
@@ -2102,14 +2216,18 @@ fn eval_call(
         "assert" => Val::Undefined,
 
         // Byte operations
-        "num2bin" => {
+        // D12 BM-F4: int2str compiles to OP_NUM2BIN, exactly like num2bin; it
+        // used to fall through to `Undefined`. Width bounds are checked by
+        // `byte_builtin_aborts`.
+        "num2bin" | "int2str" => {
             let n = args.first().map(|a| a.to_i64()).unwrap_or(0);
             let len = args.get(1).map(|a| a.to_i64()).unwrap_or(0) as usize;
             Val::Bytes(num2bin_hex(n, len))
         }
         "bin2num" => {
             let hex = args.first().map(|a| a.as_hex()).unwrap_or_default();
-            Val::Int(bin2num_i64(&hex))
+            // In range: `math_builtin_overflows_i64` refused the rest (BM-F2).
+            Val::Int(bin2num_checked(&hex).unwrap_or(0))
         }
         "cat" => {
             let a = args.first().map(|v| v.as_hex()).unwrap_or_default();
@@ -2230,16 +2348,12 @@ fn eval_call(
                 Val::Int(x as i64)
             }
         }
-        "gcd" => {
-            let mut a = args.first().map(|v| v.to_i64()).unwrap_or(0).abs();
-            let mut b = args.get(1).map(|v| v.to_i64()).unwrap_or(0).abs();
-            while b != 0 {
-                let t = b;
-                b = a % b;
-                a = t;
-            }
-            Val::Int(a)
-        }
+        // D12 BM-F7: `.abs()` of i64::MIN panicked (debug) / wrapped
+        // (release). The 2^63 result is refused by `math_builtin_overflows_i64`.
+        "gcd" => Val::Int(gcd_u64(
+            args.first().map(|v| v.to_i64()).unwrap_or(0),
+            args.get(1).map(|v| v.to_i64()).unwrap_or(0),
+        ) as i64),
         "divmod" => {
             let a = args.first().map(|v| v.to_i64()).unwrap_or(0);
             let b = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
@@ -2285,6 +2399,7 @@ fn eval_call(
         "extractLocktime" => Val::Int(
             witness
                 .and_then(|w| w.mock_preimage.get("locktime").copied())
+                .or_else(|| script_code.and_then(|t| t.locktime))
                 .unwrap_or(0),
         ),
         // F-024 (R14): an integer `txPreimage` is the caller-supplied input amount.
@@ -2301,7 +2416,7 @@ fn eval_call(
         // Falls back to the historical empty dummy for a bare
         // `compute_new_state` call with no script_code (e.g. a hand-built
         // ANF probe in a test).
-        "extractScriptCode" => Val::Bytes(script_code.unwrap_or("").to_string()),
+        "extractScriptCode" => Val::Bytes(script_code.and_then(|t| t.script_code.clone()).unwrap_or_default()),
         "extractVersion" => Val::Int(
             witness
                 .and_then(|w| w.mock_preimage.get("version").copied())
@@ -2310,6 +2425,7 @@ fn eval_call(
         "extractSequence" => Val::Int(
             witness
                 .and_then(|w| w.mock_preimage.get("sequence").copied())
+                .or_else(|| script_code.and_then(|t| t.sequence))
                 .unwrap_or(0xfffffffei64),
         ),
         // GAP-302: the auto-injected stateful covenant pins the sighash type
@@ -2342,12 +2458,11 @@ fn eval_call(
                 .map(|v| v.as_slice())
                 .unwrap_or(&[0u8; 32]),
         )),
-        "extractOutpoint" => Val::Bytes(bytes_to_hex(
-            witness
-                .and_then(|w| w.mock_preimage_bytes.get("outpoint"))
-                .map(|v| v.as_slice())
-                .unwrap_or(&[0u8; 36]),
-        )),
+        "extractOutpoint" => match (witness.and_then(|w| w.mock_preimage_bytes.get("outpoint")), script_code.and_then(|t| t.outpoint.clone())) {
+            (Some(b), _) => Val::Bytes(bytes_to_hex(b)),
+            (None, Some(h)) => Val::Bytes(h),
+            (None, None) => Val::Bytes("00".repeat(36)),
+        },
 
         _ => Val::Undefined,
     }

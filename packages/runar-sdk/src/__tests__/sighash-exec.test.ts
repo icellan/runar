@@ -146,7 +146,7 @@ describe('#123 — ANYONECANPAY (crowdfund-style) method validates through Spend
     await contract.deploy(provider, deployer, { satoshis: 50_000 });
     const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
 
-    await contract.call('pledge', [7n], provider, caller);
+    await contract.call('pledge', [7n], provider, caller, { allowFeeBelowRate: true });
     const callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
 
     expect(contract.state.raised).toBe(7n);
@@ -177,7 +177,7 @@ describe('#123 — default (no directive) still validates and uses 0x41', () => 
     const contract = new RunarContract(artifact, [0n]);
     await contract.deploy(provider, deployer, { satoshis: 50_000 });
     const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
-    await contract.call('bump', [], provider, caller);
+    await contract.call('bump', [], provider, caller, { allowFeeBelowRate: true });
     const callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
 
     const pre = preimageFromUnlock(callTx, 0);

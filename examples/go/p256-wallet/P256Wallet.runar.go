@@ -14,8 +14,11 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //     was also authorized by the P-256 (NIST / Web PKI) key holder.
 //
 // The secp256k1 sig bytes ARE the message that P-256 signs. This means a
-// hardware security module or browser WebAuthn key (which speaks P-256) can
-// gate Bitcoin spending without any new opcode.
+// hardware security module (or any signer that can sign caller-chosen bytes
+// with a P-256 key) can gate Bitcoin spending without any new opcode. A
+// browser WebAuthn / passkey authenticator cannot: it only ever signs
+// authenticatorData || SHA-256(clientDataJSON), never arbitrary bytes, so
+// it can never produce the P-256 signature this contract checks.
 //
 // # Locking Script Layout
 //

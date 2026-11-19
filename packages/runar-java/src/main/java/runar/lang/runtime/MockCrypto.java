@@ -1012,8 +1012,15 @@ public final class MockCrypto {
         return ecOnCurve(Point.fromRaw64(raw));
     }
 
+    /**
+     * D12 SECP-F1: exactly the compiled script's {@code ((v tmod m) + m) tmod m}
+     * (ec-codegen.ts emitEcModReduce) with TRUNCATED mod, so a negative modulus
+     * gives the script's value (7, -3 -> -2) instead of throwing; m == 0 aborts
+     * (OP_MOD by zero).
+     */
     public static BigInteger ecModReduce(BigInteger value, BigInteger modulus) {
-        return mod(value, modulus);
+        if (modulus.signum() == 0) throw new ArithmeticException("ecModReduce: modulo by zero");
+        return value.remainder(modulus).add(modulus).remainder(modulus);
     }
 
     public static ByteString ecEncodeCompressed(Point p) {

@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
-import { InputLimits } from 'runar-ir-schema';
+import { InputLimits, pqPubKeyRequirements, pqPubKeyLengthError } from 'runar-ir-schema';
 import { assertScriptHexUnderLimit, InvalidConstructorArgError, MalformedScriptError, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
 import { txToTransactionData } from './providers/provider.js';
@@ -505,6 +505,7 @@ export class RunarContract {
     if (!restoringFromUtxo) {
       constructorArgs = checkByteStringCtorArgs(artifact, constructorArgs);
       this.constructorArgs = constructorArgs;
+      checkPqPubKeyCtorArgs(artifact, constructorArgs);
     }
 
     // Initialize state from constructor args for stateful contracts.
@@ -1019,16 +1020,44 @@ export class RunarContract {
    * P2PKH funding inputs and additional contract inputs ARE signed with the
    * connected signer. Only the primary contract input's Sig params are left
    * as 72-byte placeholders.
+   *
+   * State tracking: `prepareCall` does NOT change `state` or the tracked UTXO,
+   * whether it returns or throws. The post-call state travels in the
+   * PreparedCall and `finalizeCall` commits it only after a successful
+   * broadcast. An abandoned PreparedCall needs no cleanup, and with several
+   * outstanding PreparedCalls only the one that is broadcast moves the object.
    */
   async prepareCall(
     methodName: string,
     args: unknown[],
     options?: CallOptions,
   ): Promise<PreparedCall> {
+    // D12 SDK-F1/F2: prepareCall never leaves the tracked state changed, on
+    // success or on a throw. The body below derives the post-call state in
+    // `this._state` (the locking-script builders read it from there); it is
+    // captured into the PreparedCall and the entry state is put back. Only a
+    // successful `finalizeCall` broadcast commits it. So a throw partway
+    // through (fee rate, UTXO lookup, funding signer, maxFundingInputs), an
+    // abandoned PreparedCall, or a second outstanding prepare all leave the
+    // object at the state the chain is at, and need no cleanup.
+    const entryState = { ...this._state };
+    try {
+      const prepared = await this.prepareCallBody(methodName, args, options);
+      prepared._stateAfter = { ...this._state };
+      return prepared;
+    } finally {
+      this._state = entryState;
+    }
+  }
+
+  private async prepareCallBody(
+    methodName: string,
+    args: unknown[],
+    options?: CallOptions,
+  ): Promise<PreparedCall> {
     const { provider, signer } = this.resolveProviderSigner();
-    // The state this call starts from. prepareCall advances `this._state` to
-    // the post-call state before anything is broadcast; finalizeCall restores
-    // this snapshot when the transaction never makes it onto the network.
+    // The state this call starts from (the body advances `this._state` to the
+    // post-call state; `prepareCall` restores the entry state afterwards).
     const stateBefore = { ...this._state };
     // Funding (and terminal fee) inputs are signed by fundingSigner when set
     // (issue #134). The method's own Sig args stay with the connected signer.
@@ -1530,6 +1559,13 @@ export class RunarContract {
           {
             ...(this.currentUtxo ? { inputAmount: BigInt(this.currentUtxo.satoshis) } : {}),
             scriptCode: compactSizeHex(scriptCodeHex.length / 2) + scriptCodeHex,
+            // D12 D2: the nLockTime / nSequence buildCallTransaction puts on
+            // this tx and the outpoint input 0 spends, so a state derived from
+            // extractLocktime / extractSequence / extractOutpoint is the one
+            // the covenant computes (they used to be dummies).
+            locktime: BigInt(options?.locktime ?? 0),
+            sequence: BigInt(resolveInputSequence(options?.locktime, options?.sequence)),
+            outpoint: wireOutpointHex(contractUtxo.txid, contractUtxo.outputIndex),
           },
         );
         autoComputedState = computed;
@@ -2204,7 +2240,11 @@ export class RunarContract {
       _continuations: continuations,
       _intentWitnessHex: witnessHex,
       _dryRun: options?.dryRun ?? false,
-      _stateBefore: stateBefore,
+      _fundingCheck: options?.allowFeeBelowRate ? undefined : {
+        utxos: [contractUtxo, ...extraContractUtxos, ...additionalUtxos]
+          .map((u) => ({ txid: u.txid, outputIndex: u.outputIndex, satoshis: u.satoshis })),
+        feeRate,
+      },
     };
   }
 
@@ -2221,17 +2261,13 @@ export class RunarContract {
   ): Promise<CallResult> {
     // A second finalize of the same PreparedCall is refused below (C29) and
     // must not touch the state the first one committed.
-    if (consumedPreparedCalls.has(prepared)) return this.finalizeCallOnce(prepared, signatures);
-    try {
-      return await this.finalizeCallOnce(prepared, signatures);
-    } catch (e) {
-      // Nothing was broadcast (or the node refused it): the chain is still at
-      // the state this call started from, so the local state must be too.
-      // Before this, a refused call left `state` advanced and the next call
-      // was built from a state the chain never reached.
-      if (prepared._stateBefore) this._state = prepared._stateBefore;
-      throw e;
-    }
+    // D12 SDK-F2: the post-call state is committed by finalizeCallOnce only
+    // after a successful broadcast, so a refused or failed finalize leaves
+    // the tracked state exactly as it was. It must not "restore" anything:
+    // with two outstanding PreparedCalls, the other one may already have
+    // committed its state, and putting back this call's entry state would
+    // clobber it.
+    return this.finalizeCallOnce(prepared, signatures);
   }
 
   private async finalizeCallOnce(
@@ -2338,6 +2374,31 @@ export class RunarContract {
       }
     }
 
+    // D12 SDK-F4: refuse an underfunded call (funding missing or short)
+    // locally instead of handing it to the node. The fee model is the one the builders size against and the
+    // validating MockProvider enforces: ceil(size * feeRate / 1000).
+    const inputSatoshis = prepared._fundingCheck
+      ? sumKnownInputSatoshis(finalTx, prepared._fundingCheck.utxos)
+      : undefined;
+    if (prepared._fundingCheck && inputSatoshis !== undefined) {
+      const { feeRate } = prepared._fundingCheck;
+      const totalOut = finalTx.outputs.reduce((sum, o) => sum + (o.satoshis ?? 0), 0);
+      const sizeBytes = finalTx.toHex().length / 2;
+      const required = Math.ceil((sizeBytes * feeRate) / 1000);
+      const paid = inputSatoshis - totalOut;
+      // Only a call whose funding is exhausted (no change output left to
+      // draw from) is refused here: that is missing or short funding. A
+      // shortfall WITH change is a size-estimate gap, not a funding one, and
+      // stays the node's call.
+      if (paid < required && !(prepared._changeAmount > 0)) {
+        throw new Error(
+          `RunarContract.finalizeCall(${prepared._methodName}): insufficient funds: the transaction pays a fee of ` +
+            `${paid} sats but needs >= ${required} sats (${sizeBytes} B @ ${feeRate} sat/KB). ` +
+            'Fund the signer address (or pass fundingSigner) and call again; nothing was broadcast.',
+        );
+      }
+    }
+
     // Broadcast
     const txid = await provider.broadcast(finalTx);
 
@@ -2350,6 +2411,9 @@ export class RunarContract {
     this.currentUtxo = tracked
       ? { txid, outputIndex: tracked.outputIndex, satoshis: tracked.satoshis, script: tracked.script }
       : null;
+    // D12 SDK-F1/F2: the broadcast succeeded, so commit the post-call state
+    // prepareCall derived (prepareCall itself never changes tracked state).
+    if (prepared._stateAfter) this._state = { ...prepared._stateAfter };
 
     const txData = await provider.getTransaction(txid).catch((err) => {
       // Audit finding C4 — see the peer fallback in `deploy()`.
@@ -3253,6 +3317,47 @@ const BYTE_STRING_CTOR_TYPES = new Set([
  * Returns the (possibly rewritten) args; the caller's array is not mutated.
  * Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
  */
+/**
+ * D12 PQ-F1: refuse a constructor value that is used directly as the public
+ * key of a post-quantum verifier but does not have the length that
+ * verifier's parameter set needs; the locking script would refuse every
+ * honest signature. Hash-committed keys cannot be checked here.
+ */
+function checkPqPubKeyCtorArgs(artifact: RunarArtifact, constructorArgs: unknown[]): void {
+  // `compile()` puts the ANF in stateful artifacts only; a stateless one is
+  // covered by the compile-time constructorArgs check instead.
+  const anf = artifact.anf ?? artifact.ir?.anf;
+  if (!anf) return;
+  const params = artifact.abi.constructor.params;
+  for (const req of pqPubKeyRequirements(anf)) {
+    const idx = params.findIndex((p) => p.name === req.property);
+    if (idx < 0) continue;
+    const msg = pqPubKeyLengthError(req, constructorArgs[idx]);
+    if (msg !== null) throw new Error(`RunarContract(${artifact.contractName}): ${msg}`);
+  }
+}
+
+/** Sum of the tx's input values, or undefined when any input is not one of `utxos`. */
+function sumKnownInputSatoshis(
+  tx: BsvTransaction,
+  utxos: Array<{ txid: string; outputIndex: number; satoshis: number }>,
+): number | undefined {
+  let total = 0;
+  for (const inp of tx.inputs) {
+    const u = utxos.find((x) => x.txid === inp.sourceTXID && x.outputIndex === inp.sourceOutputIndex);
+    if (!u) return undefined;
+    total += u.satoshis;
+  }
+  return total;
+}
+
+/** A spent outpoint as BIP-143 serializes it: txid in wire order || vout u32 LE. */
+function wireOutpointHex(txid: string, vout: number): string {
+  const txidLE = txid.match(/.{2}/g)!.reverse().join('');
+  const voutLE = (vout >>> 0).toString(16).padStart(8, '0').match(/.{2}/g)!.reverse().join('');
+  return txidLE + voutLE;
+}
+
 function checkByteStringCtorArgs(
   artifact: RunarArtifact,
   args: unknown[],

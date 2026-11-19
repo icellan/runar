@@ -403,6 +403,36 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
     }
   });
 
+  // D12 FE-F2: a write to a property the contract does not declare (a typo,
+  // `this.cnt = ...` for `count`) compiled in the python, zig and ruby tiers:
+  // their typecheck typed `this.cnt` as <unknown> without an error, the write
+  // reached no state field, and the method lost its continuation, so anyone
+  // could spend the contract's value. TS, Go, Rust and Java refused it. Every
+  // tier must refuse it on the source path, as the --ir loaders already do.
+  describe('a write to an undeclared property is refused', () => {
+    const src = (stmt: string): string => `import { StatefulSmartContract, assert } from 'runar-lang';
+
+class Typo extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  public bump() { ${stmt} }
+}
+`;
+    for (const [name, stmt] of [
+      ['plain write', 'this.cnt = this.count + 1n;'],
+      ['compound write', 'this.cnt += 1n;'],
+      ['write in a branch', 'if (this.count > 0n) { this.cnt = 0n; } else { this.count = this.count + 1n; }'],
+    ] as const) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses a ${name} to an undeclared property`, () => {
+          const { status, out, diag } = run(tier, writeFile('Typo.runar.ts', src(stmt)));
+          expect(status, `${tier.id} accepted it (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain("Property 'cnt' does not exist on the contract");
+        });
+      }
+    }
+  });
+
   // Follow-on of D18's FixedArray fix: validate / typecheck / sighash-validate
   // see the UNEXPANDED contract, where a FixedArray element write is still an
   // index_access. Before every tier counted it as a state write, a @sighash

@@ -121,7 +121,7 @@ describe('C13 — funding coin-selection uses an estimate; the real build never 
 
     // Shrink state to empty: the NEW locking script is ~3 bytes, dramatically
     // smaller than the ~4000+ byte CURRENT one.
-    await contract.call('reset', [], { newState: { data: '' } });
+    await contract.call('reset', [], { newState: { data: '' }, allowFeeBelowRate: true });
 
     const broadcasted = provider.getBroadcastedTxObjects();
     expect(broadcasted.length).toBe(1);

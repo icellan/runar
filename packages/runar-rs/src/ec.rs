@@ -172,8 +172,12 @@ pub fn ec_on_curve(p: &[u8]) -> bool {
 
 /// Non-negative modular reduction: ((value % m) + m) % m.
 pub fn ec_mod_reduce(value: Bigint, m: Bigint) -> Bigint {
-    let r = value % m;
-    if r < 0 { r + m } else { r }
+    // D12 SECP-F1: the compiled script computes ((v tmod m) + m) tmod m
+    // (ec-codegen.ts emitEcModReduce) and aborts on m == 0 (OP_MOD by zero).
+    // i128 so `v % m + m` and `i64::MIN % -1` cannot overflow.
+    assert!(m != 0, "ecModReduce: modulus is zero (OP_MOD by zero aborts the script)");
+    let (v, m) = (value as i128, m as i128);
+    (((v % m) + m) % m) as i64
 }
 
 /// Encode a point as a 33-byte compressed public key.
