@@ -1552,6 +1552,11 @@ const TypeChecker = struct {
                     }
                     return;
                 }
+                // D12 FE-F2: `this.cnt = v` for an undeclared `cnt` reached no
+                // state field and silently dropped the continuation.
+                if (assign.target_is_property and self.prop_types.get(assign.target) == null) {
+                    self.addError("Property '{s}' does not exist on the contract", .{assign.target});
+                }
                 const target_type = if (self.prop_types.get(assign.target)) |t| t else (env.lookup(assign.target) orelse .unknown);
                 // Whole-array reassignment (`this.cells = other`) is not a legal
                 // Rúnar program at all: `expand_fixed_arrays` refuses it outright
@@ -1707,6 +1712,11 @@ const TypeChecker = struct {
                     if (self.prop_types.get(pa.property)) |t| return t;
                     if (self.method_sigs.get(pa.property) != null) return .unknown;
                     if (std.mem.eql(u8, pa.property, "getStateScript")) return .unknown;
+                    // D12 FE-F2: an undeclared property (a typo such as this.cnt
+                    // for this.count) must be an error here, or a write to it
+                    // reaches no state field and the method silently loses its
+                    // continuation.
+                    self.addError("Property '{s}' does not exist on the contract", .{pa.property});
                     return .unknown;
                 }
                 if (self.stateful_ctx_params.get(pa.object) != null and std.mem.eql(u8, pa.property, "txPreimage")) {

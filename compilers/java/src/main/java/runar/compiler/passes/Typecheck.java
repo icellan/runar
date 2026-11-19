@@ -842,7 +842,7 @@ public final class Typecheck {
                     return "<method>";
                 }
                 if ("getStateScript".equals(pa.property())) return "<method>";
-                error("unknown property 'this." + pa.property() + "'");
+                error("Property '" + pa.property() + "' does not exist on the contract");
                 return "<unknown>";
             }
 

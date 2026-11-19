@@ -1289,6 +1289,12 @@ class _TypeChecker:
         if isinstance(expr, PropertyAccessExpr):
             if expr.property in self.prop_types:
                 return self.prop_types[expr.property]
+            if expr.property in self.method_sigs or expr.property == "getStateScript":
+                return "<method>"
+            # D12 FE-F2: an undeclared property (a typo such as this.cnt for
+            # this.count) must be an error here, or a write to it reaches no
+            # state field and the method silently loses its continuation.
+            self._add_error(f"Property '{expr.property}' does not exist on the contract")
             return "<unknown>"
 
         if isinstance(expr, MemberExpr):

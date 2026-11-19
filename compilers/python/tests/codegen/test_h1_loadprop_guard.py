@@ -150,10 +150,9 @@ def test_source_reading_an_undeclared_property_is_refused(prop: str, tmp_path) -
         f"    assert(len(this.{prop}) >= x);\n"
         "  }\n}\n"
     )
-    # Stack-lowering refusals surface as RuntimeError (the CLI reports them as
-    # "Compilation error: Stack lowering: ..." and exits 1), as for the ghost
-    # with a non-empty constructor-param list.
+    # D12 FE-F2: typecheck now refuses the undeclared property first, with the
+    # diagnostic every tier shares (the stack-lowering guard stays pinned by
+    # the IR-path test above, which typecheck never sees).
     with pytest.raises((CompilationError, RuntimeError)) as excinfo:
         compile_from_source(str(path))
-    assert f"property '{prop}'" in str(excinfo.value)
-    assert "no deploy-time slot" in str(excinfo.value)
+    assert f"Property '{prop}' does not exist on the contract" in str(excinfo.value)
