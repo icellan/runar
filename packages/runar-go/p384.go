@@ -93,7 +93,9 @@ func P384Add(a, b P384Point) P384Point {
 func P384Mul(p P384Point, k *big.Int) P384Point {
 	px, py := p384XYFromPoint(p)
 	curve := elliptic.P384()
-	kBytes := k.Bytes()
+	// D12 NIST-F2: the compiled script reduces k mod n, so a negative scalar
+	// negates the point; k.Bytes() is |k| and dropped the sign.
+	kBytes := new(big.Int).Mod(k, curve.Params().N).Bytes()
 	rx, ry := curve.ScalarMult(px, py, kBytes)
 	return p384PointFromXY(rx, ry)
 }
@@ -101,7 +103,9 @@ func P384Mul(p P384Point, k *big.Int) P384Point {
 // P384MulGen performs scalar multiplication k * G where G is the P-384 generator.
 func P384MulGen(k *big.Int) P384Point {
 	curve := elliptic.P384()
-	kBytes := k.Bytes()
+	// D12 NIST-F2: the compiled script reduces k mod n, so a negative scalar
+	// negates the point; k.Bytes() is |k| and dropped the sign.
+	kBytes := new(big.Int).Mod(k, curve.Params().N).Bytes()
 	rx, ry := curve.ScalarBaseMult(kBytes)
 	return p384PointFromXY(rx, ry)
 }

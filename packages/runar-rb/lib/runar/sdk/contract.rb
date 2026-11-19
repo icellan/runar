@@ -84,7 +84,10 @@ module Runar
                 "#{artifact.contract_name}, got #{actual}"
         end
 
-        check_byte_string_ctor_args(artifact, constructor_args) unless restoring
+        unless restoring
+          check_byte_string_ctor_args(artifact, constructor_args)
+          check_pq_pubkey_ctor_args(artifact, constructor_args)
+        end
 
         @artifact         = artifact
         @constructor_args = constructor_args.dup
@@ -371,20 +374,39 @@ module Runar
       # P2PKH funding inputs ARE signed. Only the primary contract input's Sig
       # params are left as 72-byte placeholders.
       #
+      # prepare_call does not change the tracked state or UTXO, on success or
+      # on error: the post-call state rides in +PreparedCall#state_after+ and
+      # finalize_call commits it only after a successful broadcast. An
+      # abandoned PreparedCall needs no cleanup.
+      #
       # @param method_name [String]
       # @param args        [Array, nil]
       # @param provider    [Provider, nil]
       # @param signer      [Signer, nil]
       # @param options     [CallOptions, nil]
       # @return [PreparedCall]
-      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
       def prepare_call(method_name, args = [], provider = nil, signer = nil, options = nil)
+        # D12 SDK-F1/F2: prepare_call never leaves the tracked state or UTXO
+        # changed -- on success OR on any error. The post-call state travels in
+        # the PreparedCall (+state_after+) and finalize_call commits it only
+        # after a successful broadcast, so an abandoned or superseded
+        # PreparedCall needs no cleanup.
+        state_snapshot = Marshal.load(Marshal.dump(@state))
+        utxo_snapshot  = @current_utxo
+        begin
+          prepare_call_impl(method_name, args, provider, signer, options)
+        ensure
+          @state        = state_snapshot
+          @current_utxo = utxo_snapshot
+        end
+      end
+
+      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+      def prepare_call_impl(method_name, args, provider, signer, options)
         provider = resolve_provider(provider, 'prepare_call')
         signer   = resolve_signer(signer, 'prepare_call')
         args     = Array(args)
-        # The state this call starts from. prepare_call advances @state to the
-        # post-call state before anything is broadcast; finalize_call restores
-        # this snapshot when the transaction never makes it onto the network.
+        # The state this call starts from (prepare_call restores it on exit).
         state_before = @state.dup
 
         method = find_method(method_name)
@@ -539,8 +561,19 @@ module Runar
           utxo_script_hex = contract_utxo.script
           code_sep_idx = get_code_sep_index(find_method_index(method_name))
           script_code_body = code_sep_idx >= 0 ? utxo_script_hex[(code_sep_idx + 1) * 2..] : utxo_script_hex
+          # D12 D2: the real outpoint / nLockTime / input-0 nSequence of the
+          # transaction this call builds, instead of the historical dummies
+          # (36 zero bytes / 0 / 0xfffffffe) that made a state field derived
+          # from them diverge from the script.
           Thread.current[:runar_mock_preimage_bytes] = {
-            'scriptCode' => compact_size_hex(script_code_body.length / 2) + script_code_body
+            'scriptCode' => compact_size_hex(script_code_body.length / 2) + script_code_body,
+            'outpoint' => [contract_utxo.txid].pack('H*').reverse.unpack1('H*') +
+              [contract_utxo.output_index.to_i].pack('V').unpack1('H*')
+          }
+          saved_mock_preimage = Thread.current[:runar_mock_preimage]
+          Thread.current[:runar_mock_preimage] = {
+            'locktime' => (opts.locktime || 0).to_i,
+            'sequence' => SDK.resolve_input_sequence(opts.locktime, opts.sequence)
           }
           begin
             computed_state, anf_data_outputs, _anf_raw_outputs, anf_ordered_outputs =
@@ -550,6 +583,7 @@ module Runar
               )
           ensure
             Thread.current[:runar_mock_preimage_bytes] = nil
+            Thread.current[:runar_mock_preimage] = saved_mock_preimage
           end
           if opts.new_state.nil?
             opts = opts.dup
@@ -900,17 +934,12 @@ module Runar
         owns_state = !@current_utxo.nil? && !spent.nil? &&
                      @current_utxo.txid == spent.txid && @current_utxo.output_index == spent.output_index
         result = finalize_call_once(prepared, signatures, provider)
-        # A retry of a PreparedCall whose first finalize failed must commit the
-        # post-call state the transaction carries.
+        # D12 SDK-F1/F2: prepare_call left @state untouched, so the post-call
+        # state is committed here, only after a successful broadcast. A failed
+        # finalize has nothing to roll back (and must not: restoring
+        # state_before would clobber another PreparedCall's commit).
         @state = prepared.state_after.dup if owns_state && prepared.state_after
         result
-      rescue Exception # rubocop:disable Lint/RescueException
-        # Nothing was broadcast (or the node refused it): the chain is still at
-        # the state this call started from, so the local state must be too.
-        # Before this, a refused call left the state advanced and the next call
-        # was built from a state the chain never reached.
-        @state = prepared.state_before.dup if owns_state && prepared.state_before
-        raise
       end
       # rubocop:enable Metrics/MethodLength
 
@@ -952,6 +981,7 @@ module Runar
       end
       # rubocop:enable Metrics/MethodLength
       private :finalize_call_once
+      private :prepare_call_impl
 
       # Reconnect to an existing deployed contract by looking up the transaction
       # on-chain.
@@ -2627,6 +2657,71 @@ module Runar
           rescue ArgumentError => e
             raise InvalidConstructorArgError, e.message
           end
+        end
+      end
+
+      # D12 PQ-F1: public-key length each post-quantum verifier splits its pk
+      # operand at (WOTS+: pubSeed(32) || pkRoot(32); SLH-DSA: seed(n) || root(n)).
+      PQ_PUBKEY_BYTES = {
+        'verifyWOTS' => 64,
+        'verifySLHDSA_SHA2_128s' => 32, 'verifySLHDSA_SHA2_128f' => 32,
+        'verifySLHDSA_SHA2_192s' => 48, 'verifySLHDSA_SHA2_192f' => 48,
+        'verifySLHDSA_SHA2_256s' => 64, 'verifySLHDSA_SHA2_256f' => 64
+      }.freeze
+
+      # Property name => [verifier, bytes] for every property loaded straight
+      # into a PQ verifier's pk operand (3rd arg) anywhere in the ANF.
+      def pq_pubkey_props(anf)
+        found = {}
+        walk = lambda do |bindings, defs|
+          Array(bindings).each do |b|
+            v = b['value'] || {}
+            defs[b['name']] = v
+            case v['kind']
+            when 'if'
+              walk.call(v['then'], defs)
+              walk.call(v['else'], defs)
+            when 'loop'
+              walk.call(v['body'], defs)
+            when 'call'
+              want = PQ_PUBKEY_BYTES[v['func']]
+              next unless want
+
+              src = defs[Array(v['args'])[2]]
+              found[src['name']] = [v['func'], want] if src.is_a?(Hash) && src['kind'] == 'load_prop'
+            end
+          end
+        end
+        Array(anf['methods']).each { |m| walk.call(m['body'], {}) }
+        found
+      end
+
+      # D12 PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA
+      # verifier's public key directly when it has the wrong length: the
+      # compiled verifier splits the key at fixed offsets, so the deployed
+      # output would refuse the owner's valid signature forever. Only artifacts
+      # that carry ANF (stateful) expose the data flow; a hash-committed key
+      # cannot be checked at all.
+      def check_pq_pubkey_ctor_args(artifact, args)
+        anf = artifact.anf
+        return unless anf.is_a?(Hash)
+
+        props = pq_pubkey_props(anf)
+        return if props.empty?
+
+        artifact.abi.constructor_params.zip(args).each do |param, arg|
+          next if param.nil? || !arg.is_a?(String)
+
+          func, want = props[param.name]
+          next if func.nil?
+
+          got = arg.length / 2
+          next if got == want
+
+          raise InvalidConstructorArgError,
+                "RunarContract: constructor arg '#{param.name}' of #{artifact.contract_name} is the " \
+                "#{func} public key and must be #{want} bytes, got #{got}: the compiled verifier " \
+                'would refuse every valid signature'
         end
       end
 

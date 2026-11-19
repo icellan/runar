@@ -68,6 +68,7 @@ public final class RunarContract {
             );
         }
         constructorArgs = checkByteStringCtorArgs(artifact, constructorArgs);
+        checkPqPubkeyCtorArgs(artifact, constructorArgs);
         this.constructorArgs = List.copyOf(constructorArgs);
         this.state = new HashMap<>();
         if (artifact.isStateful()) {
@@ -129,6 +130,75 @@ public final class RunarContract {
             out.set(i, norm);
         }
         return out;
+    }
+
+    /** D12 PQ-F1: pk bytes each post-quantum verifier splits its pk operand at. */
+    private static final Map<String, Integer> PQ_PUBKEY_BYTES = Map.of(
+        "verifyWOTS", 64,
+        "verifySLHDSA_SHA2_128s", 32, "verifySLHDSA_SHA2_128f", 32,
+        "verifySLHDSA_SHA2_192s", 48, "verifySLHDSA_SHA2_192f", 48,
+        "verifySLHDSA_SHA2_256s", 64, "verifySLHDSA_SHA2_256f", 64
+    );
+
+    /**
+     * D12 PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA
+     * verifier's public key directly (a property load as the verifier's 3rd
+     * arg) when it has the wrong length. The compiled verifier splits the key
+     * at fixed offsets, so the deployed output would refuse the owner's valid
+     * signature forever. Only artifacts that carry ANF (stateful) expose the
+     * data flow; a hash-committed key cannot be checked at all.
+     */
+    @SuppressWarnings("unchecked")
+    private static void checkPqPubkeyCtorArgs(RunarArtifact artifact, List<Object> args) {
+        Map<String, Object> anf = artifact.anf();
+        if (anf == null || !(anf.get("methods") instanceof List<?> methods)) return;
+        Map<String, String> propToFunc = new HashMap<>();
+        for (Object m : methods) {
+            if (m instanceof Map<?, ?> mm) {
+                collectPqPubkeyProps((List<Object>) mm.get("body"), new HashMap<>(), propToFunc);
+            }
+        }
+        if (propToFunc.isEmpty()) return;
+        List<RunarArtifact.ABIParam> params = artifact.abi().constructor().params();
+        for (int i = 0; i < params.size() && i < args.size(); i++) {
+            String func = propToFunc.get(params.get(i).name());
+            if (func == null || !(args.get(i) instanceof String hex)) continue;
+            int want = PQ_PUBKEY_BYTES.get(func);
+            int got = hex.length() / 2;
+            if (got != want) {
+                throw new InvalidConstructorArgException(
+                    "RunarContract: constructor arg '" + params.get(i).name() + "' of " + artifact.contractName()
+                        + " is the " + func + " public key and must be " + want + " bytes, got " + got
+                        + ": the compiled verifier would refuse every valid signature");
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void collectPqPubkeyProps(List<Object> bindings, Map<String, Map<String, Object>> defs,
+                                             Map<String, String> out) {
+        if (bindings == null) return;
+        for (Object o : bindings) {
+            if (!(o instanceof Map<?, ?> b)) continue;
+            Object vo = b.get("value");
+            if (!(vo instanceof Map<?, ?>)) continue;
+            Map<String, Object> v = (Map<String, Object>) vo;
+            defs.put(String.valueOf(b.get("name")), v);
+            Object kind = v.get("kind");
+            if ("if".equals(kind)) {
+                collectPqPubkeyProps((List<Object>) v.get("then"), defs, out);
+                collectPqPubkeyProps((List<Object>) v.get("else"), defs, out);
+            } else if ("loop".equals(kind)) {
+                collectPqPubkeyProps((List<Object>) v.get("body"), defs, out);
+            } else if ("call".equals(kind) && PQ_PUBKEY_BYTES.containsKey(String.valueOf(v.get("func")))) {
+                if (v.get("args") instanceof List<?> a && a.size() > 2) {
+                    Map<String, Object> src = defs.get(String.valueOf(a.get(2)));
+                    if (src != null && "load_prop".equals(src.get("kind"))) {
+                        out.put(String.valueOf(src.get("name")), String.valueOf(v.get("func")));
+                    }
+                }
+            }
+        }
     }
 
     private static void checkCtorArgWidth(Object norm, String leafType, String what) {
@@ -864,8 +934,23 @@ public final class RunarContract {
                         ? subscriptAfterCodeSep(spentScriptHex, codeSepIdxForScriptCode)
                         : spentScriptHex;
                     String scriptCodeHex = ScriptUtils.encodeVarInt(scriptCodeBody.length() / 2) + scriptCodeBody;
+                    // D12 D2: the real nLockTime / input-0 nSequence / spent
+                    // outpoint of the transaction this call builds, instead of
+                    // the historical dummies (0 / 0xfffffffe / 36 zero bytes)
+                    // that made a state field derived from them diverge from
+                    // the script.
+                    Integer optLt = options != null ? options.locktime : null;
+                    Integer optSeq = options != null ? options.sequence : null;
+                    byte[] outpoint = new byte[36];
+                    byte[] txidBytes = ScriptUtils.hexToBytes(currentUtxo.txid());
+                    for (int i = 0; i < 32 && i < txidBytes.length; i++) outpoint[i] = txidBytes[txidBytes.length - 1 - i];
+                    int vout = currentUtxo.outputIndex();
+                    for (int i = 0; i < 4; i++) outpoint[32 + i] = (byte) (vout >>> (8 * i));
                     AnfInterpreter.WitnessContext scriptCodeWitness = new AnfInterpreter.WitnessContext()
-                        .setMockPreimageBytes("scriptCode", ScriptUtils.hexToBytes(scriptCodeHex));
+                        .setMockPreimageBytes("scriptCode", ScriptUtils.hexToBytes(scriptCodeHex))
+                        .setMockPreimageBytes("outpoint", outpoint)
+                        .setMockPreimage("locktime", java.math.BigInteger.valueOf(optLt != null ? optLt : 0))
+                        .setMockPreimage("sequence", java.math.BigInteger.valueOf(resolveInputSequence(optLt, optSeq)));
                     AnfInterpreter.ExecutionResult execResult = AnfInterpreter.computeNewStateAndDataOutputs(
                         artifact.anf(), methodName, flatState, interpArgs, constructorArgs, scriptCodeWitness
                     );
@@ -2675,6 +2760,12 @@ public final class RunarContract {
         }
         List<byte[]> sighashes = new ArrayList<>(plan.sigIndices().size());
         for (int i = 0; i < plan.sigIndices().size(); i++) sighashes.add(lay.userSighash());
+        // D12 SDK-F1/F2: prepareCall never leaves the tracked state changed.
+        // The post-call state travels in the PreparedCall (`continuation`) and
+        // finalizeCall commits it only after a successful broadcast, so an
+        // abandoned or superseded PreparedCall needs no cleanup.
+        Map<String, Object> postState = plan.isStateful() ? new java.util.LinkedHashMap<>(state) : null;
+        restoreState(stateBefore);
         return new PreparedCall(
             lay.tx().toHex(),
             sighashes,
@@ -2683,7 +2774,7 @@ public final class RunarContract {
             lay.resolved(),
             currentUtxo,
             plan.isStateful(),
-            plan.isStateful() ? new java.util.LinkedHashMap<>(state) : null,
+            postState,
             lay.newLockingScript(),
             lay.newSats(),
             lay.intentWitnessHex(),
@@ -2956,18 +3047,11 @@ public final class RunarContract {
         UTXO spent = prepared == null ? null : prepared.contractUtxo;
         boolean ownsState = spent != null && currentUtxo != null
             && currentUtxo.txid().equals(spent.txid()) && currentUtxo.outputIndex() == spent.outputIndex();
-        CallOutcome outcome;
-        try {
-            outcome = finalizeCallOnce(prepared, signatures, provider);
-        } catch (RuntimeException e) {
-            // Nothing was broadcast (or the node refused it): the chain is
-            // still at the state this call started from, so the local state
-            // must be too.
-            if (ownsState && prepared.stateBefore != null) restoreState(prepared.stateBefore);
-            throw e;
-        }
-        // A retry of a PreparedCall whose first finalize failed must commit
-        // the post-call state the transaction carries.
+        // D12 SDK-F1/F2: prepareCall left the tracked state untouched, so a
+        // failed finalize has nothing to roll back (and must not: restoring
+        // stateBefore would clobber another PreparedCall's commit).
+        CallOutcome outcome = finalizeCallOnce(prepared, signatures, provider);
+        // Commit the post-call state the transaction carries.
         if (ownsState && prepared.stateBefore != null && prepared.continuation != null) {
             restoreState(prepared.continuation);
         }

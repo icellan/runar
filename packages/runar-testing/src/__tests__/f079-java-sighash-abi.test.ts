@@ -132,6 +132,7 @@ async function callBump(artifact: RunarArtifact) {
   try {
     await contract.call('bump', [BigInt(CONTRACT_SATS)], provider, caller, {
       outputs: [{ satoshis: CONTRACT_SATS, state: { n: 6n } }],
+      allowFeeBelowRate: true,
     });
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);

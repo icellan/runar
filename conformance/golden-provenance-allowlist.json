@@ -3839,6 +3839,27 @@
       "verified-against": "differential-oracle",
       "reason": "#197 (add-output-env): addOutput(sats, ...values) serialises its values into its own output and does NOT write the property that a later load_prop reads; only update_prop does. Every SDK ANF interpreter (TS, Go, Rust, Python, Ruby, Zig, Java) wrote the property env on add_output, so a second addOutput(.., this.count + 100n) read the first output's value and the continuation it built was rejected by the covenant. New file; no existing golden moved. This case (bump-between) pins last-write state count=105n. Independent evidence: conformance/anf-interpreter/add-output-env.test.ts compiles programs/AddOutputEnv.runar.ts, deploys it and calls the method through the validating MockProvider, which replays the broadcast on the real @bsv/sdk Spend (OP_PUSH_TX + the covenant's own hashOutputs reconstruction, so an output that differs by one byte is refused), then decodes the continuation states off the broadcast outputs (byte layout, not by re-running the transition): fanOut commits count+1 and count+100, bumpBetween commits count+1 and (count+5)+100; the golden state equals the LAST on-chain continuation. All seven interpreters reproduce the golden byte-for-byte in cross-interpreter-strict.test.ts; before the fix the six non-TS tiers returned 101 / 106 (RED).",
       "reviewer": "fix-session: PR D/E (#198/#197)"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/bin2num-sign-byte-ff00.json",
+      "sha256": "155321cdd99c3d407657e5523926551b1a39a3e5552b105c38807d620a0af7ef",
+      "verified-against": "differential-oracle",
+      "reason": "D12 BM-F1 (bin2num-sign-byte): bin2num of 0xff00 into a state field must yield 255, as OP_BIN2NUM reads the sign from the LAST byte (here a 0x00 padding byte). The Zig SDK interpreter stripped the padding before reading the sign and derived the wrong value, so its continuation was refused. New file; no existing golden moved. Independent evidence: cross-interpreter.test.ts's script oracle deploys the source and spends it on the real @bsv/sdk Spend, checking the pinned state against the continuation the covenant accepts; all seven ANF drivers reproduce this golden in cross-interpreter-strict.test.ts (RUNAR_ANF_DRIVERS_STRICT=1, 557/557).",
+      "reviewer": "fix-session: D12 SDK batch"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/bin2num-sign-byte-ffff00.json",
+      "sha256": "0a7cbf6ae86bb7332dfce0abcb685004a22877aae52419727e027179c9dbb2a2",
+      "verified-against": "differential-oracle",
+      "reason": "D12 BM-F1 (bin2num-sign-byte): bin2num of 0xffff00 into a state field must yield 65535, as OP_BIN2NUM reads the sign from the LAST byte (here a 0x00 padding byte). The Zig SDK interpreter stripped the padding before reading the sign and derived the wrong value, so its continuation was refused. New file; no existing golden moved. Independent evidence: cross-interpreter.test.ts's script oracle deploys the source and spends it on the real @bsv/sdk Spend, checking the pinned state against the continuation the covenant accepts; all seven ANF drivers reproduce this golden in cross-interpreter-strict.test.ts (RUNAR_ANF_DRIVERS_STRICT=1, 557/557).",
+      "reviewer": "fix-session: D12 SDK batch"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/bin2num-sign-byte-8000.json",
+      "sha256": "86fe379021c3c169d1d298fe66bc2c897a610383af01de0a7a6d16ce566e3104",
+      "verified-against": "differential-oracle",
+      "reason": "D12 BM-F1 (bin2num-sign-byte): bin2num of 0x8000 into a state field must yield 128, as OP_BIN2NUM reads the sign from the LAST byte (here a 0x00 padding byte). The Zig SDK interpreter stripped the padding before reading the sign and derived the wrong value, so its continuation was refused. New file; no existing golden moved. Independent evidence: cross-interpreter.test.ts's script oracle deploys the source and spends it on the real @bsv/sdk Spend, checking the pinned state against the continuation the covenant accepts; all seven ANF drivers reproduce this golden in cross-interpreter-strict.test.ts (RUNAR_ANF_DRIVERS_STRICT=1, 557/557).",
+      "reviewer": "fix-session: D12 SDK batch"
     }
   ]
 }

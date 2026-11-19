@@ -149,3 +149,7 @@ export type { InputLimitsKey } from './input-limits.js';
 
 // Hard error for unknown ANF kinds (item 3 / F-003)
 export { UnknownANFKindError } from './unknown-anf-kind-error.js';
+
+// D12 PQ-F1: post-quantum verifier public-key lengths (compile + deploy gate)
+export { PQ_PUBKEY_BYTES, pqPubKeyRequirements, pqPubKeyLengthError } from './pq-pubkey.js';
+export type { PqPubKeyRequirement } from './pq-pubkey.js';

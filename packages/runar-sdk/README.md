@@ -306,6 +306,10 @@ const { txid } = await contract.finalizeCall(prepared, signatures);
 
 `prepareCall` already signs P2PKH funding inputs and any additional contract inputs (when `additionalContractInputs` is set). It only leaves the primary contract input's `Sig` parameters as 72-byte placeholders for the external signer.
 
+**State tracking.** `prepareCall` never changes `contract.state` or the tracked UTXO, whether it returns or throws. The post-call state travels inside the `PreparedCall`, and `finalizeCall` commits it (together with the new UTXO) only after the broadcast succeeds. A failed `finalizeCall` leaves the contract exactly as it was. So an abandoned `PreparedCall` (the co-signer declined) needs no cleanup, and when several `PreparedCall`s are outstanding only the one that is broadcast moves the object. The same rule holds in every SDK tier.
+
+`finalizeCall` refuses locally, before broadcasting, when the inputs do not cover the outputs plus the fee at the provider's fee rate ("insufficient funds"), so an underfunded call never reaches the node.
+
 `prepared.sighash` is `hash256(prepared.preimage)` — `sha256(sha256(preimage))`, the BIP-143 digest `OP_CHECKSIG` verifies against. External signers ECDSA-sign it **directly**, with no further hashing: that is exactly what `WalletSigner.signHash` does (it forwards the value as BRC-100 `hashToDirectlySign`). Do not hash it again — a signature over `sha256(prepared.sighash)` is a signature over the wrong message, and the node rejects the spend. If your signer wants to recompute and verify the digest itself, hand it `prepared.preimage` instead.
 
 For complete examples, see `packages/runar-sdk/src/__tests__/external-signer.test.ts`.

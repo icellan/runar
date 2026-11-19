@@ -1211,7 +1211,7 @@ public final class AnfInterpreter {
     // Binary ops
     // ------------------------------------------------------------------
 
-    private static Object evalBinOp(String op, Object left, Object right, String resultType) {
+    static Object evalBinOp(String op, Object left, Object right, String resultType) {
         if ("bytes".equals(resultType) || (isHexString(left) && isHexString(right))) {
             return evalBytesBinOp(op, asString(left), asString(right));
         }
@@ -1252,7 +1252,27 @@ public final class AnfInterpreter {
             case "+":  return left + right;
             case "==": case "===": return left.equals(right);
             case "!=": case "!==": return !left.equals(right);
-            default:   return "";
+            // D12 BM-F4: OP_AND / OP_OR / OP_XOR on ByteStrings -- bytewise, and
+            // the script aborts when the operands differ in length. This used
+            // to return "" (an invented value the covenant refuses).
+            case "&": case "|": case "^": {
+                byte[] a = HEX.parseHex(left);
+                byte[] b = HEX.parseHex(right);
+                if (a.length != b.length) {
+                    String name = op.equals("&") ? "OP_AND" : op.equals("|") ? "OP_OR" : "OP_XOR";
+                    throw new InterpreterException(name + ": operands of " + a.length + " and " + b.length
+                        + " bytes -- the script aborts on a length mismatch");
+                }
+                byte[] r = new byte[a.length];
+                for (int i = 0; i < a.length; i++) {
+                    int x = a[i] & 0xff, y = b[i] & 0xff;
+                    r[i] = (byte) (op.equals("&") ? (x & y) : op.equals("|") ? (x | y) : (x ^ y));
+                }
+                return HEX.formatHex(r);
+            }
+            default:
+                throw new InterpreterException(
+                    "ANF interpreter does not model the binary operator '" + op + "' on ByteString operands");
         }
     }
 
@@ -1521,7 +1541,9 @@ public final class AnfInterpreter {
             case "assert":     return null;
 
             // Byte ops
-            case "num2bin": {
+            // D12 BM-F4: int2str compiles to OP_NUM2BIN, exactly like num2bin.
+            case "num2bin":
+            case "int2str": {
                 BigInteger n = toBigInt(args.get(0));
                 int len = toBigInt(args.get(1)).intValueExact();
                 return num2binHex(n, len);
@@ -1552,6 +1574,12 @@ public final class AnfInterpreter {
             }
             case "reverseBytes": {
                 String h = asString(args.get(0));
+                // D12: the compiled script reverses only the first 520 bytes,
+                // so a longer input has no off-chain answer that matches it.
+                if (h.length() / 2 > 520) {
+                    throw new InterpreterException("reverseBytes: input of " + h.length() / 2
+                        + " bytes exceeds the 520-byte limit the compiled script reverses");
+                }
                 StringBuilder sb = new StringBuilder(h.length());
                 for (int i = h.length() - 2; i >= 0; i -= 2) {
                     sb.append(h, i, i + 2);
@@ -1734,6 +1762,21 @@ public final class AnfInterpreter {
                         + "test contracts that use this primitive via the compiler+VM path."
                 );
 
+            // Compiler-synthesized scaffolding (not runar-lang builtins): the
+            // SDK rebuilds these outputs itself, so null is the correct
+            // off-chain answer (same carve-out as the TS interpreter's A-3 list).
+            case "computeStateOutput":
+            case "buildChangeOutput":
+            case "buildDataOutput":
+            case "buildRawOutput":
+            case "super":
+                return null;
+
+            // An unmodelled builtin (e.g. the Go-scoped BabyBear family, used
+            // only inside asserts) yields null, as in the Go and Rust
+            // interpreters. A null that reaches a state field produces a
+            // continuation the covenant refuses, so the call fails closed at
+            // broadcast.
             default:
                 return null;
         }
@@ -1810,6 +1853,18 @@ public final class AnfInterpreter {
      * up as 135). Java honours the spec because the on-chain VM does too.
      */
     static String num2binHex(BigInteger n, int byteLen) {
+        // D12 BM-F5: a negative size, or a field too narrow for the value,
+        // makes OP_NUM2BIN abort. This used to truncate / return "".
+        if (byteLen < 0) {
+            throw new InterpreterException("num2bin: negative size " + byteLen + " -- OP_NUM2BIN aborts");
+        }
+        if (n.signum() != 0) {
+            int minimal = n.abs().bitLength() / 8 + 1; // magnitude bytes + room for the sign bit
+            if (minimal > byteLen) {
+                throw new InterpreterException("num2bin: " + n + " needs " + minimal
+                    + " bytes, more than the requested " + byteLen + " -- OP_NUM2BIN aborts");
+            }
+        }
         if (n.signum() == 0) return repeatHex("00", byteLen);
         boolean negative = n.signum() < 0;
         BigInteger abs = n.abs();
