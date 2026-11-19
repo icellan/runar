@@ -1007,7 +1007,7 @@ public final class RunarContract {
             // Explicit state always applies, including when there is no ANF to
             // interpret or the interpreter could not run the body.
             if (stateUpdates != null) {
-                state.putAll(stateUpdates);
+                state.putAll(withOutpointBinding(stateUpdates));
             }
         }
 
@@ -1459,7 +1459,7 @@ public final class RunarContract {
             for (CallOptions.OutputSpec spec : outputSpecs) {
                 orderedContractOutputs.add(new TransactionBuilder.ContractOutput(
                     spec.satoshis().longValueExact(),
-                    specCodePart + "6a" + StateSerializer.serialize(artifact.stateFields(), spec.state())));
+                    specCodePart + "6a" + StateSerializer.serialize(artifact.stateFields(), withOutpointBinding(spec.state()))));
             }
             newSats = currentUtxo.satoshis();
             newLockingScript = orderedContractOutputs.get(0).scriptHex();
@@ -2579,6 +2579,39 @@ public final class RunarContract {
     }
 
     public record CallOutcome(String txid, String rawTxHex, UTXO nextContractUtxo) {}
+
+    /** D25 hidden state field (mirrors the compiler's TWIN_BINDING_FIELD). */
+    private static final String TWIN_BINDING_FIELD = "_spentOutpointHash";
+
+    /**
+     * D25: a bind-class contract's every continuation carries the hidden
+     * {@code _spentOutpointHash} = sha256(outpoint this input spends), which the
+     * covenant writes itself. A caller-supplied state ({@code CallOptions.newState}
+     * / {@code outputs}) cannot be expected to know it: left out, serialize has
+     * no value; copied from {@link #state()}, it is the PREVIOUS outpoint's hash
+     * and the covenant rejects the spend. No other value can ever validate, so
+     * it is always overwritten with the hash of {@link #currentUtxo} (the UTXO
+     * this call spends).
+     */
+    private Map<String, Object> withOutpointBinding(Map<String, Object> st) {
+        if (currentUtxo == null || artifact.stateFields().stream().noneMatch(f -> TWIN_BINDING_FIELD.equals(f.name()))) {
+            return st;
+        }
+        byte[] txid = ScriptUtils.hexToBytes(currentUtxo.txid());
+        byte[] wire = new byte[36];
+        for (int i = 0; i < 32 && i < txid.length; i++) wire[i] = txid[txid.length - 1 - i];
+        int vout = currentUtxo.outputIndex();
+        for (int i = 0; i < 4; i++) wire[32 + i] = (byte) (vout >>> (8 * i));
+        String binding;
+        try {
+            binding = ScriptUtils.bytesToHex(java.security.MessageDigest.getInstance("SHA-256").digest(wire));
+        } catch (java.security.NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>(st == null ? Map.of() : st);
+        out.put(TWIN_BINDING_FIELD, binding);
+        return out;
+    }
 
     // ------------------------------------------------------------------
     // Multi-signer API (prepareCall / finalizeCall)

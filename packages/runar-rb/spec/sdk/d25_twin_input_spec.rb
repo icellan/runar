@@ -250,5 +250,52 @@ RSpec.describe 'D25: twin-input continuation binding (SDK)' do
         expect(contract.get_state['count']).to eq(Integer(want))
       end
     end
+
+    # CallOptions#new_state / #outputs never name the hidden field. The SDK
+    # must write sha256(the outpoint this call spends) itself: left out,
+    # serialize_state has no value; copied from get_state, it is the previous
+    # outpoint's hash and the covenant rejects the spend. No Script VM in this
+    # tier: the continuation is compared with a locking script this spec
+    # builds itself (code part || OP_RETURN || count as 8-byte LE || binding).
+    it 'writes sha256(the real spent outpoint) into caller-supplied state (outputs, stale and partial new_state)' do
+      contract, provider, = deployed(artifact, [1])
+      deploy_state = "#{[1].pack('q<').unpack1('H*')}#{'00' * 32}"
+      expect(contract.get_utxo.script).to end_with("6a#{deploy_state}")
+      code_part = contract.get_utxo.script[0...-(2 + deploy_state.length)]
+      expected_script = lambda do |count, spent|
+        binding = Digest::SHA256.hexdigest([outpoint_hex(spent)].pack('H*'))
+        "#{code_part}6a#{[count].pack('q<').unpack1('H*')}#{binding}"
+      end
+      broadcast_continuation = lambda do |method, opts|
+        spent = contract.get_utxo
+        before = provider.get_broadcasted_txs.length
+        contract.call(method, [], provider, nil, opts)
+        expect(provider.get_broadcasted_txs.length).to eq(before + 1)
+        expect(provider.last_validated_input_count).to be >= 1
+        tx = parse_tx(provider.get_broadcasted_txs.last)
+        expect(tx[:inputs][0][:outpoint]).to eq(outpoint_hex(spent))
+        [spent, tx]
+      end
+
+      # 1. outputs: state without the hidden field.
+      spent, tx = broadcast_continuation.call(
+        'bump', Runar::SDK::CallOptions.new(outputs: [Runar::SDK::OutputSpec.new(satoshis: 10_000, state: { 'count' => 2 })])
+      )
+      expect(tx[:outputs][0][:script]).to eq(expected_script.call(2, spent))
+      expect(contract.get_utxo.script).to eq(expected_script.call(2, spent))
+
+      # 2. new_state copied from get_state (the stale deploy-time hash).
+      stale = contract.get_state.dup.merge('count' => 3)
+      expect(stale[field]).to eq('00' * 32)
+      spent, tx = broadcast_continuation.call('increment', Runar::SDK::CallOptions.new(new_state: stale))
+      expect(tx[:outputs][0][:script]).to eq(expected_script.call(3, spent))
+      expect(contract.get_state[field]).to eq(Digest::SHA256.hexdigest([outpoint_hex(spent)].pack('H*')))
+      expect(contract.get_locking_script).to eq(expected_script.call(3, spent))
+
+      # 3. new_state without the field (the tracked one is now the previous call's).
+      spent, tx = broadcast_continuation.call('increment', Runar::SDK::CallOptions.new(new_state: { 'count' => 4 }))
+      expect(tx[:outputs][0][:script]).to eq(expected_script.call(4, spent))
+      expect(contract.get_state[field]).to eq(Digest::SHA256.hexdigest([outpoint_hex(spent)].pack('H*')))
+    end
   end
 end

@@ -259,3 +259,58 @@ def test_control_explicit_contract_twin_verifies_on_both_inputs():
     p = _twin(art, "bump")
     _assert_every_input_validated(p)
     assert p.last_validation_report["total"] == 3
+
+
+# ---------------------------------------------------------------------------
+# class 2 -- caller-supplied continuation state
+# ---------------------------------------------------------------------------
+# CallOptions.new_state / outputs never name the hidden binding field. The SDK
+# must write sha256(the outpoint this call spends) itself -- left out,
+# serialize_state has no value; copied from get_state(), it is the PREVIOUS
+# outpoint's hash and the covenant rejects the spend. Every call below runs
+# through the validating MockProvider.
+
+def _deployed_mixed():
+    art = _mixed()
+    signer = LocalSigner(KEY)
+    p = _provider(signer)
+    c = RunarContract(art, [0])
+    c.deploy(p, signer, DeployOptions(satoshis=5_000))
+    return c, p, signer
+
+
+def test_mixed_pot_outputs_option_without_the_binding_field_validates():
+    from runar.sdk.types import OutputSpec
+    c, p, signer = _deployed_mixed()
+    spent = c.get_utxo()
+    c.call("bump", [], p, signer, CallOptions(outputs=[OutputSpec(satoshis=spent.satoshis, state={"count": 1})]))
+    _assert_every_input_validated(p)
+
+
+def test_mixed_pot_outputs_option_with_a_stale_binding_field_validates():
+    c, p, signer = _deployed_mixed()
+    c.call("increment", [], p, signer)
+    spent = c.get_utxo()
+    stale = {**c.get_state(), "count": 2}
+    c.call("bump", [], p, signer, CallOptions(outputs=[{"satoshis": spent.satoshis, "state": stale}]))
+    _assert_every_input_validated(p)
+
+
+def test_mixed_pot_new_state_without_the_binding_field_validates():
+    c, p, signer = _deployed_mixed()
+    spent = c.get_utxo()
+    c.call("increment", [], p, signer, CallOptions(new_state={"count": 1}))
+    _assert_every_input_validated(p)
+    assert c.get_state()[BINDING_FIELD] == _outpoint_hash(spent.txid, spent.output_index)
+
+
+def test_mixed_pot_new_state_copied_from_get_state_replaces_the_stale_hash():
+    c, p, signer = _deployed_mixed()
+    c.call("increment", [], p, signer)
+    spent = c.get_utxo()
+    stale = c.get_state()[BINDING_FIELD]
+    c.call("increment", [], p, signer, CallOptions(new_state={**c.get_state(), "count": 2}))
+    _assert_every_input_validated(p)
+    assert c.get_state()["count"] == 2
+    assert c.get_state()[BINDING_FIELD] == _outpoint_hash(spent.txid, spent.output_index)
+    assert c.get_state()[BINDING_FIELD] != stale

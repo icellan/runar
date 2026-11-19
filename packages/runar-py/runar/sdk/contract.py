@@ -262,6 +262,10 @@ def _compute_bip143_sighash(preimage_hex: str) -> str:
     return hashlib.sha256(hashlib.sha256(preimage_bytes).digest()).hexdigest()
 
 
+# D25 hidden state field (mirrors the compiler's TWIN_BINDING_FIELD).
+_TWIN_BINDING_FIELD = '_spentOutpointHash'
+
+
 class RunarContract:
     """Runtime wrapper for a compiled Runar contract.
 
@@ -1072,6 +1076,27 @@ class RunarContract:
             if data_outs and not resolved_data_outputs:
                 resolved_data_outputs = data_outs
 
+        # D25: a bind-class contract's every continuation carries the hidden
+        # `_spentOutpointHash` = sha256(outpoint this input spends), which the
+        # covenant writes itself. A caller-supplied state (CallOptions.outputs /
+        # new_state) cannot be expected to know it -- left out, serialize_state
+        # refuses; copied from get_state(), it is the PREVIOUS outpoint's hash
+        # and the covenant rejects the spend. No other value can ever validate,
+        # so it is ALWAYS overwritten here, whatever the caller passed.
+        outpoint_binding = None
+        if is_stateful and self.artifact.state_fields and max(
+            self.artifact.state_fields, key=lambda f: f.index,
+        ).name == _TWIN_BINDING_FIELD:
+            outpoint_binding = hashlib.sha256(
+                bytes.fromhex(contract_utxo.txid)[::-1]
+                + int(contract_utxo.output_index).to_bytes(4, 'little')
+            ).hexdigest()
+
+        def _with_outpoint_binding(state: dict) -> dict:
+            if outpoint_binding is None:
+                return state
+            return {**state, _TWIN_BINDING_FIELD: outpoint_binding}
+
         if is_stateful and has_multi_output:
             # Multi-output: build a locking script for each output
             # N-075: _get_code_part_hex() carries the inscription envelope, as the
@@ -1087,7 +1112,7 @@ class RunarContract:
                     sats = out_spec.satoshis
                 else:
                     raise ValueError(f"Invalid output spec: {out_spec}")
-                state_hex = serialize_state(self.artifact.state_fields, state_dict)
+                state_hex = serialize_state(self.artifact.state_fields, _with_outpoint_binding(state_dict))
                 contract_outputs.append({
                     'script': code_script + '6a' + state_hex,
                     'satoshis': sats,
@@ -1124,7 +1149,7 @@ class RunarContract:
             else:
                 new_satoshis = self._current_utxo.satoshis
             if opts.new_state:
-                for k, v in opts.new_state.items():
+                for k, v in _with_outpoint_binding(opts.new_state).items():
                     self._state[k] = v
             elif method_has_continuation and anf_computed_state is not None:
                 self._state = {**self._state, **anf_computed_state}

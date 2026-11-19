@@ -263,6 +263,57 @@ class D25TwinInputTest {
     }
 
     /**
+     * CallOptions.newState / outputs never name the hidden field. The SDK must
+     * write sha256(the outpoint this call spends) itself: left out, serialize
+     * has no value; copied from state(), it is the previous outpoint's hash and
+     * the covenant rejects the spend. The expected continuation is built here
+     * by hand (code part || OP_RETURN || count as 8-byte LE || binding), not by
+     * StateSerializer, and every broadcast passes the validating MockProvider.
+     */
+    @Test
+    void mixedPotCallerSuppliedStateGetsTheSpentOutpointHash() throws Exception {
+        RunarArtifact art = SimulatedSpend.compile(MIXED_SRC, "MixedPot.runar.ts");
+        Env e = env();
+        RunarContract c = deploy(art, List.of(BigInteger.ONE), e);
+        String codePart = ContractScript.extractCodePart(c.currentUtxo().scriptHex());
+        assertEquals(codePart + "6a" + "0100000000000000" + "00".repeat(32), c.currentUtxo().scriptHex());
+
+        // 1. outputs: state without the hidden field.
+        UTXO s1 = c.currentUtxo();
+        c.callWithOptions("bump", List.of(), new CallOptions(null, null, null).withOutputs(List.of(
+            new CallOptions.OutputSpec(BigInteger.valueOf(CONTRACT_SATS), state("count", BigInteger.TWO)))),
+            e.provider(), e.signer());
+        assertTrue(e.provider().lastValidationReport().valueConserved());
+        assertEquals(codePart + "6a" + le8(2) + bindingOf(s1), lastTx(e).outputs.get(0).scriptPubKeyHex);
+        assertEquals(codePart + "6a" + le8(2) + bindingOf(s1), c.currentUtxo().scriptHex());
+
+        // 2. newState copied from state(): its hash is not this spend's.
+        UTXO s2 = c.currentUtxo();
+        Map<String, Object> stale = new LinkedHashMap<>(c.state());
+        stale.put("count", BigInteger.valueOf(3));
+        assertFalse(bindingOf(s2).equals(stale.get(FIELD)), "the copied hash is stale");
+        c.callWithOptions("increment", List.of(), new CallOptions(stale, null, null), e.provider(), e.signer());
+        assertTrue(e.provider().lastValidationReport().valueConserved());
+        assertEquals(codePart + "6a" + le8(3) + bindingOf(s2), lastTx(e).outputs.get(0).scriptPubKeyHex);
+        assertEquals(bindingOf(s2), c.state().get(FIELD));
+
+        // 3. newState without the field (the tracked one is the previous call's).
+        UTXO s3 = c.currentUtxo();
+        c.callWithOptions("increment", List.of(), new CallOptions(state("count", BigInteger.valueOf(4)), null, null),
+            e.provider(), e.signer());
+        assertEquals(codePart + "6a" + le8(4) + bindingOf(s3), lastTx(e).outputs.get(0).scriptPubKeyHex);
+        assertEquals(bindingOf(s3), c.state().get(FIELD));
+        assertTrue(covenantAccepts(art, "increment", lastTx(e), 0, s3,
+            state("count", BigInteger.valueOf(4), FIELD, bindingOf(s3))));
+    }
+
+    private static String le8(long n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 8; i++) sb.append(String.format("%02x", (n >>> (8 * i)) & 0xff));
+        return sb.toString();
+    }
+
+    /**
      * The SDK's own merge path spends two MixedPot UTXOs at the same state into
      * one continuation. Input 0's covenant accepts; input 1's rebuilds a
      * continuation carrying ITS outpoint, which is not in the tx: refused. The

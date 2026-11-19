@@ -618,6 +618,27 @@ module Runar
         new_locking_script = ''
         new_satoshis = 0
 
+        # D25: a bind-class contract's every continuation carries the hidden
+        # _spentOutpointHash = sha256(outpoint this input spends), written by
+        # the covenant itself. A caller-supplied state (outputs / new_state)
+        # cannot be expected to know it -- left out, serialize_state has no
+        # value; copied from get_state, it is the PREVIOUS outpoint's hash and
+        # the covenant rejects the spend. No other value can ever validate, so
+        # it is always overwritten.
+        outpoint_binding =
+          if is_stateful && @artifact.state_fields.any? { |f| f.name == TWIN_BINDING_FIELD }
+            Digest::SHA256.hexdigest(
+              [contract_utxo.txid].pack('H*').reverse + [contract_utxo.output_index.to_i].pack('V')
+            )
+          end
+        with_outpoint_binding = lambda do |st|
+          outpoint_binding ? (st || {}).merge(TWIN_BINDING_FIELD => outpoint_binding) : st
+        end
+        if opts.new_state
+          opts = opts.dup
+          opts.new_state = with_outpoint_binding.call(opts.new_state)
+        end
+
         if has_multi_output
           # N-075: get_code_part_hex carries the inscription envelope, as the
           # single-output path's get_locking_script does.
@@ -625,7 +646,7 @@ module Runar
           contract_outputs = Array(opts.outputs).map do |out_spec|
             state_dict = out_spec.is_a?(OutputSpec) ? out_spec.state : (out_spec['state'] || out_spec[:state])
             sats = out_spec.is_a?(OutputSpec) ? out_spec.satoshis : (out_spec['satoshis'] || out_spec[:satoshis] || 1)
-            state_hex = State.serialize_state(@artifact.state_fields, state_dict)
+            state_hex = State.serialize_state(@artifact.state_fields, with_outpoint_binding.call(state_dict))
             { script: "#{code_script}6a#{state_hex}", satoshis: sats }
           end
         else
@@ -1790,6 +1811,8 @@ module Runar
       # list has converged. It is the ONLY ByteString slot for which a nil call
       # arg is a request rather than a mistake.
       AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts'
+      # D25 hidden state field (mirrors the compiler's TWIN_BINDING_FIELD).
+      TWIN_BINDING_FIELD = '_spentOutpointHash'
 
       # Is a nil arg for +param+ the SDK's auto-compute sentinel? Mirrors the Zig
       # SDK's name gate (sdk_contract.zig): nil for any other ByteString param is

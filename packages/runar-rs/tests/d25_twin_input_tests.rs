@@ -374,3 +374,78 @@ fn class2_twin_via_additional_contract_inputs_cannot_satisfy_the_second_input() 
         "no output carries input 1's continuation, so its hashOutputs check cannot pass"
     );
 }
+
+// ---- class 2: caller-supplied continuation state ---------------------------
+//
+// CallOptions.new_state / outputs never name the hidden `_spentOutpointHash`.
+// The SDK must write sha256(the outpoint this call spends) itself — left out,
+// serialize_state has no value; copied from state(), it is the PREVIOUS
+// outpoint's hash and the covenant rejects the spend. The covenant input
+// cannot run on this tier's Spend (OP_2MUL), so the continuation bytes are
+// checked against the independently rebuilt locking script instead.
+
+fn call_with(c: &mut RunarContract, p: &mut MockProvider, s: &LocalSigner, m: &str, o: &CallOptions) -> (Utxo, Tx) {
+    let spent = c.get_utxo().unwrap().clone();
+    c.call(m, &[], p, s, Some(o)).unwrap_or_else(|e| panic!("call {m}: {e}"));
+    let tx = parse_tx(p.get_broadcasted_txs().last().unwrap());
+    let mut op = unhex(&spent.txid);
+    op.reverse();
+    op.extend_from_slice(&spent.output_index.to_le_bytes());
+    assert_eq!(tx.inputs[0].0, op, "{m}: input 0 spends the contract UTXO");
+    (spent, tx)
+}
+
+fn bound(art: &RunarArtifact, count: i64, spent: &Utxo) -> String {
+    next_script(art, &[("count", SdkValue::Int(count)), (FIELD, SdkValue::Bytes(outpoint_hash(spent)))])
+}
+
+#[test]
+fn class2_outputs_option_without_the_hidden_field_gets_the_spent_outpoint_hash() {
+    let art = artifact(MIXED_SRC, "MixedPot.runar.ts");
+    let (mut c, mut p, s) = setup(art.clone());
+    let sats = c.get_utxo().unwrap().satoshis;
+    let state: HashMap<String, SdkValue> = [("count".to_string(), SdkValue::Int(1))].into_iter().collect();
+    let opts = CallOptions { outputs: Some(vec![runar_lang::sdk::OutputSpec { satoshis: sats, state }]), ..Default::default() };
+    let (spent, tx) = call_with(&mut c, &mut p, &s, "bump", &opts);
+    assert_eq!(tx.outputs[0].2, bound(&art, 1, &spent), "outputs continuation carries sha256(spent outpoint)");
+}
+
+#[test]
+fn class2_outputs_option_with_a_stale_hidden_field_gets_the_spent_outpoint_hash() {
+    let art = artifact(MIXED_SRC, "MixedPot.runar.ts");
+    let (mut c, mut p, s) = setup(art.clone());
+    call(&mut c, &mut p, &s, "increment");
+    let sats = c.get_utxo().unwrap().satoshis;
+    // state() carries the previous call's (now stale) binding.
+    let mut state = c.state().clone();
+    state.insert("count".to_string(), SdkValue::Int(2));
+    let opts = CallOptions { outputs: Some(vec![runar_lang::sdk::OutputSpec { satoshis: sats, state }]), ..Default::default() };
+    let (spent, tx) = call_with(&mut c, &mut p, &s, "bump", &opts);
+    assert_eq!(tx.outputs[0].2, bound(&art, 2, &spent), "stale binding replaced");
+}
+
+#[test]
+fn class2_new_state_without_the_hidden_field_gets_the_spent_outpoint_hash() {
+    let art = artifact(MIXED_SRC, "MixedPot.runar.ts");
+    let (mut c, mut p, s) = setup(art.clone());
+    let ns: HashMap<String, SdkValue> = [("count".to_string(), SdkValue::Int(1))].into_iter().collect();
+    let opts = CallOptions { new_state: Some(ns), ..Default::default() };
+    let (spent, tx) = call_with(&mut c, &mut p, &s, "increment", &opts);
+    assert_eq!(tx.outputs[0].2, bound(&art, 1, &spent), "new_state continuation carries sha256(spent outpoint)");
+    assert_eq!(c.state().get(FIELD), Some(&SdkValue::Bytes(outpoint_hash(&spent))), "tracked state");
+}
+
+#[test]
+fn class2_new_state_copied_from_state_replaces_the_stale_hash() {
+    let art = artifact(MIXED_SRC, "MixedPot.runar.ts");
+    let (mut c, mut p, s) = setup(art.clone());
+    call(&mut c, &mut p, &s, "increment");
+    let stale = c.state().get(FIELD).cloned().unwrap();
+    let mut ns = c.state().clone();
+    ns.insert("count".to_string(), SdkValue::Int(2));
+    let opts = CallOptions { new_state: Some(ns), ..Default::default() };
+    let (spent, tx) = call_with(&mut c, &mut p, &s, "increment", &opts);
+    assert_eq!(tx.outputs[0].2, bound(&art, 2, &spent), "stale binding replaced in the continuation");
+    assert_eq!(c.state().get(FIELD), Some(&SdkValue::Bytes(outpoint_hash(&spent))), "tracked state");
+    assert_ne!(c.state().get(FIELD), Some(&stale));
+}

@@ -1264,6 +1264,38 @@ impl RunarContract {
             }).collect();
         }
 
+        // D25: a bind-class contract's every continuation carries the hidden
+        // `_spentOutpointHash` = sha256(outpoint this input spends), which the
+        // covenant writes itself. A caller-supplied state (CallOptions.outputs /
+        // new_state) cannot be expected to know it — left out, serialize_state
+        // refuses; copied from state(), it is the PREVIOUS outpoint's hash and
+        // the covenant rejects the spend. No other value can ever validate, so
+        // it is ALWAYS overwritten here, whatever the caller passed.
+        let outpoint_binding: Option<String> = if is_stateful
+            && self
+                .artifact
+                .state_fields
+                .as_ref()
+                .and_then(|f| f.iter().max_by_key(|f| f.index))
+                .map_or(false, |f| f.name == TWIN_BINDING_FIELD)
+        {
+            Some(spent_outpoint_hash(&current_utxo).ok_or_else(|| {
+                format!(
+                    "RunarContract.call({}): contract UTXO txid {:?} is not 32 bytes of hex",
+                    method_name, current_utxo.txid
+                )
+            })?)
+        } else {
+            None
+        };
+        let with_outpoint_binding = |st: &HashMap<String, SdkValue>| -> HashMap<String, SdkValue> {
+            let mut out = st.clone();
+            if let Some(ref b) = outpoint_binding {
+                out.insert(TWIN_BINDING_FIELD.to_string(), SdkValue::Bytes(b.clone()));
+            }
+            out
+        };
+
         if is_stateful && has_multi_output {
             // Multi-output: build a locking script for each output
             // N-075: get_code_part_hex() carries the inscription envelope, as the
@@ -1273,7 +1305,7 @@ impl RunarContract {
             let outputs = options.unwrap().outputs.as_ref().unwrap();
             contract_outputs = Some(
                 outputs.iter().map(|out| {
-                    let state_hex = serialize_state(state_fields, &out.state);
+                    let state_hex = serialize_state(state_fields, &with_outpoint_binding(&out.state));
                     ContractOutput {
                         script: format!("{}6a{}", code_script, state_hex),
                         satoshis: out.satoshis,
@@ -1319,8 +1351,8 @@ impl RunarContract {
             // Explicit newState takes priority (backward compat); otherwise
             // auto-compute from ANF IR if available.
             if let Some(new_state) = options.and_then(|o| o.new_state.as_ref()) {
-                for (k, v) in new_state {
-                    self.state.insert(k.clone(), v.clone());
+                for (k, v) in with_outpoint_binding(new_state) {
+                    self.state.insert(k, v);
                 }
             } else if method_has_continuation {
                 if let Some(computed) = auto_computed_state.take() {
@@ -3234,6 +3266,23 @@ pub fn resolve_continuation_satoshis(
 
 /// Constructor param types whose arg is spliced into the locking script as a
 /// push of hex-decoded bytes.
+/// D25 hidden state field (mirrors the compiler's TWIN_BINDING_FIELD).
+const TWIN_BINDING_FIELD: &str = "_spentOutpointHash";
+
+/// sha256 of a spent outpoint as BIP-143 serializes it (txid in wire order ||
+/// vout u32 LE), hex. None when the txid is not 32 bytes of hex.
+fn spent_outpoint_hash(u: &Utxo) -> Option<String> {
+    if u.txid.len() != 64 || !u.txid.is_ascii() {
+        return None;
+    }
+    let mut wire = (0..32)
+        .map(|i| u8::from_str_radix(&u.txid[2 * i..2 * i + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    wire.reverse();
+    wire.extend_from_slice(&u.output_index.to_le_bytes());
+    Some(Sha256::digest(&wire).iter().map(|b| format!("{:02x}", b)).collect())
+}
+
 const BYTE_STRING_CTOR_TYPES: &[&str] = &[
     "ByteString", "PubKey", "Sig", "Addr", "Ripemd160", "Sha256",
     "Point", "P256Point", "P384Point", "SigHashPreimage",
