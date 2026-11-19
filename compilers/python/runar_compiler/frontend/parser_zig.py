@@ -21,6 +21,8 @@ Zig syntax conventions used in Runar contracts:
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 from runar_compiler.frontend.ast_nodes import (
     ArrayLiteralExpr,
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
@@ -830,6 +832,7 @@ class _ZigParser:
         # `runar.Sighash("FLAGS")` in its place is the native spelling of the
         # `@sighash` directive (natively it is `void`).
         sighash_specs: list[str | None] = []
+        declared_ret = None
         if (self._current().kind == TOK_IDENT and self._current().value == "runar"
                 and self._peek_ahead(1).kind == TOK_DOT
                 and self._peek_ahead(2).kind == TOK_IDENT
@@ -854,14 +857,15 @@ class _ZigParser:
             self._expect(TOK_RPAREN, ")")
             sighash_specs.append(arg.value if count == 1 and arg.kind == TOK_STRING else None)
         elif self._current().kind != TOK_LBRACE:
-            # The AST keeps no return type; N-331 refuses an unknown name.
-            # `init` returns the contract struct itself, which is not a type
-            # to check.
+            # N-331 refuses an unknown name. `init` returns the contract struct
+            # itself, which is not a type to check. D12 FE-F4: the declared
+            # type is kept on the method for the type checker.
             ret_type = self._parse_type()[0]
             if name != "init":
                 ret_msg = unknown_return_type_message(ret_type, name, is_public)
                 if ret_msg is not None:
                     self._errors.append(ret_msg)
+                declared_ret = declared_return_type(ret_type)
 
         prev_self_names = self._self_names
         prev_stateful_ctx_names = self._stateful_context_names
@@ -891,6 +895,7 @@ class _ZigParser:
             body=body,
             visibility="public" if is_public else "private",
             sighash_type=sighash.value if sighash is not None else None,
+            return_type=declared_ret,
             source_location=loc,
         )
 

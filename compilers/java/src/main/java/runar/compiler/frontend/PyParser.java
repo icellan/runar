@@ -1054,7 +1054,8 @@ public final class PyParser {
                             addError(sighash.error());
                         } else if (sighash != null) {
                             method = new MethodNode(method.name(), method.params(), method.body(),
-                                method.visibility(), method.sourceLocation(), sighash.value());
+                                method.visibility(), method.sourceLocation(), sighash.value(),
+                                method.bindingVariant(), method.returnType());
                         }
                         methods.add(method);
                     } else {
@@ -1283,13 +1284,15 @@ public final class PyParser {
 
             List<ParamNode> params = parseParams();
 
+            TypeNode declaredReturn = null;
             if (match(TokKind.ARROW)) {
-                // The AST keeps no return type; N-331 refuses an unknown name.
-                // `None` is Python's spelling of "returns nothing".
+                // N-331 refuses an unknown name. `None` is Python's spelling of
+                // "returns nothing". D12 FE-F4: the declared type is kept.
                 TypeNode returnType = parseTypeAnnotation();
                 if (!(returnType instanceof CustomType ct && ct.name().equals("None"))) {
                     String unknownReturn = LexDiag.unknownReturnType(returnType, nameTok.value, visibility.equals("public"));
                     if (unknownReturn != null) addError(unknownReturn);
+                    declaredReturn = MethodNode.declaredReturnType(returnType);
                 }
             }
 
@@ -1297,7 +1300,7 @@ public final class PyParser {
             List<Statement> body = parseBlock();
 
             Visibility vis = visibility.equals("public") ? Visibility.PUBLIC : Visibility.PRIVATE;
-            return new MethodNode(name, params, body, vis, location);
+            return new MethodNode(name, params, body, vis, location, null, null, declaredReturn);
         }
 
         // -- Parameters -------------------------------------------------------

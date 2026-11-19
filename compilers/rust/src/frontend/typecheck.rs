@@ -4,7 +4,9 @@
 //! constructor parameters, and method parameters, then verifies all
 //! expressions have consistent types.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use num_bigint::BigInt;
 
@@ -327,12 +329,10 @@ fn is_subtype(actual: &str, expected: &str) -> bool {
 
     // N-027: <inferred> and <unknown> are compatible with anything, in both
     // directions. Mirrors `isSubtype` in
-    // packages/runar-compiler/src/passes/03-typecheck.ts. Private method
-    // return types are inferred by an environment-free walk
-    // (`infer_method_return_type`), so a helper that returns an identifier, a
-    // property access, an index access, or a call to another private method
-    // is typed `<unknown>` — which is a "don't know", not a type. Without this
-    // clause Rust rejected contracts that TS, Go and Python all compile.
+    // packages/runar-compiler/src/passes/03-typecheck.ts. A value the checker
+    // cannot type is `<unknown>` — which is a "don't know", not a type.
+    // Without this clause Rust rejected contracts that TS, Go and Python all
+    // compile.
     if actual == "<inferred>" || actual == "<unknown>" {
         return true;
     }
@@ -541,7 +541,13 @@ struct MethodConsumption {
 /// summaries grow, so iterating until no entry changes terminates, also for
 /// recursive call graphs (refused separately by the validator). Mirrors
 /// `consumedParamSummary` in the TS reference 03-typecheck.ts.
-fn consumed_param_summary(contract: &ContractNode) -> HashMap<String, MethodConsumption> {
+/// `inferred` is the caller's private-method return-type memo (D12 FE-F4),
+/// shared so the scratch checkers do not re-infer every helper from scratch
+/// (polynomial in the helper-chain length: N-180's 127-deep chain timed out).
+fn consumed_param_summary(
+    contract: &ContractNode,
+    inferred: Rc<RefCell<HashMap<String, TType>>>,
+) -> HashMap<String, MethodConsumption> {
     let mut summary: HashMap<String, MethodConsumption> = contract
         .methods
         .iter()
@@ -553,6 +559,7 @@ fn consumed_param_summary(contract: &ContractNode) -> HashMap<String, MethodCons
         for method in &contract.methods {
             let mut scratch_errors = Vec::new();
             let mut scratch = TypeChecker::new(contract, &mut scratch_errors);
+            scratch.inferred_returns = Rc::clone(&inferred);
             scratch.consumed_params = Some(summary.clone());
             let consumed = scratch.consumed_param_indices(method);
             let (prev_params, prev_props) = summary
@@ -600,6 +607,18 @@ struct TypeChecker<'a> {
     /// N-288: also the `prop:<name>` origins it consumes, which a call
     /// consumes in the caller. Computed lazily by `consumed_param_summary`.
     consumed_params: Option<HashMap<String, MethodConsumption>>,
+    /// D12 FE-F4: memoized inferred return types of undeclared private
+    /// methods; shared with the scratch checkers that infer them.
+    inferred_returns: Rc<RefCell<HashMap<String, TType>>>,
+    /// D12 FE-F4: the types of the `return` values seen while checking, when
+    /// collecting them (return-type inference).
+    return_type_sink: Option<Vec<TType>>,
+    /// D12 FE-F4: the types of the `return` values of the method being
+    /// checked, in order.
+    current_return_types: Vec<TType>,
+    /// D12 FE-F4: (name, declared return type) of the method being checked,
+    /// when it declares one; enforced on every `return`.
+    current_declared_return: Option<(String, TType)>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -621,12 +640,10 @@ impl<'a> TypeChecker<'a> {
                 .iter()
                 .map(|p| type_node_to_ttype(&p.param_type))
                 .collect();
-            let return_type = if method.visibility == Visibility::Public {
-                VOID.to_string()
-            } else {
-                infer_method_return_type(method)
-            };
-            method_sigs.insert(method.name.clone(), (params, return_type));
+            // D12 FE-F4: a private method's return type is resolved on first
+            // use (`lookup_method_sig`): the declared type, else inferred from
+            // the body with the full environment.
+            method_sigs.insert(method.name.clone(), (params, VOID.to_string()));
         }
 
         TypeChecker {
@@ -642,7 +659,67 @@ impl<'a> TypeChecker<'a> {
             current_stmt_loc: None,
             side_effects: None,
             consumed_params: None,
+            inferred_returns: Rc::new(RefCell::new(HashMap::new())),
+            return_type_sink: None,
+            current_return_types: Vec::new(),
+            current_declared_return: None,
         }
+    }
+
+    /// `method_sigs[name]` with a private method's return type resolved
+    /// (D12 FE-F4).
+    fn lookup_method_sig(&mut self, name: &str) -> Option<(Vec<TType>, TType)> {
+        let (params, ret) = self.method_sigs.get(name).cloned()?;
+        let contract = self.contract;
+        match contract
+            .methods
+            .iter()
+            .find(|m| m.name == name && m.visibility != Visibility::Public)
+        {
+            Some(m) => Some((params, self.method_return_type(m))),
+            None => Some((params, ret)),
+        }
+    }
+
+    /// D12 FE-F4: what a call of private method `method` evaluates to.
+    ///
+    /// A declared return type is authoritative (`check_statement` enforces it
+    /// on every `return`). Without one (Ruby has no syntax for it; TypeScript
+    /// may omit it) the body is type-checked by a scratch checker with the
+    /// real parameter environment and the types of its `return` values are
+    /// unified. Values that do not unify, and a helper reached again while its
+    /// own type is being inferred, are `<unknown>`: every operator whose
+    /// lowering depends on the type then refuses to compile instead of
+    /// guessing.
+    fn method_return_type(&mut self, method: &MethodNode) -> TType {
+        if let Some(rt) = &method.return_type {
+            return type_node_to_ttype(rt);
+        }
+        if let Some(t) = self.inferred_returns.borrow().get(&method.name) {
+            return t.clone();
+        }
+        // Recursion guard; the validator refuses recursion.
+        self.inferred_returns
+            .borrow_mut()
+            .insert(method.name.clone(), "<unknown>".to_string());
+        let mut scratch_errors: Vec<Diagnostic> = Vec::new();
+        let sink = {
+            let mut scratch = TypeChecker::new(self.contract, &mut scratch_errors);
+            scratch.inferred_returns = Rc::clone(&self.inferred_returns);
+            // D12 FE-F4: an inference scratch's diagnostics are discarded, so it does
+            // no affine-consumption bookkeeping; computing the summary from inside an
+            // inference would read the in-progress recursion guard and memoize
+            // '<unknown>' for the helper's callers.
+            scratch.consumed_params = Some(HashMap::new());
+            scratch.return_type_sink = Some(Vec::new());
+            scratch.check_method(method);
+            scratch.return_type_sink.take().unwrap_or_default()
+        };
+        let inferred = unify_return_types(&sink);
+        self.inferred_returns
+            .borrow_mut()
+            .insert(method.name.clone(), inferred.clone());
+        inferred
     }
 
     /// Push a type-check error using the current method's source location.
@@ -765,6 +842,7 @@ impl<'a> TypeChecker<'a> {
 
         // Set current method location for diagnostics
         self.current_method_loc = Some(ctor.source_location.clone());
+        self.current_declared_return = None;
 
         // Reset affine tracking for this scope
         self.consumed_values.clear();
@@ -797,6 +875,10 @@ impl<'a> TypeChecker<'a> {
 
         // Set current method location for diagnostics
         self.current_method_loc = Some(method.source_location.clone());
+        self.current_declared_return = method
+            .return_type
+            .as_ref()
+            .map(|t| (method.name.clone(), type_node_to_ttype(t)));
 
         // Reset affine tracking for this method
         self.consumed_values.clear();
@@ -807,7 +889,24 @@ impl<'a> TypeChecker<'a> {
             env.define(&param.name, type_node_to_ttype(&param.param_type));
         }
 
+        self.current_return_types.clear();
         self.check_statements(&method.body, &mut env);
+
+        // D12 FE-F4: an undeclared private return type is inferred by unifying
+        // the returned values. Values that do not unify used to be typed by the
+        // FIRST return (so `if (c) return 1n; return true;` was a bigint); now
+        // the call would be `<unknown>`, which `assert` / `if` still accept.
+        // Refuse it here.
+        if method.visibility != Visibility::Public && method.return_type.is_none() {
+            let seen = std::mem::take(&mut self.current_return_types);
+            if !seen.is_empty()
+                && !seen.iter().any(|t| t == "<unknown>")
+                && unify_return_types(&seen) == "<unknown>"
+            {
+                let msg = incompatible_return_types_message(&method.name, &seen);
+                self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone())));
+            }
+        }
 
         // Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in
         // the same method body. The intrinsic's compile-time output-offset
@@ -1020,7 +1119,19 @@ terminal (no state mutation)",
 
             Statement::ReturnStatement { value, .. } => {
                 if let Some(v) = value {
-                    self.infer_expr_type(v, env);
+                    let value_type = self.infer_expr_type(v, env);
+                    if let Some(sink) = self.return_type_sink.as_mut() {
+                        sink.push(value_type.clone());
+                    }
+                    self.current_return_types.push(value_type.clone());
+                    // D12 FE-F4: the declared return type is enforced,
+                    // strictly — an unresolved value is not assignable to
+                    // anything here.
+                    if let Some((name, declared)) = self.current_declared_return.clone() {
+                        if value_type == "<unknown>" || !is_subtype(&value_type, &declared) {
+                            self.add_error(declared_return_mismatch_message(&name, &value_type, &declared));
+                        }
+                    }
                 }
             }
         }
@@ -1161,7 +1272,8 @@ terminal (no state mutation)",
                 op,
                 operand,
                 source_location,
-            } => self.check_unary_expr(op, operand, source_location.as_ref(), env),
+                operand_type,
+            } => self.check_unary_expr(op, operand, source_location.as_ref(), operand_type, env),
 
             Expression::CallExpr {
                 callee,
@@ -1271,6 +1383,32 @@ terminal (no state mutation)",
     ) -> TType {
         let left_type = self.infer_expr_type(left, env);
         let right_type = self.infer_expr_type(right, env);
+
+        // D12 FE-F1: the operators whose opcode depends on the operand family
+        // record the family the TYPE CHECKER resolved; ANF lowering reads it
+        // and nothing else. `+` and `& | ^` already refuse an operand that is
+        // neither a byte string nor a number (below); equality accepted
+        // `<unknown>`, so it is refused here rather than lowered as a guess.
+        if is_typed_binary_op(op) {
+            let lf = operand_family(&left_type);
+            let rf = operand_family(&right_type);
+            match (lf, rf) {
+                (Some(l), Some(r)) if l == r => {
+                    if let Expression::BinaryExpr { operand_type, .. } = whole {
+                        operand_type.set(Some(l));
+                    }
+                }
+                (l, r) if (l.is_none() || r.is_none())
+                    && matches!(op, BinaryOp::StrictEq | BinaryOp::StrictNe) =>
+                {
+                    self.add_error_at(
+                        unresolved_operand_types_message(op.as_str(), &left_type, &right_type),
+                        whole,
+                    );
+                }
+                _ => {}
+            }
+        }
 
         match op {
             // Add: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString (OP_CAT)
@@ -1456,6 +1594,7 @@ terminal (no state mutation)",
         op: &UnaryOp,
         operand: &Expression,
         op_loc: Option<&SourceLocation>,
+        slot: &OperandSlot,
         env: &mut TypeEnv,
     ) -> TType {
         let operand_type = self.infer_expr_type(operand, env);
@@ -1486,8 +1625,13 @@ terminal (no state mutation)",
                 BIGINT.to_string()
             }
             UnaryOp::BitNot => {
+                // D12 FE-F1: see check_binary_expr.
                 if is_bytestring_subtype(&operand_type) {
+                    slot.set(Some(OperandType::Bytes));
                     return BYTESTRING.to_string();
+                }
+                if is_bigint_family(&operand_type) {
+                    slot.set(Some(OperandType::Numeric));
                 }
                 if !is_bigint_family(&operand_type) {
                     self.add_error_at_loc(
@@ -1568,7 +1712,10 @@ terminal (no state mutation)",
             // that Zig and Move tuple syntax produce carries the state values
             // in a trailing array literal. anf_lower unwraps it with this same
             // helper, so the arity checked here is the arity codegen will see.
-            let normalized = super::anf_lower::flatten_add_output_args(args);
+            // D12 FE-F1: borrow the ORIGINAL argument nodes — the type checker
+            // records operand families on them, and a cloned argument would
+            // carry the tag away from the node ANF lowering reads.
+            let normalized = super::anf_lower::flatten_add_output_arg_refs(args);
 
             // N-107: count the state slots the continuation will actually
             // carry, not the DECLARED mutable properties. expand_fixed_arrays
@@ -1598,20 +1745,20 @@ terminal (no state mutation)",
                 ));
             }
             if !normalized.is_empty() {
-                let sat_type = self.infer_expr_type(&normalized[0], env);
+                let sat_type = self.infer_expr_type(normalized[0], env);
                 if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
                     self.add_error_at(
                         format!(
                             "addOutput() first argument (satoshis) must be bigint, got '{}'",
                             sat_type
                         ),
-                        &normalized[0],
+                        normalized[0],
                     );
                 }
             }
             let mut i = 0;
             while i < mutable_props.len() && i + 1 < normalized.len() {
-                let arg_type = self.infer_expr_type(&normalized[i + 1], env);
+                let arg_type = self.infer_expr_type(normalized[i + 1], env);
                 let prop_type = type_node_to_ttype(&mutable_props[i].1);
                 if !is_subtype(&arg_type, &prop_type) && arg_type != "<unknown>" {
                     self.add_error_at(
@@ -1622,7 +1769,7 @@ terminal (no state mutation)",
                             prop_type,
                             arg_type
                         ),
-                        &normalized[i + 1],
+                        normalized[i + 1],
                     );
                 }
                 i += 1;
@@ -1716,7 +1863,7 @@ terminal (no state mutation)",
             }
 
             // Check if it's a known contract method
-            if let Some((params, return_type)) = self.method_sigs.get(name).cloned() {
+            if let Some((params, return_type)) = self.lookup_method_sig(name) {
                 let param_strs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
                 return self.check_call_args(name, &param_strs, &return_type, args, env, false);
             }
@@ -1786,7 +1933,7 @@ terminal (no state mutation)",
             }
 
             // Check contract method signatures
-            if let Some((params, return_type)) = self.method_sigs.get(property).cloned() {
+            if let Some((params, return_type)) = self.lookup_method_sig(property) {
                 let param_strs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
                 return self.check_call_args(property, &param_strs, &return_type, args, env, true);
             }
@@ -1821,7 +1968,7 @@ terminal (no state mutation)",
                     return self.check_output_intrinsic_args(property, args, env);
                 }
 
-                if let Some((params, return_type)) = self.method_sigs.get(property).cloned() {
+                if let Some((params, return_type)) = self.lookup_method_sig(property) {
                     let param_strs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
                     return self.check_call_args(
                         property,
@@ -2181,9 +2328,10 @@ terminal (no state mutation)",
                     return;
                 }
                 let contract = self.contract;
+                let inferred = Rc::clone(&self.inferred_returns);
                 let summary = self
                     .consumed_params
-                    .get_or_insert_with(|| consumed_param_summary(contract));
+                    .get_or_insert_with(|| consumed_param_summary(contract, inferred));
                 summary.get(func_name).cloned().unwrap_or_default()
             }
         };
@@ -2324,73 +2472,74 @@ terminal (no state mutation)",
 // Private method return type inference
 // ---------------------------------------------------------------------------
 
-/// Infer a private method's return type by walking all return statements
-/// and inferring the type of their expressions. Returns "void" if no
-/// return statements with values are found.
-fn infer_method_return_type(method: &MethodNode) -> TType {
-    let return_types = collect_return_types(&method.body);
-
-    if return_types.is_empty() {
+/// D12 FE-F4: unify the types of a private method's `return` values
+/// (inferred with the full environment). No value-returning `return` = void;
+/// values in one family unify to that family; anything else is `<unknown>` —
+/// never a best-effort pick, because every typed operator refuses `<unknown>`.
+fn unify_return_types(types: &[TType]) -> TType {
+    let Some(first) = types.first() else {
         return VOID.to_string();
-    }
-
-    let first = &return_types[0];
-    let all_same = return_types.iter().all(|t| t == first);
-    if all_same {
+    };
+    if types.iter().all(|t| t == first) {
         return first.clone();
     }
-
-    // Check if all are in the bigint family
-    if return_types.iter().all(|t| is_bigint_subtype(t)) {
+    if types.iter().all(|t| is_bigint_subtype(t)) {
         return BIGINT.to_string();
     }
-
-    // Check if all are in the ByteString family
-    if return_types.iter().all(|t| is_bytestring_subtype(t)) {
+    if types.iter().all(|t| is_bytestring_subtype(t)) {
         return BYTESTRING.to_string();
     }
-
-    // Check if all are boolean
-    if return_types.iter().all(|t| t == BOOLEAN) {
-        return BOOLEAN.to_string();
-    }
-
-    // Mixed types -- return the first as a best effort
-    first.clone()
+    "<unknown>".to_string()
 }
 
-/// Recursively collect inferred types from return statements.
-fn collect_return_types(stmts: &[Statement]) -> Vec<TType> {
-    let mut types = Vec::new();
-    for stmt in stmts {
-        match stmt {
-            Statement::ReturnStatement { value, .. } => {
-                if let Some(v) = value {
-                    types.push(infer_expr_type_static(v));
-                }
-            }
-            Statement::IfStatement {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                types.extend(collect_return_types(then_branch));
-                if let Some(else_stmts) = else_branch {
-                    types.extend(collect_return_types(else_stmts));
-                }
-            }
-            Statement::ForStatement { body, .. } => {
-                types.extend(collect_return_types(body));
-            }
-            _ => {}
+/// D12 FE-F1: the lowering family of a resolved type — a byte string, a
+/// script number, or none.
+fn operand_family(t: &str) -> Option<OperandType> {
+    if is_bytestring_subtype(t) {
+        Some(OperandType::Bytes)
+    } else if is_bigint_subtype(t) || t == BOOLEAN {
+        Some(OperandType::Numeric)
+    } else {
+        None
+    }
+}
+
+/// D12 FE-F1: the one wording every tier emits.
+pub fn unresolved_operand_types_message(op: &str, left: &str, right: &str) -> String {
+    format!(
+        "Cannot resolve the operand types of '{}' (got '{}' and '{}'): it must be known whether the operands are byte strings or numbers",
+        op, left, right
+    )
+}
+
+/// D12 FE-F4: the one wording every tier emits (distinct types in first-seen
+/// order).
+pub fn incompatible_return_types_message(method: &str, types: &[TType]) -> String {
+    let mut distinct: Vec<&str> = Vec::new();
+    for t in types {
+        if !distinct.contains(&t.as_str()) {
+            distinct.push(t);
         }
     }
-    types
+    let quoted: Vec<String> = distinct.iter().map(|t| format!("'{}'", t)).collect();
+    format!(
+        "Method '{}' returns values of incompatible types ({}); declare its return type",
+        method,
+        quoted.join(", ")
+    )
+}
+
+/// D12 FE-F4: the one wording every tier emits.
+pub fn declared_return_mismatch_message(method: &str, actual: &str, declared: &str) -> String {
+    format!(
+        "Method '{}' returns '{}', which is not assignable to its declared return type '{}'",
+        method, actual, declared
+    )
 }
 
 /// Lightweight static expression type inference without a type environment.
-/// Used for inferring return types of private methods before the full
-/// type-check pass runs.
+/// Used for property initializers (literals). D12 FE-F4: private-method
+/// return types are no longer inferred with it; see `method_return_type`.
 /// N-463: the position of `expr`'s first token, or `None` when unknown.
 /// Only identifiers (`this` included), `this.x` and ByteString literals
 /// record a position, and only on `.runar.ts`. A composite expression starts

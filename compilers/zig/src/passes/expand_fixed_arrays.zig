@@ -253,6 +253,7 @@ const Ctx = struct {
             prop.fixed_array_length,
             prop.fixed_array_element,
             prop.fixed_array_nested_length,
+            prop.fixed_array_leaf,
         );
     }
 
@@ -262,6 +263,7 @@ const Ctx = struct {
         length: u32,
         element: RunarType,
         nested_length: u32,
+        leaf: RunarType,
     ) !*ArrayMeta {
         const meta = try self.allocator.create(ArrayMeta);
         var slot_names = try self.allocator.alloc([]const u8, length);
@@ -287,7 +289,12 @@ const Ctx = struct {
                 // parser-level fixed_array_nested_length. Deeper nesting isn't
                 // captured at parse time in the current Zig AST; report cleanly
                 // if the element is still .fixed_array without a known length.
-                const sub = try self.buildMeta(slot, nested_length, .bigint, 0);
+                // D12: the inner arrays hold the declared leaf type (it used
+                // to be hard-coded `bigint`, which refused every nested
+                // ByteString-family initializer the TS reference accepts).
+                // `.unknown` (a parser that does not record it) keeps `bigint`.
+                const inner_elem: RunarType = if (leaf == .unknown or leaf == .fixed_array) .bigint else leaf;
+                const sub = try self.buildMeta(slot, nested_length, inner_elem, 0, .unknown);
                 try nested_map.put(self.allocator, slot, sub);
                 try self.synthetic_arrays.put(self.allocator, slot, sub);
             }
@@ -665,6 +672,8 @@ const Ctx = struct {
             .op = op,
             .left = .{ .index_access = read },
             .right = .{ .literal_int = 1 },
+            // D12 FE-F1: typecheck already required a bigint operand for ++/--.
+            .operand_type = .numeric,
         };
 
         try self.rewriteIndexAssign(out, stable_ia, .{ .binary_op = one }, source_loc);
@@ -1144,7 +1153,8 @@ const Ctx = struct {
 
     fn makeIdxEq(self: *Ctx, idx_ref: Expression, lit: i64) !Expression {
         const bo = try self.allocator.create(BinaryOp);
-        bo.* = .{ .op = .eq, .left = try self.cloneExpr(idx_ref), .right = .{ .literal_int = lit } };
+        // D12 FE-F1: index vs a bigint literal.
+        bo.* = .{ .op = .eq, .left = try self.cloneExpr(idx_ref), .right = .{ .literal_int = lit }, .operand_type = .numeric };
         return .{ .binary_op = bo };
     }
 

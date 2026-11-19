@@ -804,6 +804,7 @@ module RunarCompiler
         # Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
         # native spelling of the `@sighash` directive (natively it is `void`).
         sighash_specs = []
+        declared_ret = nil
         if check_ident("runar") && peek_at(1).kind == TOK_DOT &&
            peek_at(2).kind == TOK_IDENT && peek_at(2).value == "Sighash"
           3.times { advance }
@@ -823,10 +824,14 @@ module RunarCompiler
           expect(TOK_RPAREN)
           sighash_specs << (count == 1 && arg.kind == TOK_STRING ? arg.value : nil)
         elsif !check(TOK_LBRACE)
-          # The AST keeps no return type; N-331 refuses an unknown name. `init`
-          # returns the contract struct itself, which is not a type to check.
+          # N-331 refuses an unknown name. `init` returns the contract struct
+          # itself, which is not a type to check. D12 FE-F4: the declared type
+          # is kept on the method for the type checker.
           ret_type = parse_type
-          Frontend.reject_unknown_return_type(@errors, ret_type[:type], name, source_location, is_public) unless name == "init"
+          unless name == "init"
+            Frontend.reject_unknown_return_type(@errors, ret_type[:type], name, source_location, is_public)
+            declared_ret = Frontend.declared_return_type(ret_type[:type])
+          end
         end
 
         prev_self_names = @self_names
@@ -861,7 +866,8 @@ module RunarCompiler
           body: body,
           visibility: is_public ? "public" : "private",
           source_location: source_location,
-          sighash_type: sighash && sighash[:value]
+          sighash_type: sighash && sighash[:value],
+          return_type: declared_ret
         )
       end
 
@@ -1852,7 +1858,8 @@ module RunarCompiler
           body: rewrite_statements(method.body, method_names, scope),
           visibility: method.visibility,
           source_location: method.source_location,
-          sighash_type: method.sighash_type
+          sighash_type: method.sighash_type,
+          return_type: method.return_type
         )
       end
 

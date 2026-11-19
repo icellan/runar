@@ -71,11 +71,11 @@
     },
     {
       "path": "conformance/script-size-baseline.json",
-      "sha256": "0a49542366255d269dea33c1abaf7bf90fe25bb93b64280366858f264f601d9f",
+      "sha256": "7b85e1d0964202098ef2eeadc5973cfb0681960671100395ca3f5736dec9bd30",
       "verified-against": "intentional-spec-change",
-      "reason": "PR B: 50 rows move by the inserted entry width gates (+6 to +98 B; see the PR B commit body for every before/after size); re-stamped by runner/script-size-check.ts --update. Verified against: each row equals the byte length of the restamped expected-script.hex, which the opcode-level diff shows is exactly the old bytes plus the gates.",
-      "reviewer": "fix-session: PR B width gates (#213/#180)",
-      "date": "2026-11-17",
+      "reason": "D12 BM-F3 (2026-11-18): exactly one row moves, byte-builtins 5773 -> 5774 B: the reverseBytes arm's trailing OP_DROP of the unconsumed remainder becomes OP_0 OP_EQUALVERIFY (75 -> 00 88) so a > 520-byte input aborts. Re-stamped by runner/script-size-check.ts --update. Verified against: the row equals the byte length of the restamped conformance/tests/byte-builtins/expected-script.hex, which is content-pinned in conformance/witnesses/byte-builtins.json (route A; witness rows re-run on @bsv/sdk + ANF interpreter), and the >520 abort is executed on the go-sdk consensus interpreter (conformance/byte_builtins_execution_test.go, 521/600 B) and on @bsv/sdk Spend for all seven tiers (conformance/negatives/d12-typed-operand-lowering.test.ts). || PREVIOUS: PR B: 50 rows move by the inserted entry width gates (+6 to +98 B; see the PR B commit body for every before/after size); re-stamped by runner/script-size-check.ts --update. Verified against: each row equals the byte length of the restamped expected-script.hex, which the opcode-level diff shows is exactly the old bytes plus the gates.",
+      "reviewer": "fix-session: D12 typed operand lowering (FE-F1/FE-F4/BM-F3)",
+      "date": "2026-11-18",
       "review-status": "reviewed"
     },
     {

@@ -1532,6 +1532,7 @@ impl<'a> RbParser<'a> {
         // Determine if this is the constructor
         if raw_name == "initialize" {
             return MethodNode {
+                return_type: None,
                 name: "constructor".to_string(),
                 params,
                 body,
@@ -1546,6 +1547,7 @@ impl<'a> RbParser<'a> {
         let method_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
         MethodNode {
+            return_type: None,
             name: method_name,
             params,
             body,
@@ -1796,6 +1798,7 @@ impl<'a> RbParser<'a> {
 
         // Unless is if with negated condition
         let condition = Expression::UnaryExpr {
+            operand_type: Default::default(),
             op: UnaryOp::Not,
             operand: Box::new(raw_condition),
             source_location: None,
@@ -1889,6 +1892,7 @@ impl<'a> RbParser<'a> {
         };
 
         let condition = Expression::BinaryExpr {
+            operand_type: Default::default(),
             op: cmp_op,
             left: Box::new(Expression::Identifier {
                 name: var_name.clone(),
@@ -2010,6 +2014,7 @@ impl<'a> RbParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: bin_op,
                 left: Box::new(target.clone()),
                 right: Box::new(rhs),
@@ -2098,6 +2103,7 @@ impl<'a> RbParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: bin_op,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2153,6 +2159,7 @@ impl<'a> RbParser<'a> {
             let right = self.parse_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2171,6 +2178,7 @@ impl<'a> RbParser<'a> {
             let right = self.parse_not();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2186,6 +2194,7 @@ impl<'a> RbParser<'a> {
             self.advance();
             let operand = self.nested(zero(), |p| p.parse_not());
             Expression::UnaryExpr {
+                operand_type: Default::default(),
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
                 source_location: Some(op_loc.clone()),
@@ -2204,6 +2213,7 @@ impl<'a> RbParser<'a> {
             let right = self.parse_bit_xor();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2222,6 +2232,7 @@ impl<'a> RbParser<'a> {
             let right = self.parse_bit_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2240,6 +2251,7 @@ impl<'a> RbParser<'a> {
             let right = self.parse_equality();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2261,6 +2273,7 @@ impl<'a> RbParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2273,6 +2286,7 @@ impl<'a> RbParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2296,6 +2310,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2307,6 +2322,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2318,6 +2334,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2329,6 +2346,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2352,6 +2370,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2363,6 +2382,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2386,6 +2406,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2397,6 +2418,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2420,6 +2442,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2431,6 +2454,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2442,6 +2466,7 @@ impl<'a> RbParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2461,6 +2486,7 @@ impl<'a> RbParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2470,6 +2496,7 @@ impl<'a> RbParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2479,6 +2506,7 @@ impl<'a> RbParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2734,6 +2762,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
     }
 
     MethodNode {
+        return_type: None,
         name: "constructor".to_string(),
         params,
         body,

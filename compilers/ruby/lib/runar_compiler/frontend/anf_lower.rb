@@ -35,6 +35,14 @@ module RunarCompiler
     # @param contract [ContractNode]
     # @return [IR::ANFProgram]
     def self.lower_to_anf(contract)
+      # D12 FE-F1: operator lowering reads the operand family typecheck records
+      # on the AST. The compiler always type-checks first; a caller handing
+      # this public entry point a contract that never went through the type
+      # checker gets it run here (its diagnostics are the caller's business),
+      # so the types still come from the checker and never from a guess. A
+      # node the checker could not type keeps no annotation and is refused
+      # below.
+      Frontend.type_check(contract) if _has_untyped_operator(contract)
       properties = _lower_properties(contract)
       methods = _lower_methods(contract)
 
@@ -54,86 +62,39 @@ module RunarCompiler
     end
 
     # -------------------------------------------------------------------
-    # Byte-typed expression detection
+    # Typed operators (D12 FE-F1)
     # -------------------------------------------------------------------
 
-    # N-076: there is deliberately no list here. typecheck.rb's
-    # BYTESTRING_SUBTYPES is the authority on whether a value of a given type
-    # sits on the stack as a BYTE STRING rather than as a script NUMBER, and
-    # this module consults it.
-    #
-    # The second, hand-maintained copy this replaces carried "RabinSig" and
-    # "RabinPubKey", which typecheck.rb files under BIGINT_SUBTYPES -- so
-    # `===` on a Rabin value emitted OP_EQUAL and, far worse, `+` on one
-    # emitted OP_CAT where the source said addition.
-    #
-    # Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
-    # with OP_ADD.
-    BYTE_TYPES = BYTESTRING_SUBTYPES
-    private_constant :BYTE_TYPES
-
-    # Does the builtin +name+ return a ByteString-family value?
-    #
-    # N-347: read off the return_type column of typecheck.rb's
-    # BUILTIN_FUNCTIONS, not a second hand-written list. Two such lists lived
-    # here and drifted: N-054 (a name-prefix test swept the six numeric
-    # extractors in) and N-345 / N-347 (byte-returning builtins left out --
-    # merkleRootSha256, merkleRootHash256, bn254G1Add, bn254G1Negate,
-    # bn254G1ScalarMul -- so `===` on two of their results compiled to
-    # OP_NUMEQUAL). Do not reintroduce one.
-    #
-    # @param name [String]
-    # @return [Boolean]
-    def self._byte_returning_builtin?(name)
-      sig = BUILTIN_FUNCTIONS[name]
-      !sig.nil? && BYTE_TYPES.include?(sig.return_type)
+    # Does any operator whose lowering needs an operand type lack one?
+    def self._has_untyped_operator(node)
+      case node
+      when Array
+        node.any? { |n| _has_untyped_operator(n) }
+      when Struct
+        if node.respond_to?(:operand_type) && node.operand_type.nil? &&
+           ((node.is_a?(BinaryExpr) && TYPED_BINARY_OPS.include?(node.op)) ||
+            (node.is_a?(UnaryExpr) && node.op == "~"))
+          return true
+        end
+        node.members.any? { |m| _has_untyped_operator(node[m]) }
+      else
+        false
+      end
     end
 
-    # @param expr [Expression, nil]
-    # @param ctx [LoweringContext]
-    # @return [Boolean]
-    def self._is_byte_typed_expr(expr, ctx)
-      return false if expr.nil?
-
-      return true if expr.is_a?(ByteStringLiteral)
-
-      if expr.is_a?(Identifier)
-        # N-046 / N-047: a renamed (shadowing) declaration is judged by its own
-        # binding, never by the parameter or property it shadows.
-        renamed = ctx.scope_rename(expr.name)
-        return ctx.local_byte_var?(renamed) unless renamed.nil?
-        t = ctx.get_param_type(expr.name)
-        return true if t && BYTE_TYPES.include?(t)
-        t = ctx.get_property_type(expr.name)
-        return true if t && BYTE_TYPES.include?(t)
-        return true if ctx.local_byte_var?(ctx.local_name(expr.name))
-        return false
+    # D12 FE-F1: the operand family typecheck recorded on an operator node.
+    # There is deliberately no fallback. The previous heuristic
+    # (+_is_byte_typed_expr+) defaulted to numeric whenever it could not see a
+    # byte type -- a ternary, a helper result, +this.arr[i]+, a bitwise result,
+    # or a local built from one -- and compiled byte-string +++ to OP_ADD and
+    # +===+ to OP_NUMEQUAL. A node without the annotation was never
+    # type-checked, so it is refused.
+    def self._require_operand_type(op, operand_type)
+      if operand_type.nil?
+        raise "ANF lowering: operator '#{op}' carries no operand type from the type checker; " \
+              "run type_check on the contract before lower_to_anf (refusing to guess byte string vs number)"
       end
-
-      if expr.is_a?(PropertyAccessExpr)
-        t = ctx.get_property_type(expr.property)
-        return true if t && BYTE_TYPES.include?(t)
-        return false
-      end
-
-      if expr.is_a?(MemberExpr)
-        if expr.object.is_a?(Identifier) && expr.object.name == "this"
-          t = ctx.get_property_type(expr.property)
-          return true if t && BYTE_TYPES.include?(t)
-        end
-        return false
-      end
-
-      if expr.is_a?(CallExpr)
-        if expr.callee.is_a?(Identifier)
-          # Expression-form asm<ByteString>({...}) yields a byte value.
-          return expr.asm_return_type == "ByteString" if expr.callee.name == "asm"
-          return true if _byte_returning_builtin?(expr.callee.name)
-        end
-        return false
-      end
-
-      false
+      operand_type
     end
     # Not private: called by LoweringContext methods
 
@@ -758,7 +719,6 @@ module RunarCompiler
         @scope_renames = {}
         # N-046: source names of the loop variables in scope.
         @loop_vars = Set.new
-        @local_byte_vars = Set.new
         @current_source_loc = nil
         # Param substitution stack used when inlining a private method's body
         # directly into this context. Mirrors TS / Go reference compilers'
@@ -942,7 +902,6 @@ module RunarCompiler
           param = method.params[i]
           binding_name = declare_local(param.name)
           add_local(binding_name)
-          @local_byte_vars.add(binding_name) if BYTE_TYPES.include?(Frontend._type_node_to_string(param.type))
           emit_named(binding_name, Frontend._make_load_const_string("@ref:#{arg_refs[i]}"))
         end
         start_index = @bindings.size
@@ -1130,13 +1089,13 @@ module RunarCompiler
       # of the caller's renames apply inside it, and none of its locals outlive
       # it. Returns the state leave_inlined_scope restores.
       def enter_inlined_scope
-        saved = [@scope_renames, @local_names.dup, @local_byte_vars.dup, @local_aliases.dup, @loop_vars.dup]
+        saved = [@scope_renames, @local_names.dup, @local_aliases.dup, @loop_vars.dup]
         @scope_renames = {}
         saved
       end
 
       def leave_inlined_scope(saved)
-        @scope_renames, @local_names, @local_byte_vars, @local_aliases, @loop_vars = saved
+        @scope_renames, @local_names, @local_aliases, @loop_vars = saved
       end
 
       # N-016: the binding a write to the bare identifier +name+ rebinds -- the
@@ -1193,20 +1152,6 @@ module RunarCompiler
         @param_types[name]
       end
 
-      # Look up a property type by name.
-      # @return [String, nil]
-      def get_property_type(name)
-        @contract.properties.each do |p|
-          return Frontend._type_node_to_string(p.type) if p.name == name
-        end
-        nil
-      end
-
-      # @return [Boolean]
-      def local_byte_var?(name)
-        @local_byte_vars.include?(name)
-      end
-
       # Create a sub-context for nested blocks (if/else, loops).
       #
       # The counter continues from the parent. Local names and param names
@@ -1225,7 +1170,6 @@ module RunarCompiler
         # value, so a rename made inside it ends with it.
         sub.instance_variable_set(:@scope_renames, @scope_renames.dup)
         sub.instance_variable_set(:@loop_vars, @loop_vars.dup)
-        sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
         # Deep-copy the inlined-param alias stack. +_inline_private_method_call+
         # pushes the caller's argument refs onto the CURRENT context before
         # lowering the private body; without this, an if arm / loop body /
@@ -1426,19 +1370,13 @@ module RunarCompiler
           left_ref = lower_expr_to_ref(expr.left)
           right_ref = lower_expr_to_ref(expr.right)
 
+          # D12 FE-F1: `+` (OP_CAT / OP_ADD), `===` / `!==` (OP_EQUAL /
+          # OP_NUMEQUAL) and `& | ^` (byte string vs number) are lowered from
+          # the operand family the TYPE CHECKER resolved and recorded on the
+          # node -- never from a guess.
           result_type = nil
-          if %w[=== !==].include?(expr.op) &&
-             (Frontend._is_byte_typed_expr(expr.left, self) || Frontend._is_byte_typed_expr(expr.right, self))
-            result_type = "bytes"
-          end
-          # For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
-          if expr.op == "+" &&
-             (Frontend._is_byte_typed_expr(expr.left, self) || Frontend._is_byte_typed_expr(expr.right, self))
-            result_type = "bytes"
-          end
-          # For bitwise &, |, ^, annotate byte-typed operands.
-          if %w[& | ^].include?(expr.op) &&
-             (Frontend._is_byte_typed_expr(expr.left, self) || Frontend._is_byte_typed_expr(expr.right, self))
+          if TYPED_BINARY_OPS.include?(expr.op) &&
+             Frontend._require_operand_type(expr.op, expr.operand_type) == "bytes"
             result_type = "bytes"
           end
 
@@ -1454,8 +1392,8 @@ module RunarCompiler
             v.op = expr.op
             v.operand = operand_ref
           end
-          # For ~, annotate byte-typed operands so downstream passes know the result is bytes.
-          if expr.op == "~" && Frontend._is_byte_typed_expr(expr.operand, self)
+          # D12 FE-F1: see the binary case.
+          if expr.op == "~" && Frontend._require_operand_type("~", expr.operand_type) == "bytes"
             unary_val.result_type = "bytes"
           end
           emit(unary_val)
@@ -1484,14 +1422,10 @@ module RunarCompiler
       # @param stmt [VariableDeclStmt]
       def _lower_variable_decl(stmt)
         value_ref = lower_expr_to_ref(stmt.init)
-        # Byte-typedness of the initialiser is judged before the new name is in
-        # scope (the initialiser reads the OUTER binding of a shadowed name).
-        is_bytes = Frontend._is_byte_typed_expr(stmt.init, self)
         # N-046 / N-047: a declaration reusing an enclosing binding's name is
         # alpha-renamed (see declare_local).
         binding_name = declare_local(stmt.name)
         add_local(binding_name)
-        @local_byte_vars.add(binding_name) if is_bytes
         emit_named(binding_name, Frontend._make_load_const_string("@ref:#{value_ref}"))
       end
 

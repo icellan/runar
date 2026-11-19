@@ -701,7 +701,8 @@ public final class ZigParser {
                 for (ParamNode p : m.params()) paramScope.add(p.name());
                 List<Statement> rewritten = rewriteStmts(m.body(), methodNames, paramScope);
                 rewrittenMethods.add(new MethodNode(
-                    m.name(), m.params(), rewritten, m.visibility(), m.sourceLocation(), m.sighashType()));
+                    m.name(), m.params(), rewritten, m.visibility(), m.sourceLocation(), m.sighashType(),
+                    m.bindingVariant(), m.returnType()));
             }
             methods = rewrittenMethods;
 
@@ -781,10 +782,11 @@ public final class ZigParser {
                 errors.add(file + ":" + l.line() + ":" + l.column() + ": " + LexDiag.staticMethod(name));
             }
 
-            // Return type, parsed and discarded. N-093: `runar.Sighash("FLAGS")`
+            // Return type (kept, D12 FE-F4). N-093: `runar.Sighash("FLAGS")`
             // in its place is the native spelling of the `@sighash` directive
             // (natively it is `void`).
             List<String> sighashSpecs = new ArrayList<>();
+            TypeNode declaredReturn = null;
             if (current().kind == Kind.IDENT && "runar".equals(current().value)
                     && peekAhead(1).kind == Kind.DOT
                     && peekAhead(2).kind == Kind.IDENT && "Sighash".equals(peekAhead(2).value)) {
@@ -806,11 +808,12 @@ public final class ZigParser {
                 expect(Kind.RPAREN, ")");
                 sighashSpecs.add(count == 1 && arg.kind == Kind.STRING ? arg.value : null);
             } else if (current().kind != Kind.LBRACE) {
-                // The AST keeps no return type; N-331 refuses an unknown name.
-                // `init` returns the contract struct itself, which is not a
-                // type to check.
+                // N-331 refuses an unknown name. `init` returns the contract
+                // struct itself, which is not a type to check. D12 FE-F4: the
+                // declared type is kept on the method for the type checker.
                 ParsedType returnType = parseType();
                 if (!"init".equals(name)) {
+                    declaredReturn = MethodNode.declaredReturnType(returnType.type);
                     String unknownReturn = LexDiag.unknownReturnType(returnType.type, name, isPublic);
                     if (unknownReturn != null) {
                         errors.add(file + ":" + l.line() + ":" + l.column() + ": " + unknownReturn);
@@ -842,7 +845,9 @@ public final class ZigParser {
                     name, plr.params, body,
                     isPublic ? Visibility.PUBLIC : Visibility.PRIVATE,
                     l,
-                    sighash == null || sighash.isError() ? null : sighash.value());
+                    sighash == null || sighash.isError() ? null : sighash.value(),
+                    null,
+                    declaredReturn);
             } finally {
                 selfNames = prevSelf;
                 statefulContextNames = prevCtx;

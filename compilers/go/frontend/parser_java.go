@@ -1129,6 +1129,7 @@ func (p *javaParser) parseMethod(name string, returnType TypeNode, annotations m
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		ReturnType:     DeclaredReturnType(returnType), // D12 FE-F4
 		SourceLocation: loc,
 	}
 }

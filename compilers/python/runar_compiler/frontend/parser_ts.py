@@ -6,6 +6,8 @@ Hand-written tokenizer + recursive descent parser for TypeScript-like syntax.
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 import re
 
 from runar_compiler.frontend.ast_nodes import (
@@ -897,11 +899,14 @@ class _TsParser:
     ) -> MethodNode:
         params = self._parse_params()
 
-        # Optional return type annotation. The AST keeps none; N-331 refuses an
-        # unknown name.
+        # Optional return type annotation. N-331 refuses an unknown name; D12
+        # FE-F4 keeps the declared type on the method for the type checker.
+        declared_ret = None
         if self.check(TOK_COLON):
             self.advance()
-            reject_unknown_return_type(self.errors, self._parse_type(), name, location, visibility == "public")
+            ret_type = self._parse_type()
+            reject_unknown_return_type(self.errors, ret_type, name, location, visibility == "public")
+            declared_ret = declared_return_type(ret_type)
 
         body = self._parse_block()
 
@@ -918,6 +923,7 @@ class _TsParser:
             visibility=visibility,
             sighash_type=sighash_type,
             binding_variant=binding_variant,
+            return_type=declared_ret,
             source_location=location,
         )
 

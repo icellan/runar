@@ -1024,12 +1024,15 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 	}
 
 	// Optional return type: -> Type
+	var returnType TypeNode
 	if p.current().kind == rustTokArrow {
 		p.advance()
-		// The AST keeps no return type; N-331 refuses an unknown name.
-		if d := UnknownReturnTypeDiagnostic(p.parseRustType(), rawName, loc, visibility == "public"); d != nil {
+		// N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+		rt := p.parseRustType()
+		if d := UnknownReturnTypeDiagnostic(rt, rawName, loc, visibility == "public"); d != nil {
 			p.errors = append(p.errors, *d)
 		}
+		returnType = DeclaredReturnType(rt)
 	}
 
 	p.expect(rustTokLBrace)
@@ -1046,6 +1049,7 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		ReturnType:     returnType,
 		SourceLocation: loc,
 	}
 }

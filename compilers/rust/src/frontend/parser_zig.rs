@@ -49,7 +49,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{char_index_positions, lex_error_at_index, static_method_message, unexpected_struct_body_token_message, unknown_return_type_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA, ZIG_STRUCT_INIT_DOT};
+use super::diagnostic::{char_index_positions, lex_error_at_index, static_method_message, unexpected_struct_body_token_message, declared_return_type, unknown_return_type_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA, ZIG_STRUCT_INIT_DOT};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -1061,6 +1061,7 @@ impl<'a> ZigParser<'a> {
         // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
         // native spelling of the `@sighash` directive (natively it is `void`).
         let mut sighash_specs: Vec<Option<String>> = Vec::new();
+        let mut declared_return: Option<TypeNode> = None;
         if matches!(self.peek(), Token::Ident(n) if n == "runar")
             && *self.peek_at(1) == Token::Dot
             && matches!(self.peek_at(2), Token::Ident(n) if n == "Sighash")
@@ -1092,14 +1093,15 @@ impl<'a> ZigParser<'a> {
                 _ => None,
             });
         } else if *self.peek() != Token::LBrace {
-            // The AST keeps no return type (everything before '{'); N-331
-            // refuses an unknown name. `init` returns the contract struct
-            // itself, which is not a type to check.
+            // N-331 refuses an unknown name (everything before '{'). `init`
+            // returns the contract struct itself, which is not a type to
+            // check. D12 FE-F4: the declared type is kept on the method.
             let (ret_type, _) = self.parse_type();
             if method_name != "init" {
                 if let Some(msg) = unknown_return_type_message(&ret_type, &method_name, is_public) {
                     self.errors.push(msg);
                 }
+                declared_return = declared_return_type(&ret_type);
             }
         }
 
@@ -1125,6 +1127,7 @@ impl<'a> ZigParser<'a> {
             self.self_names = prev_self_names;
             self.stateful_context_names = prev_stateful_ctx;
             return Some(MethodNode {
+                return_type: None,
                 name: "constructor".to_string(),
                 params,
                 body,
@@ -1149,6 +1152,7 @@ impl<'a> ZigParser<'a> {
         };
 
         Some(MethodNode {
+            return_type: declared_return,
             name: method_name,
             params,
             body,
@@ -1467,6 +1471,7 @@ impl<'a> ZigParser<'a> {
             return Some(Statement::Assignment {
                 target: target.clone(),
                 value: Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: bin_op,
                     left: Box::new(target),
                     right: Box::new(rhs),
@@ -1590,6 +1595,7 @@ impl<'a> ZigParser<'a> {
                 update = Statement::Assignment {
                     target: update_target.clone(),
                     value: Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: bin_op,
                         left: Box::new(update_target),
                         right: Box::new(rhs),
@@ -1700,6 +1706,7 @@ impl<'a> ZigParser<'a> {
             let right = self.parse_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1718,6 +1725,7 @@ impl<'a> ZigParser<'a> {
             let right = self.parse_bit_or();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1736,6 +1744,7 @@ impl<'a> ZigParser<'a> {
             let right = self.parse_bit_xor();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1754,6 +1763,7 @@ impl<'a> ZigParser<'a> {
             let right = self.parse_bit_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1772,6 +1782,7 @@ impl<'a> ZigParser<'a> {
             let right = self.parse_equality();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1793,6 +1804,7 @@ impl<'a> ZigParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1805,6 +1817,7 @@ impl<'a> ZigParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1828,6 +1841,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1839,6 +1853,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1850,6 +1865,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1861,6 +1877,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1884,6 +1901,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1895,6 +1913,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1918,6 +1937,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1929,6 +1949,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1952,6 +1973,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1963,6 +1985,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1974,6 +1997,7 @@ impl<'a> ZigParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1993,6 +2017,7 @@ impl<'a> ZigParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2002,6 +2027,7 @@ impl<'a> ZigParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2011,6 +2037,7 @@ impl<'a> ZigParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2161,6 +2188,7 @@ impl<'a> ZigParser<'a> {
                         let right = self.parse_expression();
                         self.expect(&Token::RParen);
                         return Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::StrictEq,
                             left: Box::new(left),
                             right: Box::new(right),
@@ -2238,6 +2266,7 @@ impl<'a> ZigParser<'a> {
                     _ => unreachable!(),
                 };
                 Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op,
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2505,6 +2534,7 @@ fn build_constructor(properties: &[PropertyNode], loc: SourceLocation) -> Method
     }
 
     MethodNode {
+        return_type: None,
         name: "constructor".to_string(),
         params,
         body,

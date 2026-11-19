@@ -575,6 +575,28 @@ export class Neg extends SmartContract {
     ),
   },
   {
+    // D12 FE-F1
+    target: 'Cannot resolve the operand types of',
+    name: 'equality-operand-type-unresolved',
+    source: stateless(
+      `    const b: ByteString = toByteString('aa');
+    assert(b[0n] === b);`,
+      { imports: 'SmartContract, assert, ByteString, toByteString' },
+    ),
+  },
+  {
+    // D12 FE-F4
+    target: 'returns values of incompatible types',
+    name: 'private-undeclared-return-types-do-not-unify',
+    source: stateless(`    assert(this.h(x > 0n));`, { extra: `  private h(c: boolean) {\n    if (c) { return 1n; }\n    return true;\n  }\n` }),
+  },
+  {
+    // D12 FE-F4
+    target: 'which is not assignable to its declared return type',
+    name: 'private-return-type-mismatch',
+    source: stateless(`    assert(this.f(x));`, { extra: `  private f(v: bigint): boolean {\n    return v;\n  }\n` }),
+  },
+  {
     target: 'Cannot compare',
     name: 'compare-mixed-types',
     source: stateless(

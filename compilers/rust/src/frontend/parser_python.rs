@@ -42,7 +42,7 @@ use super::ast::{
 };
 use super::diagnostic::{
     invalid_escape_sequence_message, lex_error, static_method_message,
-    unexpected_class_body_token_message, unexpected_token_after_class_message, unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
+    unexpected_class_body_token_message, unexpected_token_after_class_message, declared_return_type, unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
     UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
@@ -1500,14 +1500,16 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::RParen);
 
         // Optional return type annotation: -> Type
+        let mut return_type = None;
         if self.match_tok(&Token::Arrow) {
-            // The AST keeps no return type; N-331 refuses an unknown name. `None`
-            // is Python's spelling of "returns nothing".
+            // N-331 refuses an unknown name. `None` is Python's spelling of
+            // "returns nothing". D12 FE-F4: the declared type is kept.
             let ret_type = self.parse_type();
             if !matches!(&ret_type, TypeNode::Custom(n) if n == "None") {
                 if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name, decorators.iter().any(|d| d == "public")) {
                     self.errors.push(Diagnostic::error(msg, Some(def_loc.clone())));
                 }
+                return_type = declared_return_type(&ret_type);
             }
         }
 
@@ -1526,6 +1528,7 @@ impl<'a> PyParser<'a> {
                 self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(def_loc.clone())));
             }
             return MethodNode {
+                return_type: None,
                 name: "constructor".to_string(),
                 params,
                 body,
@@ -1549,6 +1552,7 @@ impl<'a> PyParser<'a> {
         };
 
         MethodNode {
+            return_type,
             name: method_name,
             params,
             body,
@@ -1875,6 +1879,7 @@ impl<'a> PyParser<'a> {
         // 5, 4, 3, 2, so the descending guard is `i > stop`, exactly as `<` is
         // for ascending.
         let condition = Expression::BinaryExpr {
+            operand_type: Default::default(),
             op: if descending { BinaryOp::Gt } else { BinaryOp::Lt },
             left: Box::new(Expression::Identifier {
                 name: var_name.clone(),
@@ -1977,6 +1982,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Add,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -1992,6 +1998,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Sub,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2007,6 +2014,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Mul,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2022,6 +2030,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Div,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2037,6 +2046,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Mod,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2116,6 +2126,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Add,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2131,6 +2142,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Sub,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2146,6 +2158,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Mul,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2161,6 +2174,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Div,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2176,6 +2190,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let rhs = self.parse_expression();
             let value = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Mod,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
@@ -2233,6 +2248,7 @@ impl<'a> PyParser<'a> {
             let right = self.parse_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2251,6 +2267,7 @@ impl<'a> PyParser<'a> {
             let right = self.parse_not();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2266,6 +2283,7 @@ impl<'a> PyParser<'a> {
             self.advance();
             let operand = self.nested(zero(), |p| p.parse_not());
             Expression::UnaryExpr {
+                operand_type: Default::default(),
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
                 source_location: Some(op_loc.clone()),
@@ -2284,6 +2302,7 @@ impl<'a> PyParser<'a> {
             let right = self.parse_bit_xor();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2302,6 +2321,7 @@ impl<'a> PyParser<'a> {
             let right = self.parse_bit_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2320,6 +2340,7 @@ impl<'a> PyParser<'a> {
             let right = self.parse_equality();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2341,6 +2362,7 @@ impl<'a> PyParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2353,6 +2375,7 @@ impl<'a> PyParser<'a> {
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2376,6 +2399,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2387,6 +2411,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2398,6 +2423,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2409,6 +2435,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2432,6 +2459,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2443,6 +2471,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2466,6 +2495,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2477,6 +2507,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2500,6 +2531,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2512,6 +2544,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2523,6 +2556,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2534,6 +2568,7 @@ impl<'a> PyParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2553,6 +2588,7 @@ impl<'a> PyParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2562,6 +2598,7 @@ impl<'a> PyParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2571,6 +2608,7 @@ impl<'a> PyParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2843,6 +2881,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
     }
 
     MethodNode {
+        return_type: None,
         name: "constructor".to_string(),
         params,
         body,

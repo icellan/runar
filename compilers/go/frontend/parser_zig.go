@@ -898,6 +898,7 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 	// Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
 	// native spelling of the `@sighash` directive (natively it is `void`).
 	var sighashSpecs []*string
+	var declaredReturn TypeNode
 	if p.checkIdent("runar") && p.peekAt(1).kind == zigTokDot &&
 		p.peekAt(2).kind == zigTokIdent && p.peekAt(2).value == "Sighash" {
 		p.advance()
@@ -936,6 +937,8 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 			if d := UnknownReturnTypeDiagnostic(rt.typeNode, name, loc, isPublic); d != nil {
 				p.errors = append(p.errors, *d)
 			}
+			// D12 FE-F4: the declared type is kept on the method.
+			declaredReturn = DeclaredReturnType(rt.typeNode)
 		}
 	}
 
@@ -984,6 +987,7 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 		Body:           body,
 		Visibility:     visibility,
 		SighashType:    sighashType,
+		ReturnType:     declaredReturn,
 		SourceLocation: loc,
 	}
 }

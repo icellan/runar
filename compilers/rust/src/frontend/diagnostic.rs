@@ -164,6 +164,17 @@ pub fn unknown_return_type_message(t: &TypeNode, method: &str, is_public: bool) 
     }
 }
 
+/// D12 FE-F4: the declared return type a method node carries, or `None` when
+/// the declaration names no usable Rúnar type (an unknown name is refused by
+/// `unknown_return_type_message`; the `unknown` placeholder means "not
+/// given").
+pub fn declared_return_type(t: &TypeNode) -> Option<TypeNode> {
+    match t {
+        TypeNode::Custom(_) => None,
+        _ => Some(t.clone()),
+    }
+}
+
 /// N-332's refusal of a PUBLIC method that declares a non-void return type (the
 /// TS reference's `publicReturnTypeMessage`).
 pub fn public_return_type_message(method: &str) -> String {

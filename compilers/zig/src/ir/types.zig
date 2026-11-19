@@ -180,6 +180,10 @@ pub const PropertyNode = struct {
     fixed_array_element: RunarType = .unknown,
     /// Nested element length for `FixedArray<FixedArray<T, M>, N>`. Zero for flat arrays.
     fixed_array_nested_length: u32 = 0,
+    /// D12 FE-F1: the leaf type `T` of a nested `FixedArray<FixedArray<T, M>, N>`,
+    /// so the type checker can type `this.grid[a][b]` as the TS reference does.
+    /// `.unknown` for flat arrays and for deeper nesting.
+    fixed_array_leaf: RunarType = .unknown,
     /// The type name as the author spelled it (`typeNodeName` of the parsed
     /// `TypeNode`). Diagnostics only — no pass branches on it. Populated by
     /// every surface parser; empty on synthesized properties (the FixedArray
@@ -246,7 +250,44 @@ pub const MethodNode = struct {
     /// (spendable only when the spending tx has nVersion > 1). False = the
     /// default lowS.
     binding_variant_all: bool = false,
+    /// D12 FE-F4: the return type the source declares, when its surface
+    /// syntax can spell one and it names a Rúnar type (Ruby cannot; TS may
+    /// omit it; an unknown name is refused by the parser). The type checker
+    /// enforces it on every `return` and gives it to every call. Null =
+    /// inferred from the body by the type checker, with the full environment.
+    return_type: ?RunarType = null,
+    /// D12 FE-F4: the declared return type as the TS reference names it, when
+    /// `RunarType` alone cannot say it (`bigint[]` for `FixedArray<bigint, N>`).
+    /// Empty otherwise; diagnostics only.
+    return_type_name: []const u8 = "",
 };
+
+/// D12 FE-F4: the declared return type a method keeps, or null when the
+/// declaration names no usable Rúnar type (an unknown name, refused by the
+/// parser's N-331 check, or the `unknown` missing-annotation placeholder).
+/// A FixedArray return type is not kept either: this tier's RunarType drops
+/// the element type and length, so it cannot be enforced faithfully.
+pub fn declaredReturnType(t: RunarType) ?RunarType {
+    return if (t == .unknown or t == .fixed_array) null else t;
+}
+
+/// D12 FE-F4: as `declaredReturnType`, for a parser that has the TypeNode, so
+/// a FixedArray return type is kept (the TS reference types it `T[]`; see
+/// `declaredReturnTypeName` for its spelling).
+pub fn declaredReturnTypeNode(tn: TypeNode) ?RunarType {
+    if (tn == .fixed_array_type) return .fixed_array;
+    return declaredReturnType(typeNodeToRunarType(tn));
+}
+
+/// D12 FE-F4: the TS reference's name for a FixedArray declared return type
+/// (`typeNodeToTType`: the element's name + `[]`, recursively); empty for any
+/// other type, whose `RunarType` already names it.
+pub fn declaredReturnTypeName(allocator: std.mem.Allocator, tn: TypeNode) []const u8 {
+    if (tn != .fixed_array_type) return "";
+    const elem = tn.fixed_array_type.element.*;
+    const inner = if (elem == .fixed_array_type) declaredReturnTypeName(allocator, elem) else typeNodeName(elem);
+    return std.fmt.allocPrint(allocator, "{s}[]", .{inner}) catch "FixedArray";
+}
 /// `spelled_type` is the annotation as the author spelled it, set ONLY when it did not
 /// resolve to a known type (`type_info == .unknown`); empty otherwise, and when there is
 /// no annotation. Only a diagnostic reads it: N-325.
@@ -422,11 +463,20 @@ pub const PropertyAccess = struct { object: []const u8, property: []const u8 };
 /// and an operand type error on them prints no location. `loc` is where the
 /// whole node starts, a leading `(` included; only `==` / `!=` nodes carry it
 /// (N-505), for the `===` / `!==` type error.
-pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression, left_loc: ?SourceLocation = null, right_loc: ?SourceLocation = null, loc: ?SourceLocation = null };
+///
+/// `operand_type` (D12 FE-F1): the operand family the TYPE CHECKER resolved
+/// for an operator whose lowering depends on it (`+`, `===`, `!==`, `& | ^`).
+/// Written by typecheck (and by expand_fixed_arrays for the nodes it
+/// synthesises); ANF lowering reads it and refuses a node that carries none.
+/// Never set by a parser.
+pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression, left_loc: ?SourceLocation = null, right_loc: ?SourceLocation = null, loc: ?SourceLocation = null, operand_type: ?OperandType = null };
+/// D12 FE-F1: the lowering family of a typed operator's operands.
+pub const OperandType = enum { bytes, numeric };
 /// `location` is the operator token (N-472); every surface parser sets it for
 /// operator-syntax unaries (N-492), as the TS reference locates a unary node
 /// there. Synthesized unaries (Java `.negate()` / `.not()`) carry null.
-pub const UnaryOp = struct { op: UnaryOperator, operand: Expression, location: ?SourceLocation = null };
+/// `operand_type`: as on `BinaryOp`, for `~` only (D12 FE-F1).
+pub const UnaryOp = struct { op: UnaryOperator, operand: Expression, location: ?SourceLocation = null, operand_type: ?OperandType = null };
 pub const CallExpr = struct {
     callee: []const u8,
     args: []Expression,

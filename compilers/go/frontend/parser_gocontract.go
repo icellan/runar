@@ -520,7 +520,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		}
 
 		params := p.extractParams(funcDecl.Type.Params)
-		p.checkReturnTypes(funcDecl, methodName, visibility == "public")
+		returnType := p.checkReturnTypes(funcDecl, methodName, visibility == "public")
 		body := p.extractStatements(funcDecl.Body)
 
 		pos := p.fset.Position(funcDecl.Pos())
@@ -530,6 +530,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			Body:           body,
 			Visibility:     visibility,
 			SighashType:    p.goSighashFor(funcDecl, methodName, visibility == "public", p.locAt(pos)),
+			ReturnType:     returnType,
 			SourceLocation: p.locAt(pos),
 		})
 	}
@@ -559,7 +560,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		p.receiverName = "" // no receiver for standalone functions
 
 		params := p.extractParams(funcDecl.Type.Params)
-		p.checkReturnTypes(funcDecl, methodName, false)
+		returnType := p.checkReturnTypes(funcDecl, methodName, false)
 		body := p.extractStatements(funcDecl.Body)
 
 		pos := p.fset.Position(funcDecl.Pos())
@@ -569,6 +570,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			Body:           body,
 			Visibility:     "private",
 			SighashType:    p.goSighashFor(funcDecl, methodName, false, p.locAt(pos)),
+			ReturnType:     returnType,
 			SourceLocation: p.locAt(pos),
 		})
 	}
@@ -728,13 +730,16 @@ func (p *goContractParser) extractParams(fieldList *ast.FieldList) []ParamNode {
 	return params
 }
 
-// checkReturnTypes (N-331): the AST keeps no return type, so a result whose
-// type names something that is not a Rúnar type is refused here.
-func (p *goContractParser) checkReturnTypes(fd *ast.FuncDecl, methodName string, isPublic bool) {
+// checkReturnTypes (N-331): a result whose type names something that is not
+// a Rúnar type is refused here. D12 FE-F4: it returns the declared type of a
+// single (unnamed or singly-named) result, which the method keeps for the
+// type checker; nil otherwise.
+func (p *goContractParser) checkReturnTypes(fd *ast.FuncDecl, methodName string, isPublic bool) TypeNode {
 	if fd.Type.Results == nil {
-		return
+		return nil
 	}
 	loc := p.locAt(p.fset.Position(fd.Pos()))
+	var declared []TypeNode
 	for _, field := range fd.Type.Results.List {
 		// Go's own `bool` is the documented spelling of `boolean` (docs/formats/go.md)
 		// and every other tier's .runar.go parser accepts it as a result type.
@@ -744,12 +749,19 @@ func (p *goContractParser) checkReturnTypes(fd *ast.FuncDecl, methodName string,
 				d := Diagnostic{Message: PublicReturnTypeMsg(methodName), Severity: SeverityError, Loc: &loc}
 				p.errors = append(p.errors, d)
 			}
+			declared = append(declared, PrimitiveType{Name: "boolean"})
 			continue
 		}
-		if d := UnknownReturnTypeDiagnostic(p.resolveType(field.Type), methodName, loc, isPublic); d != nil {
+		rt := p.resolveType(field.Type)
+		if d := UnknownReturnTypeDiagnostic(rt, methodName, loc, isPublic); d != nil {
 			p.errors = append(p.errors, *d)
 		}
+		declared = append(declared, rt)
 	}
+	if len(fd.Type.Results.List) != 1 || len(fd.Type.Results.List[0].Names) > 1 || len(declared) != 1 {
+		return nil
+	}
+	return DeclaredReturnType(declared[0])
 }
 
 func (p *goContractParser) extractStatements(block *ast.BlockStmt) []Statement {

@@ -639,6 +639,8 @@ class _ExpandContext:
                     op=op,
                     left=_clone_expr(target),
                     right=BigIntLiteral(value=1),
+                    # D12 FE-F1: typecheck already required a bigint operand for ++/--.
+                    operand_type="numeric",
                 ),
                 source_location=stmt.source_location,
             )
@@ -883,6 +885,7 @@ class _ExpandContext:
                 op="===",
                 left=_clone_expr(index_ref),
                 right=BigIntLiteral(value=i),
+                operand_type="numeric",  # D12 FE-F1: index vs a bigint literal
             )
             assign = AssignmentStmt(
                 target=_clone_expr(target),
@@ -921,6 +924,7 @@ class _ExpandContext:
                 op="===",
                 left=_clone_expr(index_ref),
                 right=BigIntLiteral(value=i),
+                operand_type="numeric",  # D12 FE-F1: index vs a bigint literal
             )
             chain = TernaryExpr(
                 condition=cond,
@@ -1016,6 +1020,7 @@ class _ExpandContext:
                 op="===",
                 left=_clone_expr(index_ref),
                 right=BigIntLiteral(value=i),
+                operand_type="numeric",  # D12 FE-F1: index vs a bigint literal
             )
             branch_assign = AssignmentStmt(
                 target=PropertyAccessExpr(property=slot),

@@ -128,6 +128,9 @@ pub const LowerError = error{
     /// hash. `passes/validate.zig` refuses it first; this is the backstop for
     /// callers that lower without validating.
     OutputIntrinsicInTernaryArm,
+    /// D12 FE-F1: a `+` / `===` / `!==` / `& | ^` / `~` node carries no
+    /// operand family from the type checker (see `requireOperandType`).
+    UntypedOperator,
 };
 
 /// Name set used for the "what does the code after this statement still read"
@@ -169,6 +172,17 @@ pub fn lowerToANFWithDiagnostic(
     contract: ContractNode,
     diag: ?*LowerDiagnostic,
 ) LowerError!ANFProgram {
+    // D12 FE-F1: operator lowering reads the operand family typecheck records
+    // on the AST. `compileSource` always type-checks first; a caller handing
+    // this public entry point a contract that never went through the type
+    // checker gets it run here (its diagnostics are the caller's business), so
+    // the types still come from the checker and never from a guess. A node the
+    // checker could not type keeps no annotation and is refused below.
+    if (hasUntypedOperator(contract)) {
+        if (typecheck.typeCheck(allocator, contract)) |tc| {
+            tc.deinit(allocator);
+        } else |_| {}
+    }
     const properties = try lowerPropertiesWithDiagnostic(allocator, contract, diag);
     const methods = try lowerMethods(allocator, contract, diag);
 
@@ -202,97 +216,73 @@ pub fn lowerToANFWithDiagnostic(
 // Byte-type detection
 // ============================================================================
 
-/// Does a value of this type sit on the stack as a BYTE STRING rather than as
-/// a script NUMBER?
+/// D12 FE-F1: the operand family typecheck recorded on an operator node.
 ///
-/// N-076: there is deliberately no switch prong list here. `typecheck.zig`'s
-/// `isByteFamily` is the authority. The second, hand-maintained copy this
-/// replaces carried `.rabin_sig` and `.rabin_pub_key`, which typecheck files
-/// under `isBigintFamily` -- so `===` on a Rabin value emitted OP_EQUAL and,
-/// far worse, `+` on one emitted OP_CAT where the source said addition.
-///
-/// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
-/// with OP_ADD.
-fn isByteType(t: RunarType) bool {
-    return typecheck.isByteFamily(t);
+/// There is deliberately no fallback. The previous heuristic
+/// (`isByteTypedExpr`) defaulted to numeric whenever it could not see a byte
+/// type -- a ternary, a helper result, `this.arr[i]`, a bitwise result, or a
+/// local built from one -- and compiled byte-string `+` to OP_ADD and `===`
+/// to OP_NUMEQUAL. A node without the annotation was never type-checked, so
+/// it is refused.
+fn requireOperandType(ctx: *LowerCtx, op: []const u8, t: ?types.OperandType) LowerError!types.OperandType {
+    if (t) |v| return v;
+    ctx.setDiagnostic(
+        "ANF lowering: operator '{s}' carries no operand type from the type checker; " ++
+            "run typeCheck() on the contract before lowerToANF() (refusing to guess byte string vs number)",
+        .{op},
+    );
+    return LowerError.UntypedOperator;
 }
 
-/// Does the builtin `name` return a byte-typed value?
-///
-/// N-347: read off the type checker's return table (`builtinReturnsBytes`),
-/// not a second hand-written list. Two such lists lived here and drifted:
-/// N-054 (a name-prefix test swept the six numeric extractors in) and
-/// N-345 / N-347 (byte-returning builtins left out -- merkleRootSha256,
-/// merkleRootHash256, bn254G1Add, bn254G1Negate, bn254G1ScalarMul -- so `===`
-/// on two of their results compiled to OP_NUMEQUAL). Do not reintroduce one.
-fn isByteReturningFunction(name: []const u8) bool {
-    return typecheck.builtinReturnsBytes(name);
+/// Does any operator whose lowering needs an operand type lack one?
+pub fn hasUntypedOperator(contract: ContractNode) bool {
+    for (contract.properties) |p| if (p.initializer) |e| if (exprHasUntyped(e)) return true;
+    for (contract.constructor.super_args) |e| if (exprHasUntyped(e)) return true;
+    for (contract.constructor.assignments) |a| if (exprHasUntyped(a.value)) return true;
+    if (stmtsHaveUntyped(contract.constructor.body)) return true;
+    for (contract.methods) |m| if (stmtsHaveUntyped(m.body)) return true;
+    return false;
 }
 
-/// Check if an expression is known to produce byte-typed values.
-/// N-046: the `local_byte_vars` key of a byte-typed local. A renamed
-/// (shadowing) declaration is keyed by its binding, so it cannot answer for the
-/// outer name; every other local keeps its source-name key exactly as before
-/// (the map also carries the method's parameters by source name).
-fn byteVarKey(ctx: *const LowerCtx, source_name: []const u8, binding_name: []const u8) []const u8 {
-    if (ctx.scope_renames.get(source_name)) |renamed| {
-        if (std.mem.eql(u8, renamed, binding_name)) return binding_name;
+fn stmtsHaveUntyped(stmts: []const Statement) bool {
+    for (stmts) |st| {
+        const hit = switch (st) {
+            .const_decl => |d| exprHasUntyped(d.value),
+            .let_decl => |d| if (d.value) |v| exprHasUntyped(v) else false,
+            .assign => |a| exprHasUntyped(a.value) or
+                (if (a.index_target) |t| exprHasUntyped(t.object) or exprHasUntyped(t.index) else false),
+            .if_stmt => |i| exprHasUntyped(i.condition) or stmtsHaveUntyped(i.then_body) or
+                (if (i.else_body) |e| stmtsHaveUntyped(e) else false),
+            .for_stmt => |f| stmtsHaveUntyped(f.body) or
+                (if (f.update) |u| stmtsHaveUntyped(&[_]Statement{u.*}) else false),
+            .assert_stmt => |a| exprHasUntyped(a.condition),
+            .expr_stmt => |e| exprHasUntyped(e.expr),
+            .return_stmt => |r| if (r.value) |v| exprHasUntyped(v) else false,
+        };
+        if (hit) return true;
     }
-    return source_name;
+    return false;
 }
 
-fn isByteTypedExpr(expr: Expression, ctx: *const LowerCtx) bool {
-    switch (expr) {
-        .literal_bytes => return true,
-        .identifier => |name| {
-            // N-046 / N-047: a renamed (shadowing) declaration is judged by its
-            // own binding, never by the parameter or property it shadows.
-            if (ctx.scope_renames.get(name)) |renamed| {
-                return ctx.local_byte_vars.get(renamed) != null;
-            }
-            // Check property types
-            for (ctx.contract.properties) |p| {
-                if (std.mem.eql(u8, p.name, name) and isByteType(p.type_info)) return true;
-            }
-            // Check method-scoped byte-typed names. `local_byte_vars` is
-            // populated once per method/constructor (in `lowerMethods` /
-            // `lowerStatefulPublicMethod`) with the CURRENT method's params
-            // (and auto-injected continuation params) plus byte-typed locals,
-            // and is shared into if/else/loop sub-contexts via `subContext`.
-            // Restricting the param-type lookup to this map (instead of walking
-            // ALL methods' params) fixes issue #34: a param name shared across
-            // methods (e.g. one method's `x` colliding with another method's
-            // `x: ByteString`) no longer poisons byte-type analysis, so
-            // `1n + x` emits OP_ADD instead of OP_CAT. Mirrors the TS reference
-            // `getParamType` reading only `methodParamTypes`
-            // (packages/runar-compiler/src/passes/04-anf-lower.ts).
-            if (ctx.local_byte_vars.get(name) != null) return true;
-            return false;
-        },
-        .property_access => |pa| {
-            for (ctx.contract.properties) |p| {
-                if (std.mem.eql(u8, p.name, pa.property) and isByteType(p.type_info)) return true;
-            }
-            return false;
-        },
-        .call => |c| {
-            // Expression-form asm<ByteString>({...}) yields a byte value.
-            if (std.mem.eql(u8, c.callee, "asm")) {
-                return std.mem.eql(u8, c.asm_return_type, "ByteString");
-            }
-            if (isByteReturningFunction(c.callee)) return true;
-            return false;
-        },
-        .method_call => |mc| {
-            if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self")) {
-                for (ctx.contract.properties) |p| {
-                    if (std.mem.eql(u8, p.name, mc.method) and isByteType(p.type_info)) return true;
-                }
-            }
-            return false;
-        },
-        else => return false,
-    }
+fn exprHasUntyped(e: Expression) bool {
+    return switch (e) {
+        .binary_op => |b| (typecheck.isTypedBinaryOp(b.op) and b.operand_type == null) or
+            exprHasUntyped(b.left) or exprHasUntyped(b.right),
+        .unary_op => |u| (u.op == .bitnot and u.operand_type == null) or exprHasUntyped(u.operand),
+        .call => |c| argsHaveUntyped(c.args),
+        .method_call => |m| argsHaveUntyped(m.args),
+        .ternary => |t| exprHasUntyped(t.condition) or exprHasUntyped(t.then_expr) or exprHasUntyped(t.else_expr),
+        .index_access => |i| exprHasUntyped(i.object) or exprHasUntyped(i.index),
+        .increment => |i| exprHasUntyped(i.operand),
+        .decrement => |d| exprHasUntyped(d.operand),
+        .array_literal => |elems| argsHaveUntyped(elems),
+        else => false,
+    };
+}
+
+fn argsHaveUntyped(args: []const Expression) bool {
+    for (args) |a| if (exprHasUntyped(a)) return true;
+    return false;
 }
 
 // ============================================================================
@@ -501,9 +491,6 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
         var ctor_ctx = LowerCtx.init(allocator, contract);
         ctor_ctx.diagnostic = diag;
         defer ctor_ctx.deinit();
-        for (contract.constructor.params) |param| {
-            if (isByteType(param.type_info)) try ctor_ctx.markByteTyped(param.name);
-        }
         try lowerConstructorBody(&ctor_ctx, contract.constructor);
         const bindings = try ctor_ctx.bindings.toOwnedSlice(allocator);
         try result.append(allocator, ANFMethod{
@@ -536,7 +523,6 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             // bare handle argument apart from a same-named value parameter.
             if (isStatefulContextTypedParam(param)) continue;
             try method_ctx.addParam(param.name);
-            if (isByteType(param.type_info)) try method_ctx.markByteTyped(param.name);
             // N-016: a private helper's parameter is not part of any ABI, so
             // one that shadows a property is bound under the collision-proof
             // local name. (A PUBLIC parameter keeps its ABI name.) N-360: a
@@ -772,13 +758,11 @@ fn lowerStatefulPublicMethod(
     if (needs_change_output) {
         try ctx.addParam("_changePKH");
         try ctx.addParam("_changeAmount");
-        try ctx.markByteTyped("_changePKH");
     }
     if (needs_new_amount) {
         try ctx.addParam("_newAmount");
     }
     try ctx.addParam("txPreimage");
-    try ctx.markByteTyped("txPreimage");
 
     // Issue #123: the declared per-method sighash mode (default ALL|FORKID).
     // Drives BOTH the OP_PUSH_TX binding flag (so the derived sig re-computes
@@ -1081,7 +1065,6 @@ fn sourceLocalName(binding_name: []const u8) []const u8 {
 const InlinedScopeState = struct {
     scope_renames: std.StringHashMapUnmanaged([]const u8),
     local_names: std.StringHashMapUnmanaged(void),
-    local_byte_vars: std.StringHashMapUnmanaged(void),
     local_aliases: std.StringHashMapUnmanaged([]const u8),
     loop_vars: std.StringHashMapUnmanaged(void),
 };
@@ -1105,7 +1088,6 @@ const LowerCtx = struct {
     scope_renames: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// N-046: source names of the loop variables in scope.
     loop_vars: std.StringHashMapUnmanaged(void) = .empty,
-    local_byte_vars: std.StringHashMapUnmanaged(void),
     add_output_refs: std.ArrayListUnmanaged([]const u8),
     /// Tracks addDataOutput binding refs — data outputs are included in the
     /// continuation hash AFTER state outputs and BEFORE the change output.
@@ -1179,7 +1161,6 @@ const LowerCtx = struct {
             .local_names = .empty,
             .param_names = .empty,
             .local_aliases = .empty,
-            .local_byte_vars = .empty,
             .add_output_refs = .empty,
             .add_data_output_refs = .empty,
             .param_alias_stack = .empty,
@@ -1218,10 +1199,6 @@ const LowerCtx = struct {
 
     fn addParam(self: *LowerCtx, name: []const u8) Allocator.Error!void {
         try self.param_names.put(self.allocator, name, {});
-    }
-
-    fn markByteTyped(self: *LowerCtx, name: []const u8) Allocator.Error!void {
-        try self.local_byte_vars.put(self.allocator, name, {});
     }
 
     fn isParam(self: *const LowerCtx, name: []const u8) bool {
@@ -1400,7 +1377,6 @@ const LowerCtx = struct {
         const saved = InlinedScopeState{
             .scope_renames = self.scope_renames,
             .local_names = try self.local_names.clone(self.allocator),
-            .local_byte_vars = try self.local_byte_vars.clone(self.allocator),
             .local_aliases = try self.local_aliases.clone(self.allocator),
             .loop_vars = try self.loop_vars.clone(self.allocator),
         };
@@ -1411,12 +1387,10 @@ const LowerCtx = struct {
     fn leaveInlinedScope(self: *LowerCtx, saved: InlinedScopeState) void {
         self.scope_renames.deinit(self.allocator);
         self.local_names.deinit(self.allocator);
-        self.local_byte_vars.deinit(self.allocator);
         self.local_aliases.deinit(self.allocator);
         self.loop_vars.deinit(self.allocator);
         self.scope_renames = saved.scope_renames;
         self.local_names = saved.local_names;
-        self.local_byte_vars = saved.local_byte_vars;
         self.local_aliases = saved.local_aliases;
         self.loop_vars = saved.loop_vars;
     }
@@ -1499,11 +1473,6 @@ const LowerCtx = struct {
         while (loop_it.next()) |entry| {
             try sub.loop_vars.put(self.allocator, entry.key_ptr.*, {});
         }
-        // Copy local byte vars
-        var byte_it = self.local_byte_vars.iterator();
-        while (byte_it.next()) |entry| {
-            try sub.local_byte_vars.put(self.allocator, entry.key_ptr.*, {});
-        }
         // Deep-copy the inlined-param alias stack. `inlinePrivateMethodCall`
         // pushes the caller's argument refs onto the CURRENT context before
         // lowering the private body; without this, an `if` arm / `for` body /
@@ -1558,7 +1527,6 @@ const LowerCtx = struct {
         self.shadowing_loop_vars.deinit(self.allocator);
         self.scope_renames.deinit(self.allocator);
         self.loop_vars.deinit(self.allocator);
-        self.local_byte_vars.deinit(self.allocator);
         self.add_output_refs.deinit(self.allocator);
         self.add_data_output_refs.deinit(self.allocator);
         var alias_it = self.param_alias_stack.iterator();
@@ -1803,28 +1771,18 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
     switch (stmt) {
         .const_decl => |decl| {
             const value_ref = try lowerExprToRef(ctx, decl.value);
-            // Byte-typedness of the initialiser is judged before the new name
-            // is in scope (the initialiser reads the OUTER binding).
-            const is_bytes = isByteTypedExpr(decl.value, ctx);
             // N-046 / N-047: a declaration reusing an enclosing binding's name
             // is alpha-renamed (see `declareLocal`).
             const binding_name = try ctx.declareLocal(decl.name);
             try ctx.addLocal(binding_name);
-            if (is_bytes) {
-                try ctx.local_byte_vars.put(ctx.allocator, byteVarKey(ctx, decl.name, binding_name), {});
-            }
             try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
         },
         .let_decl => |decl| {
             if (decl.value) |val| {
                 const value_ref = try lowerExprToRef(ctx, val);
-                const is_bytes = isByteTypedExpr(val, ctx);
                 // N-046 / N-047: see `.const_decl`.
                 const binding_name = try ctx.declareLocal(decl.name);
                 try ctx.addLocal(binding_name);
-                if (is_bytes) {
-                    try ctx.local_byte_vars.put(ctx.allocator, byteVarKey(ctx, decl.name, binding_name), {});
-                }
                 try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
             } else {
                 try ctx.addLocal(try ctx.localName(decl.name));
@@ -2450,23 +2408,14 @@ fn lowerExprToRef(ctx: *LowerCtx, expr: Expression) LowerError![]const u8 {
             var result_type: ?[]const u8 = null;
             const op_str = bop.op.toTsString();
 
-            // For ===, !==, annotate byte-typed operands
-            if (bop.op == .eq or bop.op == .neq) {
-                if (isByteTypedExpr(bop.left, ctx) or isByteTypedExpr(bop.right, ctx)) {
-                    result_type = "bytes";
-                }
-            }
-            // For +, annotate byte-typed operands (OP_CAT)
-            if (bop.op == .add) {
-                if (isByteTypedExpr(bop.left, ctx) or isByteTypedExpr(bop.right, ctx)) {
-                    result_type = "bytes";
-                }
-            }
-            // For &, |, ^, annotate byte-typed operands
-            if (bop.op == .bitand or bop.op == .bitor or bop.op == .bitxor) {
-                if (isByteTypedExpr(bop.left, ctx) or isByteTypedExpr(bop.right, ctx)) {
-                    result_type = "bytes";
-                }
+            // D12 FE-F1: `+` (OP_CAT / OP_ADD), `===` / `!==` (OP_EQUAL /
+            // OP_NUMEQUAL) and `& | ^` (byte string vs number) are lowered
+            // from the operand family the TYPE CHECKER resolved and recorded
+            // on the node -- never from a guess.
+            if (typecheck.isTypedBinaryOp(bop.op) and
+                try requireOperandType(ctx, op_str, bop.operand_type) == .bytes)
+            {
+                result_type = "bytes";
             }
 
             return try ctx.emit(.{ .bin_op = .{
@@ -2479,7 +2428,8 @@ fn lowerExprToRef(ctx: *LowerCtx, expr: Expression) LowerError![]const u8 {
         .unary_op => |uop| {
             const operand_ref = try lowerExprToRef(ctx, uop.operand);
             var result_type: ?[]const u8 = null;
-            if (uop.op == .bitnot and isByteTypedExpr(uop.operand, ctx)) {
+            // D12 FE-F1: see `.binary_op`.
+            if (uop.op == .bitnot and try requireOperandType(ctx, "~", uop.operand_type) == .bytes) {
                 result_type = "bytes";
             }
             return try ctx.emit(.{ .unary_op = .{
@@ -3076,9 +3026,6 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
         const param = method.params[k.param];
         const binding_name = try ctx.declareLocal(param.name);
         try ctx.addLocal(binding_name);
-        if (isByteType(param.type_info)) {
-            try ctx.local_byte_vars.put(ctx.allocator, byteVarKey(ctx, param.name, binding_name), {});
-        }
         try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, arg_refs[k.arg])));
     }
     const start_index = ctx.bindings.items.len;
@@ -4909,6 +4856,9 @@ test "lower binary expression flattens subexpressions" {
         .op = .add,
         .left = .{ .literal_int = 1 },
         .right = .{ .literal_int = 2 },
+        // D12 FE-F1: lowerExprToRef is called directly here, bypassing the
+        // type checker, so the node carries the family typecheck would record.
+        .operand_type = .numeric,
     };
 
     const ref = try lowerExprToRef(&ctx, .{ .binary_op = bop });
@@ -5418,22 +5368,22 @@ test "extractLiteralValue handles all literal types" {
     try std.testing.expect(none_val == null);
 }
 
-test "isByteReturningFunction" {
-    try std.testing.expect(isByteReturningFunction("sha256"));
-    try std.testing.expect(isByteReturningFunction("hash160"));
-    try std.testing.expect(isByteReturningFunction("ripemd160"));
-    try std.testing.expect(isByteReturningFunction("cat"));
-    try std.testing.expect(!isByteReturningFunction("checkSig"));
-    try std.testing.expect(!isByteReturningFunction("add"));
+test "builtinReturnsBytes (formerly anf_lower.isByteReturningFunction)" {
+    try std.testing.expect(typecheck.builtinReturnsBytes("sha256"));
+    try std.testing.expect(typecheck.builtinReturnsBytes("hash160"));
+    try std.testing.expect(typecheck.builtinReturnsBytes("ripemd160"));
+    try std.testing.expect(typecheck.builtinReturnsBytes("cat"));
+    try std.testing.expect(!typecheck.builtinReturnsBytes("checkSig"));
+    try std.testing.expect(!typecheck.builtinReturnsBytes("add"));
 }
 
-test "isByteType" {
-    try std.testing.expect(isByteType(.byte_string));
-    try std.testing.expect(isByteType(.pub_key));
-    try std.testing.expect(isByteType(.sig));
-    try std.testing.expect(isByteType(.ripemd160));
-    try std.testing.expect(!isByteType(.bigint));
-    try std.testing.expect(!isByteType(.boolean));
+test "isByteFamily (formerly anf_lower.isByteType)" {
+    try std.testing.expect(typecheck.isByteFamily(.byte_string));
+    try std.testing.expect(typecheck.isByteFamily(.pub_key));
+    try std.testing.expect(typecheck.isByteFamily(.sig));
+    try std.testing.expect(typecheck.isByteFamily(.ripemd160));
+    try std.testing.expect(!typecheck.isByteFamily(.bigint));
+    try std.testing.expect(!typecheck.isByteFamily(.boolean));
 }
 
 test "branchEndsWithReturn" {

@@ -861,7 +861,7 @@ public final class RbParser {
                             errors.add(file + ":" + ml.line() + ":" + ml.column() + ": " + sighash.error());
                         } else if (sighash != null) {
                             m = new MethodNode(m.name(), m.params(), m.body(), m.visibility(),
-                                m.sourceLocation(), sighash.value());
+                                m.sourceLocation(), sighash.value(), m.bindingVariant(), m.returnType());
                         }
                         methods.add(m);
                     }
@@ -945,7 +945,8 @@ public final class RbParser {
                     }
                 }
                 rewritten.add(new MethodNode(
-                    m.name(), m.params(), body, m.visibility(), m.sourceLocation(), m.sighashType()
+                    m.name(), m.params(), body, m.visibility(), m.sourceLocation(), m.sighashType(),
+                    m.bindingVariant(), m.returnType()
                 ));
             }
 

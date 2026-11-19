@@ -3826,12 +3826,12 @@ module RunarCompiler::Codegen
       bring_to_top(args[0], is_last)
       @sm.pop
 
-      # From here to the closing OP_DROP the symbolic stack model is left
+      # From here to the closing OP_EQUALVERIFY the symbolic stack model is left
       # ALONE: the accumulator and the shrinking remainder are transients that
       # exist only inside the unrolled loop, and the sequence is net zero on
       # the real stack (one ByteString in, one ByteString out). Modelling them
       # -- pushing a placeholder and calling @sm.swap -- permuted the
-      # placeholder with the real name underneath it, and the OP_DROP's pop
+      # placeholder with the real name underneath it, and the closing pop
       # then discarded that name instead of the placeholder, which is how a
       # live method parameter went missing (N-056). Every peer tier does the
       # same nothing here: go/codegen/stack.go#lowerReverseBytes,
@@ -3864,8 +3864,14 @@ module RunarCompiler::Codegen
         ] })
       end
 
-      # DROP the empty remainder
-      emit_op({ op: "drop" })
+      # Stack: [reversed_result, remainder]. D12 BM-F3: the remainder is empty
+      # only when the input fit in the 520 unrolled iterations. It used to be
+      # dropped unchecked, so a longer input "reversed" to the reverse of its
+      # first 520 bytes and the rest was silently discarded. Fail closed
+      # instead: the script aborts unless the remainder is empty (OP_0
+      # OP_EQUALVERIFY consumes it).
+      emit_push_int(0)
+      emit_opcode("OP_EQUALVERIFY")
 
       @sm.push(binding_name)
       _track_depth

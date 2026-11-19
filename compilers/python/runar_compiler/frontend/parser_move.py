@@ -7,6 +7,8 @@ contract syntax.
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -876,9 +878,12 @@ class _MoveParser:
 
         # Optional return type: : Type
         has_return_type = False
+        declared_ret = None
         if self.match(TOK_COLON):
-            # The AST keeps no return type; N-331 refuses an unknown name.
-            reject_unknown_return_type(self.errors, self._parse_move_type_node(), name, location, visibility == "public")
+            # N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+            ret_type = self._parse_move_type_node()
+            reject_unknown_return_type(self.errors, ret_type, name, location, visibility == "public")
+            declared_ret = declared_return_type(ret_type)
             has_return_type = True
 
         body = self._parse_move_block()
@@ -917,6 +922,7 @@ class _MoveParser:
             body=body,
             visibility=visibility,
             sighash_type=sighash.value if sighash is not None else None,
+            return_type=declared_ret,
             source_location=location,
         ), has_mut
 

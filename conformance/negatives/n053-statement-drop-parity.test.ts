@@ -171,7 +171,6 @@ const POSITIVE: Array<[string, string, string, string]> = [
   ['rb helper ending in `false`', 'Disc.runar.rb', rb('assert !_check(x)', 'assert x == @t\n    false'), '009d0091'],
   ['rb helper ending in `@t + 1`', 'Disc.runar.rb', rb('assert x == _check(x)', '@t + 1'), '767c008b7b7c9c77'],
   ['rb `(_check(x))`', 'Disc.runar.rb', rb('(_check(x))\n    assert true', RB_HELPER), '76009d5177'],
-  ['rb `!_check(x)`', 'Disc.runar.rb', rb('!_check(x)\n    assert true', RB_HELPER), '76009d915177'],
   ['rb `-x`', 'Disc.runar.rb', rb('-x\n    assert true', RB_HELPER), '8f5177'],
   ['rb `42`', 'Disc.runar.rb', rb('42\n    assert true', RB_HELPER), '012a517777'],
   ['rb `true`', 'Disc.runar.rb', rb('true\n    assert true', RB_HELPER), '51517777'],
@@ -300,6 +299,19 @@ describe('N-053 statement drops — seven-tier parity', () => {
         });
       }
     }
+  }
+
+  // D12 FE-F4: `_check` (RB_HELPER) returns a bigint, inferred from its body,
+  // so `!_check(x)` is `!` on a bigint. It used to compile (76009d915177) only
+  // because every tier typed the helper's result `<unknown>`.
+  for (const tier of TIERS) {
+    it(`${tier.id} refuses rb \`!_check(x)\` on a bigint-returning helper (D12 FE-F4)`, () => {
+      // Case-insensitive: the tiers' pre-existing wording of this diagnostic
+      // differs only in the capital O (TS/Rust "Operand", the rest "operand").
+      expect(refusal(tier, write('Disc.runar.rb', rb('!_check(x)\n    assert true', RB_HELPER))).toLowerCase()).toContain(
+        "operand of '!' must be boolean, got 'bigint'",
+      );
+    });
   }
 
   for (const [name, file, src, tok] of REFUSED) {

@@ -943,11 +943,14 @@ module RunarCompiler
       def parse_method(name, visibility, location, sighash_text = nil, binding_variant_text = nil)
         params = parse_params
 
-        # Optional return type annotation. The AST keeps none; N-331 refuses an
-        # unknown name.
+        # Optional return type annotation. N-331 refuses an unknown name; D12
+        # FE-F4 keeps the declared type on the method for the type checker.
+        declared_ret = nil
         if check(TOK_COLON)
           advance
-          Frontend.reject_unknown_return_type(@errors, parse_type, name, location, visibility == "public")
+          ret_type = parse_type
+          Frontend.reject_unknown_return_type(@errors, ret_type, name, location, visibility == "public")
+          declared_ret = Frontend.declared_return_type(ret_type)
         end
 
         body = parse_block
@@ -966,7 +969,8 @@ module RunarCompiler
           visibility: visibility,
           source_location: location,
           sighash_type: sighash_type,
-          binding_variant: binding_variant
+          binding_variant: binding_variant,
+          return_type: declared_ret
         )
       end
 

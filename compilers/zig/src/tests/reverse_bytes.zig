@@ -47,9 +47,10 @@ const ITERATION_HEX = "76827763517f7c7b7e7c68";
 const ITERATIONS = 520;
 
 /// Build the exact opcode prefix the reversal must emit:
-/// OP_0 OP_SWAP, 520 unrolled iterations, OP_DROP.
+/// OP_0 OP_SWAP, 520 unrolled iterations, OP_0 OP_EQUALVERIFY (D12 BM-F3:
+/// the remainder must be empty, so a > 520-byte input aborts).
 fn expectedReversalPrefix(allocator: std.mem.Allocator) ![]u8 {
-    const len = 4 + ITERATIONS * ITERATION_HEX.len + 2;
+    const len = 4 + ITERATIONS * ITERATION_HEX.len + 4;
     const buf = try allocator.alloc(u8, len);
     var i: usize = 0;
     @memcpy(buf[i..][0..4], "007c"); // OP_0 OP_SWAP
@@ -59,8 +60,8 @@ fn expectedReversalPrefix(allocator: std.mem.Allocator) ![]u8 {
         @memcpy(buf[i..][0..ITERATION_HEX.len], ITERATION_HEX);
         i += ITERATION_HEX.len;
     }
-    @memcpy(buf[i..][0..2], "75"); // OP_DROP
-    i += 2;
+    @memcpy(buf[i..][0..4], "0088"); // OP_0 OP_EQUALVERIFY
+    i += 4;
     std.debug.assert(i == len);
     return buf;
 }
@@ -111,7 +112,7 @@ test "reverseBytes emits the peer tiers' unrolled reversal, not the identity" {
 // Semantic check: run the emitted opcodes and confirm the bytes are reversed.
 // ---------------------------------------------------------------------------
 
-const MiniVmError = error{ StackUnderflow, StackOverflow, UnsupportedOpcode, UnbalancedIf };
+const MiniVmError = error{ StackUnderflow, StackOverflow, UnsupportedOpcode, UnbalancedIf, VerifyFailed };
 
 /// Minimal Bitcoin-Script stack machine covering exactly the opcodes the
 /// reversal emits. Deliberately tiny: it exists to prove the emitted sequence
@@ -233,6 +234,11 @@ const MiniVm = struct {
                     }
                 },
                 0x68 => {}, // OP_ENDIF
+                0x88 => { // OP_EQUALVERIFY
+                    const b = try self.pop();
+                    const a = try self.pop();
+                    if (!std.mem.eql(u8, a, b)) return MiniVmError.VerifyFailed;
+                },
                 else => return MiniVmError.UnsupportedOpcode,
             }
         }

@@ -2788,7 +2788,7 @@ public final class StackLower {
          *   OP_0 OP_SWAP
          *   520x [ OP_DUP OP_SIZE OP_NIP
          *          OP_IF OP_1 OP_SPLIT OP_SWAP OP_ROT OP_CAT OP_SWAP OP_ENDIF ]
-         *   OP_DROP
+         *   OP_0 OP_EQUALVERIFY        (D12 BM-F3: the remainder must be empty)
          * </pre>
          *
          * 520 = the maximum BSV stack-element size, so every legal ByteString
@@ -2822,8 +2822,13 @@ public final class StackLower {
                     new SwapOp())));
             }
 
-            // Drop the drained remainder, leaving the reversed accumulator.
-            emitOp(new DropOp());
+            // D12 BM-F3: the remainder is empty only when the input fit in the
+            // 520 unrolled iterations. It used to be dropped unchecked, so a
+            // longer input "reversed" to the reverse of its first 520 bytes and
+            // the rest was silently discarded. Fail closed: the script aborts
+            // unless the remainder is empty (OP_0 OP_EQUALVERIFY consumes it).
+            emitOp(new PushOp(PushValue.of(0)));
+            emitOp(new OpcodeOp("OP_EQUALVERIFY"));
 
             sm.push(bindingName);
             trackDepth();

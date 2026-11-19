@@ -3680,7 +3680,7 @@ const LowerCtx = struct {
     ///            OP_SWAP OP_ROT OP_CAT       [tail, head||result]
     ///            OP_SWAP                     [head||result, tail]
     ///          OP_ENDIF
-    ///     OP_DROP                            drop the empty remainder
+    ///     OP_0 OP_EQUALVERIFY                the remainder must be empty
     ///
     /// This used to emit nothing at all, which made `reverseBytes` a silent
     /// identity in this tier: `assert(reverseBytes(a) === b)` passed exactly
@@ -3708,7 +3708,12 @@ const LowerCtx = struct {
             try self.closeIfOp();
         }
 
-        try self.emitOp(.op_drop);
+        // D12 BM-F3: the remainder is empty only when the input fit in the
+        // 520 unrolled iterations. It used to be dropped unchecked, so a
+        // longer input "reversed" to the reverse of its first 520 bytes and
+        // the rest was silently discarded. Fail closed: abort unless empty.
+        try self.emitPushInt(0);
+        try self.emitOp(.op_equalverify);
 
         try self.stack.push(self.allocator, bind_name);
         self.trackDepth();

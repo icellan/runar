@@ -970,6 +970,9 @@ const TypeChecker = struct {
     /// and loses the leaf type at parse time, so it is deliberately absent
     /// here rather than guessed. R-073 / CL-BUG-168.
     prop_elem_types: std.StringHashMapUnmanaged(RunarType),
+    /// D12 FE-F1: leaf type of each nested `FixedArray<FixedArray<T, M>, N>`
+    /// property, so `this.grid[a][b]` is typed `T` as in the TS reference.
+    prop_leaf_types: std.StringHashMapUnmanaged(RunarType) = .empty,
     method_sigs: std.StringHashMapUnmanaged(FuncSig),
     /// Origin keys of affine values consumed in the current scope.
     /// 2026-04-30 audit finding F6.
@@ -995,6 +998,25 @@ const TypeChecker = struct {
     /// when `owns_consumed_params` (scratch checkers borrow the caller's).
     consumed_params: ?*ConsumedParamSummary = null,
     owns_consumed_params: bool = false,
+    /// D12 FE-F4: inferred return types of undeclared private methods, by
+    /// method name. Owned by the top-level checker (`owns_return_memo`);
+    /// every scratch checker borrows the same map, so the recursion guard
+    /// (`.unknown` while a helper's own type is being inferred) is shared.
+    return_memo: ?*ReturnMemo = null,
+    owns_return_memo: bool = false,
+    /// D12 FE-F4: the types of the `return` values seen while checking, when
+    /// this is a return-type inference scratch checker.
+    return_sink: ?*std.ArrayListUnmanaged(RunarType) = null,
+    /// D12 FE-F4: the method being checked (null in the constructor), whose
+    /// declared return type every `return <expr>` must satisfy.
+    current_method: ?MethodNode = null,
+    /// D12 FE-F4: types of the `return` values of the method being checked,
+    /// in order (the incompatible-returns rule in `checkMethod`).
+    current_return_types: std.ArrayListUnmanaged(RunarType) = .empty,
+    /// D12 FE-F4: a return-type inference scratch checker only needs types;
+    /// it skips the affine-consumption bookkeeping (whose diagnostics it would
+    /// discard anyway), which would otherwise build a helper-summary per call.
+    skip_affine: bool = false,
 
     fn init(allocator: Allocator, contract: ContractNode) !TypeChecker {
         var self = TypeChecker{
@@ -1019,6 +1041,11 @@ const TypeChecker = struct {
                 prop.fixed_array_element != .fixed_array)
             {
                 try self.prop_elem_types.put(allocator, prop.name, prop.fixed_array_element);
+            }
+            if (prop.type_info == .fixed_array and prop.fixed_array_element == .fixed_array and
+                prop.fixed_array_leaf != .unknown and prop.fixed_array_leaf != .fixed_array)
+            {
+                try self.prop_leaf_types.put(allocator, prop.name, prop.fixed_array_leaf);
             }
             const key = try std.fmt.allocPrint(allocator, "prop:{s}", .{prop.name});
             try self.prop_origin_keys.put(allocator, prop.name, key);
@@ -1050,7 +1077,10 @@ const TypeChecker = struct {
                 params[n] = p.type_info;
                 n += 1;
             }
-            const ret: RunarType = if (method.is_public) .void else inferMethodReturnType(method);
+            // D12 FE-F4: a private method's return type is resolved on first
+            // use by `methodSig` (declared, else inferred from the body with
+            // the full environment); `.unknown` here is only a placeholder.
+            const ret: RunarType = if (method.is_public) .void else .unknown;
             try self.method_sigs.put(allocator, method.name, .{ .params = params, .return_type = ret });
         }
 
@@ -1059,6 +1089,7 @@ const TypeChecker = struct {
 
     fn deinit(self: *TypeChecker) void {
         self.error_locs.deinit(self.allocator);
+        self.current_return_types.deinit(self.allocator);
         // Free method sig param slices we allocated
         var it = self.method_sigs.iterator();
         while (it.next()) |entry| {
@@ -1067,6 +1098,7 @@ const TypeChecker = struct {
         self.method_sigs.deinit(self.allocator);
         self.prop_types.deinit(self.allocator);
         self.prop_elem_types.deinit(self.allocator);
+        self.prop_leaf_types.deinit(self.allocator);
         self.consumed_values.deinit(self.allocator);
         self.affine_aliases.deinit(self.allocator);
         self.repeating_loop_scopes.deinit(self.allocator);
@@ -1076,6 +1108,12 @@ const TypeChecker = struct {
         self.stateful_ctx_params.deinit(self.allocator);
         if (self.owns_consumed_params) {
             if (self.consumed_params) |summary| freeConsumedParamSummary(self.allocator, summary);
+        }
+        if (self.owns_return_memo) {
+            if (self.return_memo) |memo| {
+                memo.deinit(self.allocator);
+                self.allocator.destroy(memo);
+            }
         }
         // Note: self.errors ownership transfers to caller via toOwnedSlice
     }
@@ -1236,6 +1274,60 @@ const TypeChecker = struct {
         self.addErrorAt(null, fmt, args);
     }
 
+    /// The signature a call of contract method `name` sees, with a private
+    /// method's return type resolved (D12 FE-F4), or null when `name` is not a
+    /// contract method.
+    fn methodSig(self: *TypeChecker, name: []const u8) ?FuncSig {
+        var method_sig = self.method_sigs.get(name) orelse return null;
+        for (self.contract.methods) |m| {
+            if (!std.mem.eql(u8, m.name, name)) continue;
+            if (!m.is_public) method_sig.return_type = self.methodReturnType(m);
+            break;
+        }
+        return method_sig;
+    }
+
+    /// D12 FE-F4: what a call of private method `method` evaluates to.
+    ///
+    /// A declared return type is authoritative (`checkStatement` enforces it
+    /// on every `return`). Without one (Ruby has no syntax for it; TypeScript
+    /// may omit it) the body is type-checked by a scratch checker with the real
+    /// parameter environment and the types of its `return` values are unified.
+    /// Values that do not unify, and a helper reached again while its own type
+    /// is being inferred, are `.unknown`: every operator whose lowering depends
+    /// on the type then refuses to compile instead of guessing. Mirrors
+    /// `methodReturnType` in the TS reference 03-typecheck.ts.
+    fn methodReturnType(self: *TypeChecker, method: MethodNode) RunarType {
+        if (method.return_type) |t| return t;
+        const memo = self.return_memo orelse m: {
+            const created = self.allocator.create(ReturnMemo) catch return .unknown;
+            created.* = .empty;
+            self.return_memo = created;
+            self.owns_return_memo = true;
+            break :m created;
+        };
+        if (memo.get(method.name)) |known| return known;
+        // Recursion guard; validate refuses recursion anyway.
+        memo.put(self.allocator, method.name, .unknown) catch return .unknown;
+
+        var scratch = TypeChecker.init(self.allocator, self.contract) catch return .unknown;
+        defer {
+            for (scratch.errors.items) |msg| self.allocator.free(msg);
+            scratch.errors.deinit(self.allocator);
+            scratch.deinit();
+        }
+        scratch.return_memo = memo;
+        scratch.skip_affine = true;
+        var sink: std.ArrayListUnmanaged(RunarType) = .empty;
+        defer sink.deinit(self.allocator);
+        scratch.return_sink = &sink;
+        scratch.checkMethodBody(method);
+
+        const inferred = unifyReturnTypes(sink.items);
+        memo.put(self.allocator, method.name, inferred) catch {};
+        return inferred;
+    }
+
     /// N-463: `addError` anchored at `loc` -- the offending expression's
     /// first token, where the TS reference anchors it -- when known.
     fn addErrorAt(self: *TypeChecker, loc: ?types.SourceLocation, comptime fmt: []const u8, args: anytype) void {
@@ -1313,13 +1405,25 @@ const TypeChecker = struct {
         for (ctor.params) |param| env.define(param.name, param.type_info);
         for (self.contract.properties) |prop| env.define(prop.name, prop.type_info);
 
-        // Check constructor body (assignments)
-        for (ctor.assignments) |assign| {
-            _ = self.inferExprType(assign.value, &env);
+        self.current_method = null;
+        // D12 FE-F1: ANF lowering lowers the super arguments and, when the
+        // surface has one, the explicit constructor body (R-040) -- else the
+        // derived assignments -- and reads the operand family this pass
+        // records on every typed operator in them, so exactly those are
+        // checked here, as the TS reference checks `ctor.body`.
+        for (ctor.super_args) |arg| _ = self.inferExprType(arg, &env);
+        if (ctor.body.len > 0) {
+            self.checkStatements(ctor.body, &env);
+        } else {
+            for (ctor.assignments) |assign| {
+                _ = self.inferExprType(assign.value, &env);
+            }
         }
     }
 
-    fn checkMethod(self: *TypeChecker, method: MethodNode) void {
+    /// The body of `method` in a fresh environment of its parameters. Split
+    /// out of `checkMethod` for the FE-F4 return-type inference scratch.
+    fn checkMethodBody(self: *TypeChecker, method: MethodNode) void {
         var env = TypeEnv.init(self.allocator) catch return;
         defer env.deinit();
 
@@ -1336,7 +1440,42 @@ const TypeChecker = struct {
             env.define(param.name, param.type_info);
         }
 
+        const prev_method = self.current_method;
+        self.current_method = method;
+        defer self.current_method = prev_method;
+        self.current_return_types.clearRetainingCapacity();
         self.checkStatements(method.body, &env);
+    }
+
+    fn checkMethod(self: *TypeChecker, method: MethodNode) void {
+        self.checkMethodBody(method);
+
+        // D12 FE-F4: an undeclared private return type is inferred by unifying
+        // the returned values. Values that do not unify used to be typed by
+        // the FIRST return (so `if (c) return 1n; return true;` was a bigint);
+        // now the call would be `unknown`, which `assert` / `if` still accept.
+        // Refuse it here, as the TS reference does.
+        if (!method.is_public and method.return_type == null) {
+            const seen = self.current_return_types.items;
+            var any_unknown = false;
+            for (seen) |t| {
+                if (t == .unknown) any_unknown = true;
+            }
+            if (seen.len > 0 and !any_unknown and unifyReturnTypes(seen) == .unknown) {
+                var list: std.ArrayListUnmanaged(u8) = .empty;
+                defer list.deinit(self.allocator);
+                for (seen, 0..) |t, i| {
+                    var dup = false;
+                    for (seen[0..i]) |u| {
+                        if (u == t) dup = true;
+                    }
+                    if (dup) continue;
+                    if (list.items.len > 0) list.appendSlice(self.allocator, ", ") catch {};
+                    list.print(self.allocator, "'{s}'", .{tsTypeName(t)}) catch {};
+                }
+                self.addErrorAt(method.source_loc, INCOMPATIBLE_RETURN_TYPES_FMT, .{ method.name, list.items });
+            }
+        }
 
         // Crit-3 (BSVM Phase 13) — reject mixing requireOutputP2PKH with
         // addDataOutput in the same method body. v1 of the intrinsic assumes
@@ -1633,7 +1772,24 @@ const TypeChecker = struct {
             .return_stmt => |maybe_expr_r| {
                 const maybe_expr = maybe_expr_r.value;
                 if (maybe_expr) |expr| {
-                    _ = self.inferExprType(expr, env);
+                    const value_type = self.inferExprType(expr, env);
+                    if (self.return_sink) |sink| sink.append(self.allocator, value_type) catch {};
+                    self.current_return_types.append(self.allocator, value_type) catch {};
+                    // D12 FE-F4: the declared return type is enforced, strictly
+                    // -- an unresolved value is not assignable to anything here.
+                    if (self.current_method) |m| if (m.return_type) |declared| {
+                        // This tier types no array literal (`unknown`), where
+                        // TS types `T[]`; a literal returned as a declared
+                        // FixedArray is not an unresolved value.
+                        const array_ok = declared == .fixed_array and expr == .array_literal;
+                        if (!array_ok and (value_type == .unknown or !isSubtype(value_type, declared))) {
+                            self.addErrorAt(maybe_expr_r.source_loc, DECLARED_RETURN_MISMATCH_FMT, .{
+                                m.name,
+                                tsTypeName(value_type),
+                                if (m.return_type_name.len > 0) m.return_type_name else tsTypeName(declared),
+                            });
+                        }
+                    };
                 }
             },
         }
@@ -1745,7 +1901,11 @@ const TypeChecker = struct {
                     self.addError("array index must be bigint, got '{s}'", .{types.runarTypeToString(idx_type)});
                 }
                 _ = obj_type;
-                return .unknown;
+                // D12 FE-F1: a FixedArray element read is typed as the
+                // array's element type, as the TS reference types `T[]`
+                // indexing, so a local bound to one (`const v = this.ks[i]`)
+                // keeps its type and `v === w` lowers from it.
+                return self.operandElementType(expr, env) orelse .unknown;
             },
             .increment => |inc| {
                 if (isContinuationAmountCall(inc.operand)) self.addError("{s}", .{CONTINUATION_AMOUNT_READ_ONLY});
@@ -1845,15 +2005,27 @@ const TypeChecker = struct {
     ///
     /// Only a `this.<prop>` base is resolved. A local that merely shares the
     /// array's name parses as `.identifier`, not `.property_access`, so
-    /// shadowing cannot borrow the property's element type. A nested chain
-    /// (`this.grid[0][1]`) has an `.index_access` object and is absent from
-    /// `prop_elem_types` anyway — it stays `.unknown`, the documented R-073
-    /// residual gap.
+    /// shadowing cannot borrow the property's element type. A two-level chain
+    /// (`this.grid[0][1]`) on a nested FixedArray property resolves to the
+    /// leaf type the parsers now record (`fixed_array_leaf`, D12 FE-F1);
+    /// deeper nesting stays `.unknown` (the R-073 residual gap).
     fn operandElementType(self: *TypeChecker, expr: Expression, env: *TypeEnv) ?RunarType {
         const ia = switch (expr) {
             .index_access => |p| p.*,
             else => return null,
         };
+        // D12 FE-F1: `this.grid[a][b]` on a nested FixedArray property is its
+        // leaf type, as TS types `T[][]` indexing twice.
+        if (ia.object == .index_access) {
+            const outer = ia.object.index_access.*;
+            const nested_base = switch (outer.object) {
+                .property_access => |pa| pa,
+                else => return null,
+            };
+            if (!std.mem.eql(u8, nested_base.object, "this")) return null;
+            if (env.lookup(nested_base.property) != null) return null;
+            return self.prop_leaf_types.get(nested_base.property);
+        }
         const base = switch (ia.object) {
             .property_access => |pa| pa,
             else => return null,
@@ -1863,9 +2035,26 @@ const TypeChecker = struct {
         return self.prop_elem_types.get(base.property);
     }
 
-    fn checkBinaryExpr(self: *TypeChecker, bin: *const types.BinaryOp, env: *TypeEnv) RunarType {
+    fn checkBinaryExpr(self: *TypeChecker, bin: *types.BinaryOp, env: *TypeEnv) RunarType {
         const left_type = self.inferOperandType(bin.left, env);
         const right_type = self.inferOperandType(bin.right, env);
+
+        // D12 FE-F1: the operators whose opcode depends on the operand family
+        // record the family the TYPE CHECKER resolved; ANF lowering reads it
+        // and nothing else. `+` and `& | ^` already refuse an operand that is
+        // neither a byte string nor a number (below); equality accepted
+        // `unknown`, so it is refused here rather than lowered as a guess.
+        if (isTypedBinaryOp(bin.op)) {
+            const lf = operandFamily(left_type);
+            const rf = operandFamily(right_type);
+            if (lf != null and rf != null and lf.? == rf.?) {
+                bin.operand_type = lf.?;
+            } else if ((lf == null or rf == null) and (bin.op == .eq or bin.op == .neq)) {
+                self.addErrorAt(bin.loc orelse self.current_stmt_loc, UNRESOLVED_OPERAND_TYPES_FMT, .{
+                    bin.op.toTsString(), tsTypeName(left_type), tsTypeName(right_type),
+                });
+            }
+        }
 
         switch (bin.op) {
             // ByteString concatenation: ByteString + ByteString -> ByteString
@@ -1950,7 +2139,7 @@ const TypeChecker = struct {
     // Unary expression type checking
     // ------------------------------------------------------------------
 
-    fn checkUnaryExpr(self: *TypeChecker, un: *const types.UnaryOp, env: *TypeEnv) RunarType {
+    fn checkUnaryExpr(self: *TypeChecker, un: *types.UnaryOp, env: *TypeEnv) RunarType {
         const operand_type = self.inferExprType(un.operand, env);
 
         return switch (un.op) {
@@ -1967,7 +2156,12 @@ const TypeChecker = struct {
                 return .bigint;
             },
             .bitnot => {
-                if (isByteFamily(operand_type)) return .byte_string;
+                // D12 FE-F1: see checkBinaryExpr.
+                if (isByteFamily(operand_type)) {
+                    un.operand_type = .bytes;
+                    return .byte_string;
+                }
+                if (isBigintFamily(operand_type)) un.operand_type = .numeric;
                 if (!isBigintFamily(operand_type)) {
                     self.addErrorAt(un.location, "operand of '~' must be bigint or ByteString, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
@@ -2010,7 +2204,7 @@ const TypeChecker = struct {
         }
 
         // Known contract method
-        if (self.method_sigs.get(name)) |method_sig| {
+        if (self.methodSig(name)) |method_sig| {
             return self.checkCallArgs(name, method_sig, call.args, call.arg_locs, env);
         }
 
@@ -2272,7 +2466,7 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, mc.method, "addDataOutput")) {
                 return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, mc.arg_locs, env);
             }
-            if (self.method_sigs.get(mc.method)) |method_sig| {
+            if (self.methodSig(mc.method)) |method_sig| {
                 if (is_this) {
                     var arg_locs: []const ?types.SourceLocation = &.{};
                     const args = self.withoutStatefulContextArgs(mc.args, mc.arg_locs, &arg_locs) catch {
@@ -2537,6 +2731,7 @@ const TypeChecker = struct {
     /// cannot launder a double-consumption past the affine check.
     /// 2026-04-30 audit finding F6.
     fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, arg_locs: []const ?types.SourceLocation, env: *TypeEnv) void {
+        if (self.skip_affine) return;
         var consumed_props: []const []u8 = &.{};
         const indices = consumedIndices(func_name) orelse blk: {
             // N-109: a call to a contract method consumes the arguments at
@@ -2647,102 +2842,66 @@ const TypeChecker = struct {
 };
 
 // ============================================================================
-// Private method return type inference (pre-pass, no type env needed)
+// D12 FE-F1 / FE-F4 helpers
 // ============================================================================
 
-fn inferMethodReturnType(method: MethodNode) RunarType {
-    const return_types = collectReturnTypes(method.body);
-    if (return_types.len == 0) return .void;
+/// Inferred return types of undeclared private methods, by name (FE-F4).
+const ReturnMemo = std.StringHashMapUnmanaged(RunarType);
 
+/// D12 FE-F4: unify the types of a private method's `return` values (inferred
+/// with the full environment). No value-returning `return` = void; values in
+/// one family unify to that family; anything else is `.unknown` -- never a
+/// best-effort pick, because every typed operator refuses `.unknown`.
+fn unifyReturnTypes(return_types: []const RunarType) RunarType {
+    if (return_types.len == 0) return .void;
     const first = return_types[0];
     var all_same = true;
-    for (return_types[1..]) |t| {
-        if (t != first) {
-            all_same = false;
-            break;
-        }
-    }
-    if (all_same) return first;
-
-    // Check if all in bigint family
     var all_bigint = true;
-    for (return_types) |t| {
-        if (!isBigintFamily(t)) {
-            all_bigint = false;
-            break;
-        }
-    }
-    if (all_bigint) return .bigint;
-
-    // Check if all in ByteString family
     var all_bytes = true;
     for (return_types) |t| {
-        if (!isByteFamily(t)) {
-            all_bytes = false;
-            break;
-        }
+        if (t != first) all_same = false;
+        if (!isBigintFamily(t)) all_bigint = false;
+        if (!isByteFamily(t)) all_bytes = false;
     }
+    if (all_same) return first;
+    if (all_bigint) return .bigint;
     if (all_bytes) return .byte_string;
-
-    // Check if all boolean
-    var all_bool = true;
-    for (return_types) |t| {
-        if (t != .boolean) {
-            all_bool = false;
-            break;
-        }
-    }
-    if (all_bool) return .boolean;
-
-    return first;
+    return .unknown;
 }
 
-/// Stack-allocated bounded buffer for return types (avoids allocation).
-const MAX_RETURN_TYPES = 64;
-const ReturnTypeBuf = struct {
-    items: [MAX_RETURN_TYPES]RunarType = undefined,
-    len: usize = 0,
-
-    fn append(self: *ReturnTypeBuf, t: RunarType) void {
-        if (self.len < MAX_RETURN_TYPES) {
-            self.items[self.len] = t;
-            self.len += 1;
-        }
-    }
-
-    fn slice(self: *const ReturnTypeBuf) []const RunarType {
-        return self.items[0..self.len];
-    }
-};
-
-fn collectReturnTypes(stmts: []const Statement) []const RunarType {
-    const S = struct {
-        var buf: ReturnTypeBuf = .{};
+/// Binary operators whose lowering depends on the operand family (FE-F1).
+pub fn isTypedBinaryOp(op: BinOperator) bool {
+    return switch (op) {
+        .add, .eq, .neq, .bitand, .bitor, .bitxor => true,
+        else => false,
     };
-    S.buf = .{};
-    collectReturnTypesInto(stmts, &S.buf);
-    return S.buf.slice();
 }
 
-fn collectReturnTypesInto(stmts: []const Statement, buf: *ReturnTypeBuf) void {
-    for (stmts) |stmt| {
-        switch (stmt) {
-            .return_stmt => |maybe_expr_r| {
-                const maybe_expr = maybe_expr_r.value;
-                if (maybe_expr) |expr| buf.append(inferExprTypeStatic(expr));
-            },
-            .if_stmt => |if_s| {
-                collectReturnTypesInto(if_s.then_body, buf);
-                if (if_s.else_body) |else_body| collectReturnTypesInto(else_body, buf);
-            },
-            .for_stmt => |for_s| collectReturnTypesInto(for_s.body, buf),
-            else => {},
-        }
-    }
+/// The lowering family of a resolved type: bytes, a script number, or none.
+fn operandFamily(t: RunarType) ?types.OperandType {
+    if (isByteFamily(t)) return .bytes;
+    if (isBigintFamily(t) or t == .boolean) return .numeric;
+    return null;
 }
+
+/// A type as the TS reference spells it in a diagnostic (`<unknown>` for an
+/// unresolved one).
+fn tsTypeName(t: RunarType) []const u8 {
+    return if (t == .unknown) "<unknown>" else types.runarTypeToString(t);
+}
+
+/// D12 FE-F1: the one wording every tier emits.
+pub const UNRESOLVED_OPERAND_TYPES_FMT = "Cannot resolve the operand types of '{s}' (got '{s}' and '{s}'): " ++
+    "it must be known whether the operands are byte strings or numbers";
+
+/// D12 FE-F4: the one wording every tier emits (types in first-seen order).
+pub const INCOMPATIBLE_RETURN_TYPES_FMT = "Method '{s}' returns values of incompatible types ({s}); declare its return type";
+
+/// D12 FE-F4: the one wording every tier emits.
+pub const DECLARED_RETURN_MISMATCH_FMT = "Method '{s}' returns '{s}', which is not assignable to its declared return type '{s}'";
 
 /// Lightweight expression type inference without a type environment.
-/// Used for inferring return types of private methods before the full type-check pass.
+/// Used for property initializers (`checkPropertyInitializers`).
 fn inferExprTypeStatic(expr: Expression) RunarType {
     return switch (expr) {
         .literal_int => .bigint,

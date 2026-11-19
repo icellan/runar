@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,7 @@ import runar.compiler.ir.ast.IncrementExpr;
 import runar.compiler.ir.ast.IndexAccessExpr;
 import runar.compiler.ir.ast.MemberExpr;
 import runar.compiler.ir.ast.MethodNode;
+import runar.compiler.ir.ast.OperandTypeSlot.OperandType;
 import runar.compiler.ir.ast.ParamNode;
 import runar.compiler.ir.ast.ParentClass;
 import runar.compiler.ir.ast.PrimitiveType;
@@ -358,6 +360,30 @@ public final class Typecheck {
         Map<String, MethodConsumption> consumedParams;
 
         /**
+         * D12 FE-F4: inferred return types of undeclared private methods.
+         * Shared by reference with every scratch checker this one creates, so
+         * the recursion guard ({@code <unknown>} while a helper's own type is
+         * being inferred) holds across them.
+         */
+        Map<MethodNode, String> returnMemo = new IdentityHashMap<>();
+
+        /** D12 FE-F4: types of the {@code return} values seen (inference scratch only). */
+        List<String> returnTypeSink;
+
+        /** D12 FE-F4: the method being checked, whose declared return type is enforced. */
+        MethodNode currentMethod;
+
+        /** D12 FE-F4: types of the {@code return} values of the method being checked. */
+        List<String> currentReturnTypes = new ArrayList<>();
+
+        /**
+         * D12 FE-F4: a return-type inference scratch checker only needs types;
+         * it skips the affine bookkeeping (whose diagnostics it discards),
+         * which would otherwise build a helper summary per inference.
+         */
+        boolean skipAffine;
+
+        /**
          * N-109 / N-288: what a contract method consumes when it is called (it
          * is inlined): the indices of its affine parameters and the
          * {@code prop:<name>} origin keys of the affine properties it consumes.
@@ -377,9 +403,10 @@ public final class Typecheck {
                 for (ParamNode p : m.params()) {
                     params.add(typeToString(p.type()));
                 }
-                String ret = m.visibility() == Visibility.PUBLIC
-                    ? "void"
-                    : inferReturnType(m);
+                // D12 FE-F4: a private method's return type is resolved on
+                // first use by methodSig (declared, else inferred from the
+                // body with the full environment); this is a placeholder.
+                String ret = m.visibility() == Visibility.PUBLIC ? "void" : "<unknown>";
                 methodSigs.put(m.name(), new FuncSig(params, ret));
             }
         }
@@ -389,6 +416,53 @@ public final class Typecheck {
          * auto-injected {@code _newAmount}. Without this check an assignment to
          * it would lower as a plain read and silently drop the write.
          */
+        /**
+         * The signature a call of contract method {@code name} sees, with a
+         * private method's return type resolved (D12 FE-F4).
+         */
+        FuncSig methodSig(String name) {
+            FuncSig fs = methodSigs.get(name);
+            if (fs == null) return null;
+            for (MethodNode m : contract.methods()) {
+                if (m.name().equals(name)) {
+                    if (m.visibility() != Visibility.PUBLIC) {
+                        return new FuncSig(fs.params(), methodReturnType(m));
+                    }
+                    break;
+                }
+            }
+            return fs;
+        }
+
+        /**
+         * D12 FE-F4: what a call of private method {@code m} evaluates to.
+         *
+         * <p>A declared return type is authoritative (checkStatement enforces
+         * it on every {@code return}). Without one (Ruby has no syntax for it;
+         * TypeScript may omit it) the body is type-checked by a scratch
+         * checker with the real parameter environment and the types of its
+         * {@code return} values are unified. Values that do not unify, and a
+         * helper reached again while its own type is being inferred, are
+         * {@code <unknown>}: every operator whose lowering depends on the type
+         * then refuses to compile instead of guessing. Mirrors
+         * {@code methodReturnType} in the TS reference 03-typecheck.ts.
+         */
+        String methodReturnType(MethodNode m) {
+            if (m.returnType() != null) return typeToString(m.returnType());
+            String known = returnMemo.get(m);
+            if (known != null) return known;
+            returnMemo.put(m, "<unknown>"); // recursion guard; validation refuses recursion
+            Checker scratch = new Checker(contract);
+            scratch.returnMemo = returnMemo;
+            scratch.consumedParams = consumedParams;
+            scratch.skipAffine = true;
+            scratch.returnTypeSink = new ArrayList<>();
+            scratch.checkMethodBody(m);
+            String inferred = unifyReturnTypes(scratch.returnTypeSink);
+            returnMemo.put(m, inferred);
+            return inferred;
+        }
+
         void refuseContinuationAmountWrite(Expression target) {
             if (target instanceof CallExpr c
                 && c.callee() instanceof Identifier id
@@ -543,7 +617,8 @@ public final class Typecheck {
             checkStatements(ctor.body(), env);
         }
 
-        private void checkMethod(MethodNode m) {
+        /** The body of {@code m} in a fresh environment of its parameters. */
+        private void checkMethodBody(MethodNode m) {
             currentMethodLoc = m.sourceLocation();
             consumed = new HashMap<>();
             affineAliases = new HashMap<>();
@@ -551,7 +626,33 @@ public final class Typecheck {
             for (ParamNode p : m.params()) {
                 env.define(p.name(), typeToString(p.type()));
             }
-            checkStatements(m.body(), env);
+            MethodNode prevMethod = currentMethod;
+            currentMethod = m;
+            currentReturnTypes = new ArrayList<>();
+            try {
+                checkStatements(m.body(), env);
+            } finally {
+                currentMethod = prevMethod;
+            }
+        }
+
+        private void checkMethod(MethodNode m) {
+            checkMethodBody(m);
+
+            // D12 FE-F4: an undeclared private return type is inferred by
+            // unifying the returned values. Values that do not unify used to be
+            // typed by the FIRST return (so `if (c) return 1n; return true;` was
+            // a bigint); now the call would be `<unknown>`, which `assert` / `if`
+            // still accept. Refuse it here, as the TS reference does.
+            if (m.visibility() != Visibility.PUBLIC && m.returnType() == null) {
+                List<String> seen = currentReturnTypes;
+                if (!seen.isEmpty() && !seen.contains("<unknown>")
+                    && "<unknown>".equals(unifyReturnTypes(seen))) {
+                    errors.add(format(
+                        incompatibleReturnTypesMessage(m.name(), new java.util.ArrayList<>(new java.util.LinkedHashSet<>(seen))),
+                        m.sourceLocation()));
+                }
+            }
 
             // A public method must not return a value.
             if (m.visibility() == Visibility.PUBLIC) {
@@ -758,7 +859,17 @@ public final class Typecheck {
                 inferExpr(e.expression(), env);
             } else if (s instanceof ReturnStatement r) {
                 if (r.value() != null) {
-                    inferExpr(r.value(), env);
+                    String valueType = inferExpr(r.value(), env);
+                    if (returnTypeSink != null) returnTypeSink.add(valueType);
+                    currentReturnTypes.add(valueType);
+                    // D12 FE-F4: the declared return type is enforced, strictly
+                    // -- an unresolved value is not assignable to anything here.
+                    if (currentMethod != null && currentMethod.returnType() != null) {
+                        String declared = typeToString(currentMethod.returnType());
+                        if ("<unknown>".equals(valueType) || !isSubtype(valueType, declared)) {
+                            error(declaredReturnMismatchMessage(currentMethod.name(), valueType, declared));
+                        }
+                    }
                 }
             }
 
@@ -922,6 +1033,23 @@ public final class Typecheck {
             String rt = inferExpr(e.right(), env);
             Expression.BinaryOp op = e.op();
 
+            // D12 FE-F1: the operators whose opcode depends on the operand
+            // family record the family the TYPE CHECKER resolved; ANF lowering
+            // reads it and nothing else. `+` and `& | ^` already refuse an
+            // operand that is neither a byte string nor a number (below);
+            // equality accepted `<unknown>`, so it is refused here rather than
+            // lowered as a guess.
+            if (isTypedBinaryOp(op)) {
+                OperandType lf = operandFamily(lt);
+                OperandType rf = operandFamily(rt);
+                if (lf != null && lf == rf) {
+                    e.operandType().set(lf);
+                } else if ((lf == null || rf == null)
+                        && (op == Expression.BinaryOp.EQ || op == Expression.BinaryOp.NEQ)) {
+                    errorAt(unresolvedOperandTypesMessage(op.canonical(), lt, rt), e);
+                }
+            }
+
             // ByteString + ByteString → ByteString (OP_CAT).
             if (op == Expression.BinaryOp.ADD && isByteFamily(lt) && isByteFamily(rt)) {
                 return "ByteString";
@@ -1015,7 +1143,12 @@ public final class Typecheck {
                     return "bigint";
                 }
                 case BIT_NOT -> {
-                    if (isByteFamily(t)) return "ByteString";
+                    // D12 FE-F1: see checkBinary.
+                    if (isByteFamily(t)) {
+                        e.operandType().set(OperandType.BYTES);
+                        return "ByteString";
+                    }
+                    if (isBigintFamily(t)) e.operandType().set(OperandType.NUMERIC);
                     if (!isBigintFamily(t)) {
                         errorAt("operand of '~' must be bigint or ByteString, got '" + t + "'", e);
                     }
@@ -1061,7 +1194,7 @@ public final class Typecheck {
                     );
                 }
                 if (methodSigs.containsKey(name)) {
-                    FuncSig fs = methodSigs.get(name);
+                    FuncSig fs = methodSig(name);
                     return checkCallArgs(name, fs.params(), fs.returnType(), e.args(), env);
                 }
                 String local = env.lookup(name);
@@ -1341,7 +1474,7 @@ public final class Typecheck {
                 return "void";
             }
             if (methodSigs.containsKey(prop)) {
-                FuncSig fs = methodSigs.get(prop);
+                FuncSig fs = methodSig(prop);
                 return checkCallArgs(prop, fs.params(), fs.returnType(), args, env);
             }
             error(
@@ -1585,13 +1718,14 @@ public final class Typecheck {
          * 2026-04-30 audit finding F6.
          */
         private void checkAffine(String name, List<Expression> args, Env env) {
+            if (skipAffine) return;
             int[] indices = CONSUMING_FUNCTIONS.get(name);
             List<String> consumedProps = List.of();
             if (indices == null) {
                 // N-109: a call to a contract method consumes the arguments at
                 // the parameter positions that method consumes.
                 if (BuiltinRegistry.lookup(name).isPresent() || !methodSigs.containsKey(name)) return;
-                if (consumedParams == null) consumedParams = consumedParamSummary(contract);
+                if (consumedParams == null) consumedParams = consumedParamSummary(contract, returnMemo);
                 MethodConsumption mc = consumedParams.getOrDefault(name, new MethodConsumption(new int[0], List.of()));
                 indices = mc.params();
                 consumedProps = mc.props();
@@ -1639,7 +1773,7 @@ public final class Typecheck {
          * validation). Mirrors {@code consumedParamSummary} in the TS reference
          * {@code 03-typecheck.ts}.
          */
-        private static Map<String, MethodConsumption> consumedParamSummary(ContractNode contract) {
+        private static Map<String, MethodConsumption> consumedParamSummary(ContractNode contract, Map<MethodNode, String> returnMemo) {
             Map<String, MethodConsumption> summary = new HashMap<>();
             for (MethodNode m : contract.methods()) summary.put(m.name(), new MethodConsumption(new int[0], List.of()));
             boolean changed = true;
@@ -1647,6 +1781,7 @@ public final class Typecheck {
                 changed = false;
                 for (MethodNode m : contract.methods()) {
                     Checker scratch = new Checker(contract);
+                    scratch.returnMemo = returnMemo; // D12 FE-F4: shared return-type memo
                     scratch.consumedParams = summary;
                     MethodConsumption consumed = scratch.consumedParamIndices(m);
                     MethodConsumption prev = summary.get(m.name());
@@ -1723,41 +1858,60 @@ public final class Typecheck {
     // Private method return-type inference
     // ------------------------------------------------------------------
 
-    private static String inferReturnType(MethodNode m) {
-        List<String> returnTypes = new ArrayList<>();
-        collectReturns(m.body(), returnTypes);
+    /**
+     * D12 FE-F4: unify the types of a private method's {@code return} values
+     * (inferred with the full environment). No value-returning {@code return}
+     * = void; values in one family unify to that family; anything else is
+     * {@code <unknown>} -- never a best-effort pick, because every typed
+     * operator refuses {@code <unknown>}.
+     */
+    private static String unifyReturnTypes(List<String> returnTypes) {
         if (returnTypes.isEmpty()) return "void";
         String first = returnTypes.get(0);
-        boolean allSame = true;
-        for (String t : returnTypes) {
-            if (!t.equals(first)) { allSame = false; break; }
-        }
-        if (allSame) return first;
-        // Collapse to a family if all returns share one.
+        if (returnTypes.stream().allMatch(first::equals)) return first;
         if (returnTypes.stream().allMatch(BIGINT_SUBTYPES::contains)) return "bigint";
         if (returnTypes.stream().allMatch(BYTESTRING_SUBTYPES::contains)) return "ByteString";
-        if (returnTypes.stream().allMatch("boolean"::equals)) return "boolean";
-        return first;
+        return "<unknown>";
     }
 
-    private static void collectReturns(List<Statement> stmts, List<String> out) {
-        for (Statement s : stmts) {
-            if (s instanceof ReturnStatement r) {
-                if (r.value() != null) {
-                    out.add(staticInferType(r.value()));
-                }
-            } else if (s instanceof IfStatement i) {
-                collectReturns(i.thenBody(), out);
-                if (i.elseBody() != null) {
-                    collectReturns(i.elseBody(), out);
-                }
-            } else if (s instanceof ForStatement f) {
-                collectReturns(f.body(), out);
-            }
+    /** Binary operators whose lowering depends on the operand family (D12 FE-F1). */
+    public static boolean isTypedBinaryOp(Expression.BinaryOp op) {
+        return switch (op) {
+            case ADD, EQ, NEQ, BIT_AND, BIT_OR, BIT_XOR -> true;
+            default -> false;
+        };
+    }
+
+    /** The lowering family of a resolved type: bytes, a script number, or none. */
+    private static OperandType operandFamily(String t) {
+        if (BYTESTRING_SUBTYPES.contains(t)) return OperandType.BYTES;
+        if (BIGINT_SUBTYPES.contains(t) || "boolean".equals(t)) return OperandType.NUMERIC;
+        return null;
+    }
+
+    /** D12 FE-F1: the one wording every tier emits. */
+    public static String unresolvedOperandTypesMessage(String op, String left, String right) {
+        return "Cannot resolve the operand types of '" + op + "' (got '" + left + "' and '" + right + "'): "
+            + "it must be known whether the operands are byte strings or numbers";
+    }
+
+    /** D12 FE-F4: the one wording every tier emits (types in first-seen order). */
+    public static String incompatibleReturnTypesMessage(String method, List<String> types) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < types.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append('\'').append(types.get(i)).append('\'');
         }
+        return "Method '" + method + "' returns values of incompatible types (" + sb + "); declare its return type";
     }
 
-    /** Env-free expression type inference used for private-method return typing. */
+    /** D12 FE-F4: the one wording every tier emits. */
+    public static String declaredReturnMismatchMessage(String method, String actual, String declared) {
+        return "Method '" + method + "' returns '" + actual + "', which is not assignable to its declared return type '"
+            + declared + "'";
+    }
+
+    /** Env-free expression type inference used for property initializers. */
     private static String staticInferType(Expression e) {
         if (e == null) return "<unknown>";
         if (e instanceof BigIntLiteral) return "bigint";

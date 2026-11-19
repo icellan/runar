@@ -10,6 +10,7 @@ names (``t0``, ``t1``, ...).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 
@@ -66,7 +67,6 @@ from runar_compiler.frontend.side_effect_summary import (
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
 from runar_compiler.ir.loader import MAX_LOOP_COUNT
-from runar_compiler.frontend.typecheck import BUILTIN_FUNCTIONS, _BYTESTRING_SUBTYPES
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +78,15 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
 
     Matches the TypeScript reference compiler's ``04-anf-lower.ts`` exactly.
     """
+    # D12 FE-F1: operator lowering reads the operand family typecheck records
+    # on the AST. The compiler always type-checks first; a caller handing this
+    # public entry point a contract that never went through the type checker
+    # gets it run here (its diagnostics are the caller's business), so the
+    # types still come from the checker and never from a guess. A node the
+    # checker could not type keeps no annotation and is refused below.
+    if _has_untyped_operator(contract):
+        from runar_compiler.frontend.typecheck import type_check
+        type_check(contract)
     properties = _lower_properties(contract)
     methods = _lower_methods(contract)
 
@@ -100,85 +109,44 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
 
 
 # ---------------------------------------------------------------------------
-# Byte-typed expression detection
+# Typed operators (D12 FE-F1)
 # ---------------------------------------------------------------------------
 
-# N-076: there is deliberately no list here. typecheck._BYTESTRING_SUBTYPES is
-# the authority on whether a value of a given type sits on the stack as a BYTE
-# STRING rather than as a script NUMBER, and this module consults it.
-#
-# The second, hand-maintained copy this replaces carried "RabinSig" and
-# "RabinPubKey", which typecheck files under _BIGINT_SUBTYPES -- so `===` on a
-# Rabin value emitted OP_EQUAL and, far worse, `+` on one emitted OP_CAT where
-# the source said addition.
-#
-# Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added with
-# OP_ADD.
-_BYTE_TYPES = _BYTESTRING_SUBTYPES
+# Binary operators whose opcode depends on the operand family.
+_TYPED_BINARY_OPS: frozenset[str] = frozenset({"+", "===", "!==", "&", "|", "^"})
 
 
-def _is_byte_returning_builtin(name: str) -> bool:
-    """Does the builtin *name* return a ByteString-family value?
-
-    N-347: read off the return_type column of typecheck's BUILTIN_FUNCTIONS,
-    not a second hand-written list. Two such lists lived here and drifted:
-    N-054 (a name-prefix test swept the six numeric extractors in) and
-    N-345 / N-347 (byte-returning builtins left out -- merkleRootSha256,
-    merkleRootHash256, bn254G1Add, bn254G1Negate, bn254G1ScalarMul -- so
-    ``===`` on two of their results compiled to OP_NUMEQUAL). Do not
-    reintroduce one.
-    """
-    sig = BUILTIN_FUNCTIONS.get(name)
-    return sig is not None and sig.return_type in _BYTE_TYPES
-
-
-def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
-    """Return True if *expr* is known to produce a byte-typed value."""
-    if expr is None:
+def _has_untyped_operator(node) -> bool:
+    """Does any operator whose lowering needs an operand type lack one?"""
+    if isinstance(node, (list, tuple)):
+        return any(_has_untyped_operator(n) for n in node)
+    if not dataclasses.is_dataclass(node) or isinstance(node, type):
         return False
-
-    if isinstance(expr, ByteStringLiteral):
+    if getattr(node, "operand_type", "") is None and (
+        (isinstance(node, BinaryExpr) and node.op in _TYPED_BINARY_OPS)
+        or (isinstance(node, UnaryExpr) and node.op == "~")
+    ):
         return True
+    return any(_has_untyped_operator(getattr(node, f.name)) for f in dataclasses.fields(node))
 
-    if isinstance(expr, Identifier):
-        # N-046 / N-047: a renamed (shadowing) declaration is judged by its own
-        # binding, never by the parameter or property it shadows.
-        renamed = ctx._scope_renames.get(expr.name)
-        if renamed is not None:
-            return renamed in ctx._local_byte_vars
-        t = ctx.get_param_type(expr.name)
-        if t is not None and t in _BYTE_TYPES:
-            return True
-        t = ctx.get_property_type(expr.name)
-        if t is not None and t in _BYTE_TYPES:
-            return True
-        if ctx.local_name(expr.name) in ctx._local_byte_vars:
-            return True
-        return False
 
-    if isinstance(expr, PropertyAccessExpr):
-        t = ctx.get_property_type(expr.property)
-        if t is not None and t in _BYTE_TYPES:
-            return True
-        return False
+def _require_operand_type(op: str, t: str | None) -> str:
+    """D12 FE-F1: the operand family typecheck recorded on an operator node.
 
-    if isinstance(expr, MemberExpr):
-        if isinstance(expr.object, Identifier) and expr.object.name == "this":
-            t = ctx.get_property_type(expr.property)
-            if t is not None and t in _BYTE_TYPES:
-                return True
-        return False
-
-    if isinstance(expr, CallExpr):
-        if isinstance(expr.callee, Identifier):
-            # Expression-form asm<ByteString>({...}) yields a byte value.
-            if expr.callee.name == "asm":
-                return expr.asm_return_type == "ByteString"
-            if _is_byte_returning_builtin(expr.callee.name):
-                return True
-        return False
-
-    return False
+    There is deliberately no fallback. The previous heuristic
+    (``_is_byte_typed_expr``) defaulted to numeric whenever it could not see a
+    byte type -- a ternary, a helper result, ``this.arr[i]``, a bitwise result,
+    or a local built from one -- and compiled byte-string ``+`` to OP_ADD and
+    ``===`` to OP_NUMEQUAL. A node without the annotation was never
+    type-checked, so it is refused.
+    """
+    if t is None:
+        raise RuntimeError(
+            f"ANF lowering: operator '{op}' carries no operand type from the type checker; "
+            "run type_check() on the contract before lower_to_anf() "
+            "(refusing to guess byte string vs number)"
+        )
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -817,7 +785,6 @@ class _LowerCtx:
         self._scope_renames: dict[str, str] = {}
         # N-046: source names of the loop variables in scope.
         self._loop_vars: set[str] = set()
-        self._local_byte_vars: set[str] = set()
         self.current_source_loc: SourceLocation | None = None
         # Param substitution stack used when inlining a private method's
         # body into this context. When the inlined body references that
@@ -1040,7 +1007,6 @@ class _LowerCtx:
         saved = (
             self._scope_renames,
             set(self._local_names),
-            set(self._local_byte_vars),
             dict(self._local_aliases),
             set(self._loop_vars),
         )
@@ -1051,7 +1017,6 @@ class _LowerCtx:
         (
             self._scope_renames,
             self._local_names,
-            self._local_byte_vars,
             self._local_aliases,
             self._loop_vars,
         ) = saved
@@ -1091,12 +1056,6 @@ class _LowerCtx:
         # match a same-named param of a different method (issue #34).
         return self._param_types.get(name)
 
-    def get_property_type(self, name: str) -> str | None:
-        for p in self._contract.properties:
-            if p.name == name:
-                return _type_node_to_string(p.type)
-        return None
-
     def sub_context(self) -> _LowerCtx:
         """Create a sub-context for nested blocks (if/else, loops).
 
@@ -1130,7 +1089,6 @@ class _LowerCtx:
         # value, so a rename made inside it ends with it.
         sub._scope_renames = dict(self._scope_renames)
         sub._loop_vars = set(self._loop_vars)
-        sub._local_byte_vars = set(self._local_byte_vars)
         # Deep-copy the inlined-param alias stack. ``_inline_private_method_call``
         # pushes the caller's argument refs onto the CURRENT context before
         # lowering the private body; without this, an if arm / loop body /
@@ -1230,15 +1188,10 @@ class _LowerCtx:
 
     def _lower_variable_decl(self, stmt: VariableDeclStmt) -> None:
         value_ref = self.lower_expr_to_ref(stmt.init)
-        # Byte-typedness of the initialiser is judged before the new name is in
-        # scope (the initialiser reads the OUTER binding of a shadowed name).
-        is_bytes = _is_byte_typed_expr(stmt.init, self)
         # N-046 / N-047: a declaration reusing an enclosing binding's name is
         # alpha-renamed (see ``declare_local``).
         binding_name = self.declare_local(stmt.name)
         self.add_local(binding_name)
-        if is_bytes:
-            self._local_byte_vars.add(binding_name)
         self.emit_named(binding_name, _make_load_const_string("@ref:" + value_ref))
 
     def _lower_assignment(self, stmt: AssignmentStmt) -> None:
@@ -1615,20 +1568,12 @@ class _LowerCtx:
             left_ref = self.lower_expr_to_ref(expr.left)
             right_ref = self.lower_expr_to_ref(expr.right)
 
+            # D12 FE-F1: `+` (OP_CAT / OP_ADD), `===` / `!==` (OP_EQUAL /
+            # OP_NUMEQUAL) and `& | ^` (byte string vs number) are lowered from
+            # the operand family the TYPE CHECKER resolved and recorded on the
+            # node -- never from a guess.
             result_type: str | None = None
-            if (expr.op in ("===", "!==")) and (
-                _is_byte_typed_expr(expr.left, self) or _is_byte_typed_expr(expr.right, self)
-            ):
-                result_type = "bytes"
-            # For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
-            if expr.op == "+" and (
-                _is_byte_typed_expr(expr.left, self) or _is_byte_typed_expr(expr.right, self)
-            ):
-                result_type = "bytes"
-            # For bitwise &, |, ^, annotate byte-typed operands.
-            if expr.op in ("&", "|", "^") and (
-                _is_byte_typed_expr(expr.left, self) or _is_byte_typed_expr(expr.right, self)
-            ):
+            if expr.op in _TYPED_BINARY_OPS and _require_operand_type(expr.op, expr.operand_type) == "bytes":
                 result_type = "bytes"
 
             return self.emit(ANFValue(
@@ -1640,8 +1585,8 @@ class _LowerCtx:
         if isinstance(expr, UnaryExpr):
             operand_ref = self.lower_expr_to_ref(expr.operand)
             unary_val = ANFValue(kind="unary_op", op=expr.op, operand=operand_ref)
-            # For ~, annotate byte-typed operands so downstream passes know the result is bytes.
-            if expr.op == "~" and _is_byte_typed_expr(expr.operand, self):
+            # D12 FE-F1: see the binary case.
+            if expr.op == "~" and _require_operand_type("~", expr.operand_type) == "bytes":
                 unary_val.result_type = "bytes"
             return self.emit(unary_val)
 
@@ -2185,8 +2130,6 @@ class _LowerCtx:
             param = method.params[i]
             binding_name = self.declare_local(param.name)
             self.add_local(binding_name)
-            if _type_node_to_string(param.type) in _BYTE_TYPES:
-                self._local_byte_vars.add(binding_name)
             self.emit_named(binding_name, _make_load_const_string("@ref:" + arg_refs[i]))
         start_index = len(self.bindings)
         self.lower_statements(method.body)

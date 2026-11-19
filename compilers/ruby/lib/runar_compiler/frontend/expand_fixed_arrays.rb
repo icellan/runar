@@ -422,7 +422,8 @@ module RunarCompiler
           source_location: method.source_location,
           # Preserve the declared @sighash mode (issue #123) across expansion.
           sighash_type: method.sighash_type,
-          binding_variant: method.binding_variant
+          binding_variant: method.binding_variant,
+          return_type: method.return_type
         )
       end
 
@@ -644,7 +645,9 @@ module RunarCompiler
             value: BinaryExpr.new(
               op: expr.is_a?(IncrementExpr) ? "+" : "-",
               left: clone_expr(target),
-              right: BigIntLiteral.new(value: 1)
+              right: BigIntLiteral.new(value: 1),
+              # D12 FE-F1: typecheck already required a bigint operand for ++/--.
+              operand_type: "numeric"
             ),
             source_location: stmt.source_location
           )
@@ -705,9 +708,11 @@ module RunarCompiler
           @order_cond += 1 if short_circuit
           right = rewrite_expression(expr.right, prelude)
           @order_cond -= 1 if short_circuit
-          BinaryExpr.new(op: expr.op, left: left, right: right)
+          # D12 FE-F1: the type checker's operand family survives the rebuild.
+          BinaryExpr.new(op: expr.op, left: left, right: right, operand_type: expr.operand_type)
         when UnaryExpr
-          UnaryExpr.new(op: expr.op, operand: rewrite_expression(expr.operand, prelude))
+          UnaryExpr.new(op: expr.op, operand: rewrite_expression(expr.operand, prelude),
+                        operand_type: expr.operand_type)
         when CallExpr
           # The callee names a function; it is not a value read.
           read_before_callee = @order_read
@@ -886,7 +891,8 @@ module RunarCompiler
           cond = BinaryExpr.new(
             op: "===",
             left: clone_expr(index_ref),
-            right: BigIntLiteral.new(value: i)
+            right: BigIntLiteral.new(value: i),
+            operand_type: "numeric" # D12 FE-F1: index vs a bigint literal
           )
           assign = AssignmentStmt.new(
             target: clone_expr(target),
@@ -917,7 +923,8 @@ module RunarCompiler
           cond = BinaryExpr.new(
             op: "===",
             left: clone_expr(index_ref),
-            right: BigIntLiteral.new(value: i)
+            right: BigIntLiteral.new(value: i),
+            operand_type: "numeric" # D12 FE-F1: index vs a bigint literal
           )
           branch = PropertyAccessExpr.new(property: slot)
           chain = TernaryExpr.new(
@@ -1007,7 +1014,8 @@ module RunarCompiler
           cond = BinaryExpr.new(
             op: "===",
             left: clone_expr(index_ref),
-            right: BigIntLiteral.new(value: i)
+            right: BigIntLiteral.new(value: i),
+            operand_type: "numeric" # D12 FE-F1: index vs a bigint literal
           )
           branch_assign = AssignmentStmt.new(
             target: PropertyAccessExpr.new(property: slot),
@@ -1192,9 +1200,10 @@ module RunarCompiler
         when PropertyAccessExpr
           PropertyAccessExpr.new(property: expr.property)
         when BinaryExpr
-          BinaryExpr.new(op: expr.op, left: clone_expr(expr.left), right: clone_expr(expr.right))
+          BinaryExpr.new(op: expr.op, left: clone_expr(expr.left), right: clone_expr(expr.right),
+                         operand_type: expr.operand_type)
         when UnaryExpr
-          UnaryExpr.new(op: expr.op, operand: clone_expr(expr.operand))
+          UnaryExpr.new(op: expr.op, operand: clone_expr(expr.operand), operand_type: expr.operand_type)
         when CallExpr
           CallExpr.new(callee: clone_expr(expr.callee), args: expr.args.map { |a| clone_expr(a) },
                        asm_return_type: expr.asm_return_type)

@@ -763,12 +763,14 @@ const Parser = struct {
         var fa_len: u32 = 0;
         var fa_elem: RunarType = .unknown;
         var fa_nested_len: u32 = 0;
+        var fa_leaf: types.RunarType = .unknown;
         if (parsed_type.type_node == .fixed_array_type) {
             fa_len = parsed_type.type_node.fixed_array_type.length;
             const inner = parsed_type.type_node.fixed_array_type.element.*;
             fa_elem = typeNodeToRunarType(inner);
             if (inner == .fixed_array_type) {
                 fa_nested_len = inner.fixed_array_type.length;
+                fa_leaf = types.typeNodeToRunarType(inner.fixed_array_type.element.*);
             }
         }
 
@@ -785,6 +787,7 @@ const Parser = struct {
             .fixed_array_length = fa_len,
             .fixed_array_element = fa_elem,
             .fixed_array_nested_length = fa_nested_len,
+            .fixed_array_leaf = fa_leaf,
         };
     }
 
@@ -1034,14 +1037,18 @@ const Parser = struct {
         // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
         // native spelling of the `@sighash` directive.
         var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        var declared_return: ?types.RunarType = null;
+        var declared_return_name: []const u8 = "";
         if (self.parseSighashReturnType()) |spec| {
             sighash_specs.append(self.allocator, spec) catch {};
         } else if (self.current.kind != .lbrace) {
-            // The AST keeps no return type; N-331 refuses an unknown name.
-            // `init` returns the contract struct itself, which is not a type
-            // to check.
+            // N-331 refuses an unknown name. `init` returns the contract
+            // struct itself, which is not a type to check. D12 FE-F4: the
+            // declared type is kept on the method for the type checker.
             const rt = self.parseTypeNode();
             if (!std.mem.eql(u8, name, "init")) {
+                declared_return = types.declaredReturnTypeNode(rt);
+                declared_return_name = types.declaredReturnTypeName(self.allocator, rt);
                 const rt_unknown = types.spelledIfUnknown(typeNodeToRunarType(rt), typeNodeName(rt));
                 if (rt_unknown.len > 0) {
                     self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
@@ -1063,7 +1070,7 @@ const Parser = struct {
             .value => |v| sighash_type = v,
             .err => |e| self.addErrorAtLoc(method_loc, e),
         };
-        return MethodNode{ .name = name, .is_public = is_public, .params = params.items, .body = body, .sighash_type = sighash_type, .source_loc = method_loc };
+        return MethodNode{ .name = name, .is_public = is_public, .params = params.items, .body = body, .sighash_type = sighash_type, .source_loc = method_loc, .return_type = declared_return, .return_type_name = declared_return_name };
     }
 
     fn parseParam(self: *Parser) ?ParamNode {
