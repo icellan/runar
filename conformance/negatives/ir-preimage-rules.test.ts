@@ -96,15 +96,35 @@ const acceptSrc = (name: string): { src: string; file: string } => corpus.accept
 const golden = (fixture: string): Ir =>
   JSON.parse(readFileSync(join(REPO, `conformance/tests/${fixture}/expected-ir.json`), 'utf8')) as Ir;
 
+function helperReadsPreimage(ir: Ir): Ir {
+  const text = JSON.stringify(ir);
+  const spent = ir.methods.find((m) => m.name === 'spent');
+  const first = spent?.body[0]?.value;
+  if (!first || first.kind !== 'load_prop' || first.name !== 'txPreimage' || !text.includes('"method":"spent"')) {
+    throw new Error('HelperExtractAmount no longer lowers to a method_call helper that reads load_prop txPreimage');
+  }
+  return ir;
+}
+
 const ACCEPT: Array<{ name: string; ir: Ir }> = [
   ...corpus.accept.map((c) => ({ name: `corpus ${c.name}`, ir: irOf(c.src, c.file) })),
   { name: 'golden auction', ir: golden('auction') },
   { name: 'golden private-helper-outputs', ir: golden('private-helper-outputs') },
   {
     name: 'helper-extract-amount (stateful helper reads the implicit txPreimage)',
-    ir: JSON.parse(
-      readFileSync(join(REPO, 'conformance/anf-interpreter/programs/helper-extract-amount.anf.json'), 'utf8'),
-    ) as Ir,
+    // D25: the checked-in interpreter program (anf-interpreter/programs/
+    // helper-extract-amount.anf.json) is a pre-D25 mutate-only ALL
+    // continuation, which the --ir continuation-binding rule now refuses
+    // before any preimage rule is graded. Its source is lowered fresh instead
+    // (a SIGHASH_SINGLE continuation); `helperReadsPreimage` below keeps the
+    // shape this case is about: a private `spent` helper, reached by
+    // method_call, whose body starts with `load_prop txPreimage`.
+    ir: helperReadsPreimage(
+      irOf(
+        readFileSync(join(REPO, 'conformance/anf-interpreter/programs/HelperExtractAmount.runar.ts'), 'utf8'),
+        'HelperExtractAmount.runar.ts',
+      ),
+    ),
   },
 ];
 

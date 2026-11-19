@@ -298,15 +298,19 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       // PR B (#180/#213) re-stamp, every row: +7 B for the entry width gate on
       // the injected `_changePKH` (+14 B for PubKey, whose `next: PubKey`
       // param is gated too). Gate-only delta.
-      ByteString: 'c5bde21d3c0fb65e703756ec6ec7c137d2bd8f9507faf5340bfe45aae8fe459a',
-      PubKey: 'cbae90abbd839aeb84e39cdd85f62e3b3be1d5b26ae27f2c61cd4c1de5f3163f',
-      bigint: '194a175534f9f33b200745d35a3b9f62499151041d96cc138231da7c19a12ef6',
+      // D25 re-stamp, every row: the mutating method is the contract's only
+      // continuation method and is mutate-only, so it commits under
+      // SIGHASH_SINGLE|FORKID (no change segment, no `_changePKH` gate).
+      // Re-measured in the TS tier; bigint == RabinSig still holds.
+      ByteString: '63656173af9a11f2f5915796ca76f0a8fe11bbcd8d24428884a3cef4bf00134e',
+      PubKey: '70368f2e82ffa7bbc4f2aafb98f4b18b4acc1d10cb212ffe8cd6a12b36fdcc1d',
+      bigint: '8955396061ac8e29a200fc2178d3b7b9ff2f13866eb86c2f84cc2e6466c80e2b',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
       // parameter and so gains the 9-byte ABI-domain gate. `bigint` and
       // `RabinSig` still agree with each other, which is the equality this
       // table exists to defend.
-      boolean: '93aaabfed910cdb528de5a82b34985e3d5e1f3ba4200471859ed95b2d2a00f07',
-      RabinSig: '194a175534f9f33b200745d35a3b9f62499151041d96cc138231da7c19a12ef6',
+      boolean: 'ebb9281fd4e4fd095d4347a5919f0344a5d72c73954be4c8c8f6b4cc2ae7c6fc',
+      RabinSig: '8955396061ac8e29a200fc2178d3b7b9ff2f13866eb86c2f84cc2e6466c80e2b',
     };
 
     for (const [type, digest] of Object.entries(TERMINAL_PINS)) {

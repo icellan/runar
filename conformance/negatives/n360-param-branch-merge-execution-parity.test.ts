@@ -224,7 +224,8 @@ const STATEFUL: { name: string; src: string; headSha?: { off: string; on: string
     // N-216 (2026-10-21): re-pinned; one lowerUpdateProp `OP_2 OP_ROLL` now
     // folds to OP_ROT (745 -> 744 B, opcode diff is that fold only).
     // PR B (#180/#213): re-pinned, +7 B (entry width gate on `_changePKH`; 738 -> 745 B).
-    headSha: { off: '1fe012c596e62837', on: '1fe012c596e62837' },
+    // D25: re-pinned; a mutate-only contract commits under SIGHASH_SINGLE (no change segment or gate).
+    headSha: { off: 'ff46c58e02bae062', on: 'ff46c58e02bae062' },
   },
   {
     name: 'Out',
