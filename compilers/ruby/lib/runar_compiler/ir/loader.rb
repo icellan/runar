@@ -142,6 +142,15 @@ module RunarCompiler
       # stateful programs alike; see locktime_domain.rb).
       LocktimeDomain.assert!(program)
 
+      # D25: a StatefulSmartContract's continuations must be bound to their
+      # input (SINGLE, or the hidden spent-outpoint field); checked last among
+      # the IR frontend rules so every earlier, more specific diagnostic keeps
+      # precedence. See stateful_scaffold.rb.
+      if _effective_parent_class(program) == "StatefulSmartContract"
+        d25_err = StatefulScaffold.continuation_binding_error(program)
+        raise ArgumentError, d25_err if d25_err
+      end
+
       program
     end
 

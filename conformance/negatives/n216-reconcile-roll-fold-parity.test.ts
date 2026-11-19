@@ -212,10 +212,15 @@ describe('N-216 / N-231: branch-reconcile rolls fold in every tier', () => {
     const PRE: [string, string, Record<string, number>][] = [
       ['if-else', PRE_IF_ELSE, { '00': 0, '51': 1, '52': 0 }],
       ['branch-merged-locals', PRE_BRANCH_MERGED_LOCALS, { '00': 0, '51': 0, '52': 2 }],
-      // N-231: six OP_2 OP_ROLL (two from the stale-slot drop loop, four from
-      // the sinkBelow restore loop) and two OP_1 OP_ROLL (restore loop).
-      ['assert-false-guard', PRE_ASSERT_FALSE_GUARD, { '00': 0, '51': 2, '52': 6 }],
+      // N-231: assert-false-guard's pre-fix golden (six OP_2 OP_ROLL, two OP_1
+      // OP_ROLL) is kept below for the record, but its golden moved again under
+      // D25 (its continuation method is mutate-only, so it now commits under
+      // SIGHASH_SINGLE: no change segment, different stack depths), so it is no
+      // longer "the pre-fix golden with only its rolls folded". The invariant
+      // the fix is about still holds for it: the MOVED/LIVE checks above and
+      // below find no OP_0/1/2 OP_ROLL pair in its golden or any tier's bytes.
     ];
+    void PRE_ASSERT_FALSE_GUARD;
     for (const [f, pre, counts] of PRE) {
       it(`${f}: the golden is the pre-fix golden with exactly its <k> OP_ROLL pairs folded`, () => {
         const old = walk(pre);

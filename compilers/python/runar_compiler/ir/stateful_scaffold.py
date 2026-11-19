@@ -29,6 +29,8 @@ import json
 from runar_compiler.ir.types import ANFBinding, ANFMethod, ANFProgram, ANFValue
 
 SIGHASH_DEFAULT = 0x41
+# D25: the hidden state field of a 'bind' contract (frontend/continuation_binding.py).
+TWIN_BINDING_FIELD = "_spentOutpointHash"
 _STATE_OUTPUT_KINDS = frozenset({"add_output", "add_raw_output"})
 _DATA_OUTPUT_KINDS = frozenset({"add_data_output"})
 
@@ -81,9 +83,16 @@ def _prologue(e: _Emitter, sighash_mode: int, has_mutable_state: bool) -> None:
         e.emit(ANFValue(kind="deserialize_state", preimage=p3))
 
 
+def _outpoint_binding(e: _Emitter) -> str:
+    """D25: ``sha256(extractOutpoint(txPreimage))`` (emitOutpointBinding)."""
+    pre = e.emit(_param("txPreimage"))
+    outpoint = e.emit(_call("extractOutpoint", pre))
+    return e.emit(_call("sha256", outpoint))
+
+
 def _continuation(
     e: _Emitter, needs_change: bool, includes_change: bool,
-    state_refs: list[str], data_refs: list[str],
+    state_refs: list[str], data_refs: list[str], binds_outpoint: bool = False,
 ) -> None:
     if not needs_change:
         return
@@ -109,6 +118,10 @@ def _continuation(
         for r in state_refs[1:]:
             acc = e.emit(_call("cat", acc, r))
     else:
+        # D25: a 'bind' contract's auto-continuation records the spent outpoint.
+        if binds_outpoint:
+            h = _outpoint_binding(e)
+            e.emit(ANFValue(kind="update_prop", name=TWIN_BINDING_FIELD, value_ref=h))
         script = e.emit(ANFValue(kind="get_state_script"))
         p = e.emit(_param("txPreimage"))
         new_amount = e.emit(_param("_newAmount"))
@@ -236,6 +249,8 @@ class _Matcher:
             )
         elif k == "deserialize_state":
             ok = self.ref(e.preimage, a.preimage)
+        elif k == "update_prop":
+            ok = e.name == a.name and self.ref(e.value_ref, a.value_ref)
         elif k == "get_state_script":
             ok = True
         elif k == "if":
@@ -284,6 +299,7 @@ def stateful_scaffold_error(program: ANFProgram) -> str | None:
     ``load_ir`` adds, or ``None``."""
     has_mutable = any(not p.readonly for p in program.properties)
     props = {p.name for p in program.properties}
+    binds_outpoint = TWIN_BINDING_FIELD in props
     for m in program.methods:
         if not m.is_public or m.name == "constructor":
             continue
@@ -344,7 +360,7 @@ def stateful_scaffold_error(program: ANFProgram) -> str | None:
                 elif any(_contains(n, _DATA_OUTPUT_KINDS) for n in _nested(b.value)):
                     data_out.append(b)
         tail = _Emitter(taken, counter)
-        _continuation(tail, needs_change, includes_change, [b.name for b in state_out], [b.name for b in data_out])
+        _continuation(tail, needs_change, includes_change, [b.name for b in state_out], [b.name for b in data_out], binds_outpoint)
         offset = len(rest) - len(tail.out)
         for i, e in enumerate(tail.out):
             if offset + i < 0 or not match.binding(e, rest[offset + i]):
@@ -376,4 +392,99 @@ def stateful_scaffold_error(program: ANFProgram) -> str | None:
                     f"no property or parameter uses: the injected scaffolding binds it or the "
                     f"continuation commits to it"
                 )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# D25: the --ir check of the contract-level continuation binding
+# ---------------------------------------------------------------------------
+
+def ir_unbound_continuation_message(detail: str) -> str:
+    """D25: the shared --ir diagnostic (carries its own ``IR validation: `` prefix)."""
+    return f"IR validation: StatefulSmartContract continuation is not bound to its input (twin-input theft): {detail}"
+
+
+def _is_zero_hash(v) -> bool:
+    if isinstance(v, str):
+        return v == "00" * 32
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v) == bytes(32)
+    return False
+
+
+def continuation_binding_error(program: ANFProgram) -> str | None:
+    """D25 (``assertIrContinuationBinding``): an ``--ir`` program must carry
+    the binding the frontend would give it. Without the hidden
+    ``_spentOutpointHash`` field, a program with an auto-continuation method
+    must commit every continuation under a SINGLE base, from
+    auto-continuation methods only. With the field, it must be the LAST
+    property, mutable, ``Sha256``, zero at deploy, and every ``add_output``
+    must carry ``sha256(extractOutpoint(txPreimage))`` as its last state
+    value. Returns the full message (prefix included) or ``None``."""
+    props = program.properties
+    if any(p.name == TWIN_BINDING_FIELD for p in props):
+        field = props[-1]
+        if (
+            field.name != TWIN_BINDING_FIELD or field.readonly or field.type != "Sha256"
+            or not _is_zero_hash(field.initial_value)
+        ):
+            return ir_unbound_continuation_message(
+                f"'{TWIN_BINDING_FIELD}' must be the last property, mutable, of type Sha256, "
+                f"with initial value 32 zero bytes"
+            )
+        for m in program.methods:
+            by_name: dict[str, ANFValue] = {}
+
+            def index(bs: list[ANFBinding]) -> None:
+                for b in bs:
+                    by_name[b.name] = b.value
+                    for n in _nested(b.value):
+                        index(n)
+
+            index(m.body)
+
+            def call(r: str | None, func: str) -> str | None:
+                v = by_name.get(r) if r is not None else None
+                if v is not None and v.kind == "call" and v.func == func and len(v.args or []) == 1:
+                    return v.args[0]
+                return None
+
+            def check(bs: list[ANFBinding]) -> str | None:
+                for b in bs:
+                    if b.value.kind == "add_output":
+                        sv = b.value.state_values or []
+                        pre = call(call(sv[-1] if sv else None, "sha256"), "extractOutpoint")
+                        v = by_name.get(pre) if pre is not None else None
+                        if v is None or v.kind != "load_param" or v.name != "txPreimage":
+                            return ir_unbound_continuation_message(
+                                f"method '{m.name}': every add_output must carry "
+                                f"sha256(extractOutpoint(txPreimage)) as its last state value"
+                            )
+                    for n in _nested(b.value):
+                        err = check(n)
+                        if err:
+                            return err
+                return None
+
+            err = check(m.body)
+            if err:
+                return err
+        return None
+    shapes = [
+        (m, _shape(program, m))
+        for m in program.methods
+        if m.is_public and m.name != "constructor"
+    ]
+    shapes = [(m, sh) for m, sh in shapes if sh[0]]
+    if not any(sh[2] for _, sh in shapes):
+        return None
+    for m, sh in shapes:
+        mode = m.sighash_type if m.sighash_type is not None else SIGHASH_DEFAULT
+        single = (mode & 0x1F) == 0x03
+        if not sh[2] or not single:
+            return ir_unbound_continuation_message(
+                f"method '{m.name}': a program with an auto-continuation method and no "
+                f"'{TWIN_BINDING_FIELD}' field must commit every continuation under a "
+                f"SIGHASH_SINGLE base, from auto-continuation methods only"
+            )
     return None

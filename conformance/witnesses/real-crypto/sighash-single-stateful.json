@@ -15,7 +15,10 @@
       "expect": "accept",
       "note": "SINGLE|FORKID: continuation re-created at the full input amount, count 5->6, with an uncommitted change output alongside (rejected before N-038: the continuation hashed the change too)",
       "expectedState": {
-        "count": "6n"
+        "count": "6n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -43,7 +46,10 @@
       "expect": "accept",
       "note": "default ALL|FORKID method on the same contract: count 5->0",
       "expectedState": {
-        "count": "0n"
+        "count": "0n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -56,7 +62,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "f9534c154ce83420cae21cd6e32c957ffa9e1d34cfacb2a33e460cda7b3979c1",
-    "expected-ir.json": "4aeea707ef9fdc88247a1c13009111fecd27b79dc7121a7ae52e05924974715d"
+    "expected-script.hex": "1495a0cf9a41211d7cbb486da753fc15b56369c8e445a026f109ef8b069f2f80",
+    "expected-ir.json": "bec6018868ecfcddc491085c47d2ddb447c7bc3e4e8bad1e2c0d70f79a4b8e1c"
   }
 }

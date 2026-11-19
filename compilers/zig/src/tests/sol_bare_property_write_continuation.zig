@@ -104,14 +104,15 @@ const SOL_SHADOW_SRC =
 
 /// The continuation parameters a method that writes state must declare. Their
 /// absence is the whole defect: no continuation parameters means no covenant.
+// D25: a mutate-only contract defaults to SIGHASH_SINGLE|FORKID, so the
+// continuation keeps `_newAmount` and drops the uncommitted change params
+// (TS reference ABI).
 const settle_continuation =
     "\"name\":\"settle\",\"params\":[" ++
     "{\"name\":\"amount\",\"type\":\"bigint\"}," ++
-    "{\"name\":\"_changePKH\",\"type\":\"Ripemd160\"}," ++
-    "{\"name\":\"_changeAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"_newAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}]," ++
-    "\"isPublic\":true,\"usesCodePart\":true";
+    "\"isPublic\":true,\"usesCodePart\":true,\"sigHashType\":67";
 
 /// The terminal ABI: no continuation parameters, no `_codePart` witness, and
 /// (N-139, matching TS) the explicit `isTerminal` flag.

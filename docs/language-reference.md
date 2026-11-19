@@ -670,6 +670,53 @@ state chain alive at 1 sat and pay the rest of the input to their own change
 output. Methods that size their outputs with `addOutput` / `addRawOutput`, and
 terminal methods, get no such check — the author owns those amounts.
 
+#### One continuation per input (D25)
+
+The preimage a covenant checks carries no input position, and a covenant that
+commits the whole output list (`hash256(continuation || change) == hashOutputs`)
+rebuilds the same list for every input that reaches the same next state. Two
+UTXOs of one contract spent in one transaction used to be satisfied by ONE
+continuation, and the second input's value left as change: for a contract like
+`Counter`, anyone could take it. The compiler now binds every default
+continuation to the input that made it, per contract:
+
+- **Every continuation method is mutate-only** (no `addOutput` /
+  `addRawOutput` / `addDataOutput`, and no read of `extractHashSequence`,
+  `extractOutputHash`, `extractOutputs`, `extractSigHashType` or
+  `requireOutputP2PKH`): those methods default to `SIGHASH_SINGLE|FORKID`
+  (`@sighash ALL|ANYONECANPAY|FORKID` becomes `SINGLE|ANYONECANPAY|FORKID`).
+  BIP-143 SINGLE commits only output[inputIndex], value included, so each
+  contract input owns the output at its own index, and the floor above pins its
+  value. The methods take no `_changePKH` / `_changeAmount`; the caller may add
+  change anywhere else. **The continuation must sit at the output index equal
+  to the contract's input index.** A transaction with the contract at input 1
+  (a wallet funding input first) lays out `[change, continuation]`. A wrong
+  layout is refused by the node, not a fund loss. Independent instances can now
+  be batched in one transaction, each continuation at its own input's index. An
+  explicit `@sighash ALL|FORKID` on such a method is a compile error: it is the
+  one sibling that would let its input reuse another's output.
+- **The contract mixes a default continuation with `addOutput` methods, data
+  outputs, or a method that cannot run under SINGLE**: every continuation of the
+  contract (default or `addOutput`) carries `sha256(extractOutpoint(txPreimage))`
+  in a hidden last state field, `_spentOutpointHash` (`Sha256`, 32 zero bytes at
+  deploy, not a constructor parameter; the name is reserved). Two inputs can
+  then never rebuild the same output list. Cost: about 54 bytes of script and 32
+  bytes of state on every UTXO. The SDKs fill the field themselves; a caller
+  that builds a continuation script by hand must set it to the sha256 of the
+  spent outpoint (32-byte txid in wire order, then the 4-byte little-endian
+  vout).
+- **Every continuation method sizes its own outputs** (`addOutput` /
+  `addRawOutput` only): no binding is added. Such a method's outputs are the
+  author's to conserve, and so is their aliasing: two UTXOs that reach the same
+  outputs are satisfied by one set of them. `FungibleToken.merge` relies on
+  exactly that many-to-one shape. Where the method checks a signature, the
+  signer consented to the whole transaction; where it checks none and
+  re-creates the contract with `addOutput(extractAmount(...), ...)`, anyone can
+  take the twin's value, and every compiler warns.
+
+UTXOs locked by a script compiled before this change stay unbound; a script
+change cannot fix them.
+
 `continuationAmount()` is a read-only view of that same `_newAmount`, so a
 contract can state a stricter rule, for example a join that must add a bet:
 
@@ -965,8 +1012,11 @@ script.
 ### `@sighash`
 
 A public method's auto-injected covenant — and the preimage the SDK builds for
-it — commits to `ALL|FORKID` (`0x41`) by default. `@sighash` declares a
-different BIP-143 mode for that method alone.
+it — commits to `ALL|FORKID` (`0x41`) by default, except in a
+`StatefulSmartContract` whose continuation methods are all mutate-only, where
+those methods default to `SINGLE|FORKID` (`0x43`; see "One continuation per
+input (D25)"). `@sighash` declares a different BIP-143 mode for that method
+alone.
 
 ```typescript
 /** @sighash SINGLE|FORKID */
@@ -975,9 +1025,10 @@ public spendSingle(sig: Sig, pubKey: PubKey) { ... }
 
 Exactly one base type must appear — `ALL` (`0x01`), `NONE` (`0x02`) or `SINGLE`
 (`0x03`) — and `FORKID` (`0x40`) and `ANYONECANPAY` (`0x80`) are modifiers. The
-combined value is published on the method's ABI entry as `sigHashType`; the
-default is omitted rather than written out, so a method with no directive has no
-`sigHashType` field.
+combined value is published on the method's ABI entry as `sigHashType`;
+`ALL|FORKID` is omitted rather than written out, so a method that commits under
+it has no `sigHashType` field (a mutate-only continuation defaulted to SINGLE
+carries `sigHashType: 67`).
 
 A method may carry at most one `@sighash` directive, and once the marker is
 present the rest of the line must be a well-formed flag list: whitespace, then
@@ -1006,10 +1057,12 @@ continuation too: it hashes only the method's own output, the one SINGLE
 commits, so the method takes no `_changePKH` / `_changeAmount` parameters. A
 caller may still add a change output after the continuation. The covenant does
 not cover it; the funding input's own signature does. Because SINGLE does not
-pin the continuation's value, such a method must emit exactly one explicit
-`addOutput` / `addRawOutput` carrying the full protected amount (for example
-`extractAmount(this.txPreimage)`); a mutate-only SINGLE method is a compile
-error. See
+pin the value of an explicit output, an `addOutput` / `addRawOutput` method
+under SINGLE must emit exactly one output carrying the full protected amount
+(for example `extractAmount(this.txPreimage)`). A mutate-only method's default
+continuation is pinned by the `_newAmount` floor, and is SINGLE by default in a
+contract whose continuation methods are all mutate-only (see "One continuation
+per input" above). See
 [`conformance/sdk-call/SingleCounter.runar.ts`](../conformance/sdk-call/SingleCounter.runar.ts).
 
 Worked example, with both directives and their falsifications:

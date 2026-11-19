@@ -30,7 +30,7 @@ import { RunarContract } from '../contract.js';
 import { MockProvider } from '../providers/mock.js';
 import { LocalSigner } from '../signers/local.js';
 import { buildP2PKHScript } from '../script-utils.js';
-import { Spend, LockingScript, Transaction, PrivateKey, BigNumber, ECDSA, Hash } from '@bsv/sdk';
+import { Spend, LockingScript, Transaction, TransactionSignature, PrivateKey, BigNumber, ECDSA, Hash } from '@bsv/sdk';
 import type { RunarArtifact } from 'runar-ir-schema';
 
 const SIGNER_KEY = '0000000000000000000000000000000000000000000000000000000000000005';
@@ -177,12 +177,24 @@ describe('C19 — PreparedCall.sighash must be the double-SHA256 BIP-143 digest'
     expect(validateSpend(callTx, 0, deployTx, 0)).toBe(true);
   });
 
-  it('sanity: prepared.sighash equals hash256(preimage), not sha256(preimage)', async () => {
+  it('sanity: prepared.sighash equals hash256 of the user signature\'s ALL|FORKID preimage, not sha256', async () => {
     const { contract } = await deployOwnerBump();
+    const utxo = contract.getUtxo()!;
     const prepared = await contract.prepareCall('bump', [null]);
-    const preimageBytes = Buffer.from(prepared.preimage, 'hex');
-    const wantHash256 = Buffer.from(Hash.hash256(Array.from(preimageBytes))).toString('hex');
-    const singleSha256 = Buffer.from(Hash.sha256(Array.from(preimageBytes))).toString('hex');
+    // D25: OwnerBump is mutate-only, so its covenant preimage is SIGHASH_SINGLE
+    // (0x43); a user Sig is ALL|FORKID, so its digest comes from the ALL
+    // preimage of the same tx and subscript, built here by @bsv/sdk itself.
+    const sub = contract.getSubscriptForSigning(utxo.script, 0);
+    const allPreimage = TransactionSignature.format({
+      sourceTXID: utxo.txid, sourceOutputIndex: utxo.outputIndex, sourceSatoshis: utxo.satoshis,
+      transactionVersion: prepared.tx.version,
+      otherInputs: prepared.tx.inputs.slice(1).map((i) => ({ ...i, sourceTXID: i.sourceTXID! })),
+      outputs: prepared.tx.outputs, inputIndex: 0, subscript: LockingScript.fromHex(sub),
+      inputSequence: prepared.tx.inputs[0]!.sequence!, lockTime: prepared.tx.lockTime,
+      scope: SIGHASH_ALL_FORKID,
+    });
+    const wantHash256 = Buffer.from(Hash.hash256(allPreimage)).toString('hex');
+    const singleSha256 = Buffer.from(Hash.sha256(allPreimage)).toString('hex');
     expect(prepared.sighash).toBe(wantHash256);
     expect(prepared.sighash).not.toBe(singleSha256);
   });

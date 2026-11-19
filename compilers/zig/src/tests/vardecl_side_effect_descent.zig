@@ -111,6 +111,15 @@ const settle_with_change_and_new_amount =
     "{\"name\":\"_newAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}]";
 
+/// D25: every continuation method of VarDeclMutation is mutate-only, so the
+/// contract defaults to SIGHASH_SINGLE|FORKID: the continuation keeps
+/// `_newAmount` and drops the uncommitted change params (TS reference ABI).
+const settle_single_continuation =
+    "\"name\":\"settle\",\"params\":[" ++
+    "{\"name\":\"amount\",\"type\":\"bigint\"}," ++
+    "{\"name\":\"_newAmount\",\"type\":\"bigint\"}," ++
+    "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}],\"isPublic\":true,\"usesCodePart\":true,\"sigHashType\":67";
+
 fn abiContains(source: []const u8, file: []const u8, needle: []const u8) !void {
     const allocator = std.testing.allocator;
     const result = try compiler_api.compileSource(allocator, source, file);
@@ -138,6 +147,6 @@ test "R-021: a state mutation behind a var-decl initialiser is not terminal" {
     try abiContains(
         vardecl_mutation,
         "VarDeclMutation.runar.ts",
-        settle_with_change_and_new_amount,
+        settle_single_continuation,
     );
 }

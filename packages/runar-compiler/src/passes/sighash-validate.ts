@@ -157,15 +157,13 @@ export function validateSighashUsage(contract: ContractNode): CompilerDiagnostic
         push(u, `@sighash ${label}: '${u.name}' asserts an output at a fixed index, but SINGLE commits ONLY to the output at THIS input's index — the asserted index cannot be statically proven equal to the input index, so the assertion may bind an uncommitted (attacker-controllable) output or silently brick the spend. Use ALL.`);
       }
 
-      // A stateful mutate-only (or data-only) method has NO explicit output
-      // intrinsic, so the compiler auto-injects a single state-continuation
-      // output whose value is the caller-chosen `_newAmount` (04-anf-lower).
-      // Under SINGLE, BIP-143 commits ONLY to the output at THIS input's index
-      // and does NOT pin its value, so that continuation is value-skimmable: a
-      // spender sets _newAmount to dust, drives the change output to zero, and
-      // APPENDS a draining output — the covenant + OP_PUSH_TX binding still
-      // validate while funds are stolen (and an honest change>0 makes the UTXO
-      // unspendable). REJECT it.
+      // D25: a mutate-only (auto-continuation) method under SINGLE is SOUND
+      // and is the DEFAULT for a contract whose continuation methods are all
+      // mutate-only (`continuation-binding.ts`). SINGLE hashes the whole
+      // same-index output, value included, and the F-024 floor
+      // (`_newAmount >= extractAmount`) stops a dust continuation; the change
+      // is not committed (N-038). The refusal that used to stand here
+      // (e88f202c8) predates both.
       const isMutateOnlyAutoContinuation =
         needsContinuation &&
         scan.stateOutputCount === 0 &&
@@ -184,8 +182,7 @@ export function validateSighashUsage(contract: ContractNode): CompilerDiagnostic
       const committed = stateOutputs + scan.dataOutputCount;
 
       if (isMutateOnlyAutoContinuation) {
-        push({ name: 'state continuation', loc: method.sourceLocation },
-          `@sighash ${label}: this stateful method's state continuation is sized by the caller-chosen _newAmount, but SINGLE commits ONLY to the same-index output WITHOUT pinning its value — a spender can set _newAmount to dust, drive the change output to zero, and append a draining output while the covenant + OP_PUSH_TX binding still validate (value skim); an honest change>0 leaves the UTXO unspendable. A mutate-only SINGLE continuation is unsound. Use ALL, or emit an explicit addOutput/addRawOutput that carries the full protected value at this input's index.`);
+        // Sound (see above): nothing to report.
       } else if (committed > 1) {
         push({ name: 'multi-output continuation', loc: method.sourceLocation },
           `@sighash ${label}: SINGLE commits ONLY to the output at this input's index, but this method binds ${committed} outputs (${scan.stateOutputCount} addOutput + ${scan.dataOutputCount} addDataOutput${stateOutputs > scan.stateOutputCount ? ' + state continuation' : ''}). Outputs beyond the same-index one are uncommitted and attacker-controllable. A SINGLE covenant must bind exactly one same-index output.`);

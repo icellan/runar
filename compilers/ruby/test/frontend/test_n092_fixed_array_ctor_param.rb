@@ -129,6 +129,8 @@ class TestN092FixedArrayCtorParam < Minitest::Test
   # The Zig tier emits the same bytes for both.
   # #180 / #213 re-stamped the initialized-property hex to the TS reference
   # output for the same source (go() gained the `_changePKH` entry width gate).
+  # D25 re-stamped it to the TS reference again: go() is mutate-only (the
+  # contract's only continuation method), so it commits under SIGHASH_SINGLE.
   GOOD_INITIALIZED_PROPERTY_HEX = File.read(
     File.expand_path("fixtures/n092_ctrl_initialized_property.hex", __dir__)
   ).strip

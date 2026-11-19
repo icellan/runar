@@ -11,7 +11,6 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
-	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 )
 
 // ---------------------------------------------------------------------------
@@ -130,6 +129,9 @@ func runCounterSpendWithCodePart(
 	changeSatoshis uint64,
 ) codePartSpendResult {
 	t.Helper()
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "stateful-counter", "increment")
 
 	// The genuine deployed contract: compile stateful-counter with count=0.
 	trueCodePartHex, err := compileRúnar("stateful-counter", `{"count":"0"}`)
@@ -199,7 +201,7 @@ func runCounterSpendWithCodePart(
 		Satoshis:      prevSatoshis,
 		LockingScript: scriptCodeScript,
 	})
-	preimage, err := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	preimage, err := spendTx.CalcInputPreimage(0, abi.flag())
 	if err != nil {
 		t.Fatalf("calc preimage: %v", err)
 	}
@@ -208,8 +210,7 @@ func runCounterSpendWithCodePart(
 	// Unlocking stack (bottom → top):
 	//   _codePart, _changePKH, _changeAmount, _newAmount, txPreimage, selector
 	unlockingHex := encodePushBytes(witnessCodePart) +
-		encodePushBytes(changePKH) +
-		encodePushInt(int64(changeSatoshis)) +
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) +
 		encodePushBytes(preimage) +
 		encodePushInt(0)
@@ -662,6 +663,9 @@ func runMessageBoardPostWithCodePart(
 	changeSatoshis uint64,
 ) codePartSpendResult {
 	t.Helper()
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "stateful-bytestring", "post")
 
 	trueCodePartHex, err := deployedCodePartHex("stateful-bytestring", mbCtorArgs)
 	if err != nil {
@@ -720,7 +724,7 @@ func runMessageBoardPostWithCodePart(
 		Satoshis:      prevSatoshis,
 		LockingScript: scriptCodeScript,
 	})
-	preimage, err := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	preimage, err := spendTx.CalcInputPreimage(0, abi.flag())
 	if err != nil {
 		t.Fatalf("calc preimage: %v", err)
 	}
@@ -736,8 +740,7 @@ func runMessageBoardPostWithCodePart(
 	//   txPreimage, selector
 	unlockingHex := encodePushBytes(witnessCodePart) +
 		encodePushBytes(newMessageBytes) +
-		encodePushBytes(changePKH) +
-		encodePushInt(int64(changeSatoshis)) +
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) +
 		encodePushBytes(preimage) +
 		encodePushInt(0)

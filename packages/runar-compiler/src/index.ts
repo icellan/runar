@@ -121,6 +121,7 @@ import { parse } from './passes/01-parse.js';
 import { validate } from './passes/02-validate.js';
 import { typecheck, isBigintFamilyType, isByteStringFamilyType } from './passes/03-typecheck.js';
 import { expandFixedArrays } from './passes/03b-expand-fixed-arrays.js';
+import { injectContinuationBinding } from './passes/continuation-binding.js';
 import { lowerToANF } from './passes/04-anf-lower.js';
 import { assertIrPreimageRules, assertIrUniqueMethodNames } from './passes/ir-preimage-rules.js';
 import { lowerToStack, bakedPropPushOrigin } from './passes/05-stack-lower.js';
@@ -138,7 +139,7 @@ import { assertSyntheticArrayChains } from './ir/synthetic-array-chain.js';
 import { assertRabinKeyProvenance } from './ir/rabin-key-provenance.js';
 import { builtinArityViolation } from './ir/builtin-arity.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
-import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
+import { assertIrContinuationBinding, assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
 import { assertIrNoDroppedContinuation } from './passes/continuation-rules.js';
 import { assertIrLocktimeDomain } from './passes/locktime-domain.js';
 import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS, pqPubKeyRequirements, pqPubKeyLengthError } from 'runar-ir-schema';
@@ -370,7 +371,9 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   onProgress?.('Expanding fixed arrays', 28);
   let expandedContract: ContractNode;
   try {
-    const expandResult = expandFixedArrays(parseResult.contract);
+    // D25: a 'bind' contract gains its hidden spent-outpoint state field here
+    // (after typecheck, so user-facing arity rules never see it).
+    const expandResult = expandFixedArrays(injectContinuationBinding(parseResult.contract));
     for (const d of expandResult.errors) diagnostics.push(d);
     expandedContract = expandResult.contract;
   } catch (e: unknown) {
@@ -686,7 +689,8 @@ export function compileFromANF(
 
   // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
   // the scaffolding the frontend injects into each public method.
-  if (assertIrParentClassRules(anf) === 'StatefulSmartContract') {
+  const irParentClass = assertIrParentClassRules(anf);
+  if (irParentClass === 'StatefulSmartContract') {
     assertIrStatefulScaffolding(anf);
     // D18: IR input skips typecheck's dropped-continuation rule.
     assertIrNoDroppedContinuation(anf);
@@ -700,6 +704,11 @@ export function compileFromANF(
   // D26: IR input skips 02-validate's locktime-domain rule (stateless and
   // stateful programs alike); see locktime-domain.ts.
   assertIrLocktimeDomain(anf);
+
+  // D25: a StatefulSmartContract's continuations must be bound to their input
+  // (SINGLE, or the hidden spent-outpoint field); checked last among the IR
+  // frontend rules so every earlier, more specific diagnostic keeps precedence.
+  if (irParentClass === 'StatefulSmartContract') assertIrContinuationBinding(anf);
 
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.

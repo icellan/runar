@@ -57,7 +57,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "ef0ac5fa9e4f67a44fc17f1f2820995c6b57b04718c489f589fe25819cf9299f",
-    "expected-ir.json": "1649508b78b7fa2dd23bf26a81f9edfd7ec1028e804fd4b27d7db4007fc3b9f2"
+    "expected-script.hex": "3eff599c5decf874a0ab4447e495267b4bd4d7e47544a126a59c46abad65d2b4",
+    "expected-ir.json": "72124a928ef67a87669e1bd4b03227800fef0777cc3d7aaf2fb127464b324869"
   }
 }

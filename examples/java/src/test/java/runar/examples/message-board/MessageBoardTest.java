@@ -16,6 +16,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class MessageBoardTest {
 
+    /**
+     * D25: a contract whose continuation methods are all mutate-only commits
+     * them under SIGHASH_SINGLE|FORKID by default, and the stateful prologue
+     * pins the preimage's sighash type to it.
+     */
+    private static final long SIGHASH_SINGLE_FORKID = 0x43;
+
     private static final PubKey OWNER = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000001");
     private static final ByteString INITIAL = ByteString.fromHex("48656c6c6f"); // "Hello"
     private static final ByteString UPDATED = ByteString.fromHex("776f726c64"); // "world"
@@ -43,7 +50,7 @@ class MessageBoardTest {
     void postReplacesMessage() {
         MessageBoard c = new MessageBoard(INITIAL, OWNER);
         ContractSimulator sim = ContractSimulator.stateful(c, SOURCE);
-        Preimage pre = sim.preimageFor("post", Preimage.builder().build(), UPDATED);
+        Preimage pre = sim.preimageFor("post", Preimage.builder().sighashType(SIGHASH_SINGLE_FORKID).build(), UPDATED);
         sim.callStateful("post", pre, UPDATED);
         assertEquals(UPDATED, c.message);
     }
@@ -54,7 +61,7 @@ class MessageBoardTest {
         MessageBoard c = new MessageBoard(INITIAL, OWNER);
         ContractSimulator sim = ContractSimulator.stateful(c, SOURCE);
         ByteString next = ByteString.fromHex("aabbccdd");
-        Preimage pre = sim.preimageFor("post", Preimage.builder().build(), next);
+        Preimage pre = sim.preimageFor("post", Preimage.builder().sighashType(SIGHASH_SINGLE_FORKID).build(), next);
         sim.callStateful("post", pre, next);
         assertEquals(next, c.message);
     }

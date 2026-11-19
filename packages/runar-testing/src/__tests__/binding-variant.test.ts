@@ -356,14 +356,16 @@ describe('@bindingVariant through compile()', () => {
     expect(hex).not.toContain(CHECK_PREIMAGE_BINDING_HEX);
   });
 
+  // D25: addOutput bodies keep both methods on ALL|FORKID (mutate-only bodies
+  // would default to SINGLE, whose flag byte sits inside both blobs).
   it('a stateful @bindingVariant all method gets the all blob in its auto-injected prologue', () => {
     const src = `
       class AllCounter extends StatefulSmartContract {
         count: bigint;
         constructor(count: bigint) { super(count); this.count = count; }
         /** @bindingVariant all */
-        public bump() { this.count++; }
-        public plain() { this.count--; }
+        public bump() { this.addOutput(1n, this.count + 1n); }
+        public plain() { this.addOutput(1n, this.count - 1n); }
       }
     `;
     const hex = scriptOf(src, 'AllCounter.runar.ts');

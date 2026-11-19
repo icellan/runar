@@ -15,7 +15,10 @@
       "expect": "accept",
       "note": "count 0->1 + data output",
       "expectedState": {
-        "count": "1n"
+        "count": "1n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -30,6 +33,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "23d5813424632ac3f1cbb4920217c03fc5a25589da5eaa27f4a39f50f1ba2fa8"
+    "expected-script.hex": "0b46a2735a0792395f7a160826f58378cb716fded676847b2eece27e7e8b1250",
+    "expected-ir.json": "08538dfac04b7a243b607a54390b21a1610620c22e76c6456e40e1dbead028cf"
   }
 }

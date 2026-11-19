@@ -50,6 +50,10 @@ pub fn compile_check(source: &str, file_name: &str) -> Result<(), String> {
         return Err(format!("validation errors: {}", validation.error_strings().join("; ")));
     }
 
+    // D25: the effective continuation sighash (resolved by validate on a copy).
+    let mut contract = contract;
+    runar_compiler_rust::frontend::continuation_binding::resolve_continuation_binding(&mut contract);
+
     let tc = runar_compiler_rust::frontend::typecheck::typecheck(&contract);
     if !tc.errors.is_empty() {
         return Err(format!("type check errors: {}", tc.error_strings().join("; ")));
@@ -57,7 +61,9 @@ pub fn compile_check(source: &str, file_name: &str) -> Result<(), String> {
 
     // Pass 3b: expand fixed arrays (also runs in compile pipeline).
     let expand =
-        runar_compiler_rust::frontend::expand_fixed_arrays::expand_fixed_arrays(&contract);
+        runar_compiler_rust::frontend::expand_fixed_arrays::expand_fixed_arrays(
+            &runar_compiler_rust::frontend::continuation_binding::inject_continuation_binding(&contract),
+        );
     if !expand.errors.is_empty() {
         let msgs: Vec<String> = expand.errors.iter().map(|e| e.format_message()).collect();
         return Err(format!("expand-fixed-arrays errors: {}", msgs.join("; ")));

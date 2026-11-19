@@ -16,6 +16,7 @@
  * that want to compose passes monadically.
  */
 
+import { injectContinuationBinding } from './continuation-binding.js';
 import { CompilerResult } from '../compiler-result.js';
 import type { Diagnostic } from '../compiler-result.js';
 import type { ContractNode, ANFProgram, StackProgram } from '../ir/index.js';
@@ -108,7 +109,7 @@ export function expandFixedArraysR(
 ): CompilerResult<ContractNode> {
   let r: ReturnType<typeof expandFixedArrays>;
   try {
-    r = expandFixedArrays(contract);
+    r = expandFixedArrays(injectContinuationBinding(contract));
   } catch (e: unknown) {
     return CompilerResult.fail<ContractNode>([throwToDiagnostic(e)]);
   }

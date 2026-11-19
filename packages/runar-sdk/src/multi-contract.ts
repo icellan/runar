@@ -423,9 +423,14 @@ async function unlockForInput(
  * function now calls.
  *
  * WALLET-FUNDING CAVEAT: the covenant verifies only if the tx's outputs are
- * EXACTLY what it hashes: its continuation(s), raw outputs and data outputs in
- * the contract's order, then (iff the method declares `_changePKH`) change at
- * exactly `_changeAmount` to `_changePKH`. A wallet's own change output must
+ * EXACTLY what it hashes. Under the default ALL: its continuation(s), raw
+ * outputs and data outputs in the contract's order from output 0, then (iff
+ * the method declares `_changePKH`) change at exactly `_changeAmount` to
+ * `_changePKH`. Under a SIGHASH_SINGLE method (the D25 default for a contract
+ * whose continuation methods are all mutate-only; the ABI's `sigHashType`
+ * base is 3 and the method takes no `_changePKH`): ONLY its continuation, at
+ * the output index equal to `inputIndex`, so a wallet that puts its funding
+ * input first lays out `[change, continuation]`; the change is uncommitted. A wallet's own change output must
  * therefore equal the declared change, or `changeAmount` must be 0 and no
  * change output may exist. This function REFUSES (throws) when a non-zero
  * declared change is not the tx's last output; when `changeAmount` is 0 but

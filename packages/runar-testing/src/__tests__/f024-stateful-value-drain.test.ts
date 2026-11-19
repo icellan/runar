@@ -2,6 +2,12 @@
  * F-024 (CL-BUG-079) — the auto-injected single-output state continuation
  * conserves no value.
  *
+ * (Since D25 a mutate-only contract such as Counter commits under
+ * SIGHASH_SINGLE|FORKID: hashOutputs covers only the continuation at the
+ * input's index, `_changePKH` / `_changeAmount` are no longer injected, and the
+ * change output is uncommitted. The drain below is then refused by the F-024
+ * floor alone. The pre-D25 ALL-shape description follows.)
+ *
  * A stateful public method that mutates state without `this.addOutput(...)`
  * gets three compiler-injected witness params: `_changePKH`, `_changeAmount`
  * and `_newAmount`. The continuation assert is
@@ -264,9 +270,14 @@ for (const tier of TIERS) {
     const increment = artifact.abi.methods.find((m) => m.name === 'increment')!;
     const attacker = testKey('eve');
 
-    it('increment carries the injected _changePKH / _changeAmount / _newAmount witness params', () => {
-      const names = increment.params.map((p) => p.name);
-      expect(names).toEqual(expect.arrayContaining(['_changePKH', '_changeAmount', '_newAmount', 'txPreimage']));
+    // D25: Counter is mutate-only, so increment commits under
+    // SIGHASH_SINGLE|FORKID: only `_newAmount` (the F-024 floor's operand) and
+    // the preimage are injected, the change output is uncommitted, and the
+    // `_newAmount >= extractAmount` floor is the ONLY thing that pins the
+    // continuation's value — which the ATTACK case below proves still holds.
+    it('increment is SINGLE|FORKID and carries only the injected _newAmount / txPreimage witness params', () => {
+      expect(increment.params.map((p) => p.name)).toEqual(['_newAmount', 'txPreimage']);
+      expect((increment as { sigHashType?: number }).sigHashType).toBe(0x43);
     });
 
     it('control: an honest increment that keeps the full input value is ACCEPTED', async () => {

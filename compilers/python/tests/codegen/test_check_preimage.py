@@ -48,13 +48,41 @@ from runar_compiler.codegen.stack import (
     _CHECK_PREIMAGE_BINDING_HEX,
 )
 from runar_compiler.frontend.anf_lower import lower_to_anf
+from runar_compiler.frontend.continuation_binding import inject_continuation_binding
 from runar_compiler.frontend.parser_dispatch import parse_source
 from runar_compiler.frontend.typecheck import type_check
 from runar_compiler.frontend.validator import validate
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-COUNTER_SRC = REPO_ROOT / "examples" / "python" / "stateful-counter" / "Counter.runar.py"
+# D25: examples/python/stateful-counter's Counter is all mutate-only, so it
+# now defaults to SIGHASH_SINGLE, whose flag byte sits inside the binding blob.
+# These tests pin the default ALL|FORKID blob, so they use the same Counter
+# plus an addOutput sibling, which keeps every method on ALL|FORKID.
+COUNTER_SRC = (
+    "from runar import StatefulSmartContract, Bigint, public, assert_\n"
+    "\n"
+    "\n"
+    "class Counter(StatefulSmartContract):\n"
+    "    count: Bigint\n"
+    "\n"
+    "    def __init__(self, count: Bigint):\n"
+    "        super().__init__(count)\n"
+    "        self.count = count\n"
+    "\n"
+    "    @public\n"
+    "    def increment(self):\n"
+    "        self.count += 1\n"
+    "\n"
+    "    @public\n"
+    "    def decrement(self):\n"
+    "        assert_(self.count > 0)\n"
+    "        self.count -= 1\n"
+    "\n"
+    "    @public\n"
+    "    def bump(self):\n"
+    "        self.add_output(1, self.count + 1)\n"
+)
 P2PKH_SRC = REPO_ROOT / "examples" / "python" / "p2pkh" / "P2PKH.runar.py"
 
 
@@ -63,15 +91,18 @@ P2PKH_SRC = REPO_ROOT / "examples" / "python" / "p2pkh" / "P2PKH.runar.py"
 _BINDING_BYTES = bytes.fromhex(_CHECK_PREIMAGE_BINDING_HEX)
 
 
-def _lower_source(path: Path) -> list[StackMethod]:
-    source = path.read_text(encoding="utf-8")
-    pr = parse_source(source, path.name)
+def _lower_source(path: Path | str) -> list[StackMethod]:
+    if isinstance(path, str):
+        source, name = path, "Counter.runar.py"
+    else:
+        source, name = path.read_text(encoding="utf-8"), path.name
+    pr = parse_source(source, name)
     assert not pr.errors, f"parse errors: {pr.errors}"
     vr = validate(pr.contract)
     assert not vr.errors, f"validation errors: {vr.errors}"
     tr = type_check(pr.contract)
     assert not tr.errors, f"typecheck errors: {tr.errors}"
-    program = lower_to_anf(pr.contract)
+    program = lower_to_anf(inject_continuation_binding(pr.contract))
     return lower_to_stack(program)
 
 
