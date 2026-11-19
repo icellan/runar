@@ -1012,8 +1012,11 @@ script.
 ### `@sighash`
 
 A public method's auto-injected covenant — and the preimage the SDK builds for
-it — commits to `ALL|FORKID` (`0x41`) by default. `@sighash` declares a
-different BIP-143 mode for that method alone.
+it — commits to `ALL|FORKID` (`0x41`) by default, except in a
+`StatefulSmartContract` whose continuation methods are all mutate-only, where
+those methods default to `SINGLE|FORKID` (`0x43`; see "One continuation per
+input (D25)"). `@sighash` declares a different BIP-143 mode for that method
+alone.
 
 ```typescript
 /** @sighash SINGLE|FORKID */
@@ -1022,9 +1025,10 @@ public spendSingle(sig: Sig, pubKey: PubKey) { ... }
 
 Exactly one base type must appear — `ALL` (`0x01`), `NONE` (`0x02`) or `SINGLE`
 (`0x03`) — and `FORKID` (`0x40`) and `ANYONECANPAY` (`0x80`) are modifiers. The
-combined value is published on the method's ABI entry as `sigHashType`; the
-default is omitted rather than written out, so a method with no directive has no
-`sigHashType` field.
+combined value is published on the method's ABI entry as `sigHashType`;
+`ALL|FORKID` is omitted rather than written out, so a method that commits under
+it has no `sigHashType` field (a mutate-only continuation defaulted to SINGLE
+carries `sigHashType: 67`).
 
 A method may carry at most one `@sighash` directive, and once the marker is
 present the rest of the line must be a well-formed flag list: whitespace, then

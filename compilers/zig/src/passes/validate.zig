@@ -16,6 +16,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_validate = @import("sighash_validate.zig");
+const continuation_binding = @import("continuation_binding.zig");
 const reserved_names = @import("reserved_names.zig");
 const input_limits = @import("../frontend/input_limits.zig");
 const continuation_rules = @import("continuation_rules.zig");
@@ -49,7 +50,9 @@ const ConstructorValidationMode = enum {
 };
 
 /// Validate a Runar AST against language subset constraints.
-/// Does NOT modify the AST; only reports errors and warnings.
+/// Reports errors and warnings. The one AST write is D25's: the effective
+/// `sighash_type` of a mutate-only contract's continuation methods
+/// (continuation_binding.zig; idempotent).
 /// Caller owns the returned slices and must free them with the same allocator.
 pub fn validate(allocator: Allocator, contract: ContractNode) !ValidationResult {
     return validateWithMode(allocator, contract, .generic);
@@ -97,6 +100,12 @@ fn validateWithMode(
     {
         var sighash_diags: std.ArrayListUnmanaged(CompilerDiagnostic) = .empty;
         defer sighash_diags.deinit(allocator);
+        // D25: classify the contract's continuation binding and set the
+        // effective sighash of a mutate-only contract's continuation methods
+        // (SINGLE) BEFORE the field checks, so they and every later pass see
+        // the effective mode. The one place this pass writes the AST
+        // (method.sighash_type only; idempotent). See continuation_binding.zig.
+        try continuation_binding.resolve(allocator, contract, &sighash_diags);
         try sighash_validate.validateSighashUsage(allocator, contract, &sighash_diags);
         for (sighash_diags.items) |d| {
             if (d.severity == .warning) {

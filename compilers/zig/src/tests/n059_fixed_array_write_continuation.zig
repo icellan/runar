@@ -169,33 +169,36 @@ const RUNTIME_INDEX_TS_SRC =
 
 /// The continuation parameters a state-writing method must declare. Their
 /// absence is the defect: no continuation parameters means no covenant.
+// D25: a mutate-only contract defaults to SIGHASH_SINGLE|FORKID, so the
+// continuation keeps `_newAmount` and drops the uncommitted change params
+// (TS reference ABI).
 const set01_continuation =
     "\"name\":\"set01\",\"params\":[" ++
     "{\"name\":\"v\",\"type\":\"bigint\"}," ++
-    "{\"name\":\"_changePKH\",\"type\":\"Ripemd160\"}," ++
-    "{\"name\":\"_changeAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"_newAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}]," ++
-    "\"isPublic\":true,\"usesCodePart\":true";
+    "\"isPublic\":true,\"usesCodePart\":true,\"sigHashType\":67";
 
+// D25: a mutate-only contract defaults to SIGHASH_SINGLE|FORKID, so the
+// continuation keeps `_newAmount` and drops the uncommitted change params
+// (TS reference ABI).
 const set0_continuation =
     "\"name\":\"set0\",\"params\":[" ++
     "{\"name\":\"v\",\"type\":\"bigint\"}," ++
-    "{\"name\":\"_changePKH\",\"type\":\"Ripemd160\"}," ++
-    "{\"name\":\"_changeAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"_newAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}]," ++
-    "\"isPublic\":true,\"usesCodePart\":true";
+    "\"isPublic\":true,\"usesCodePart\":true,\"sigHashType\":67";
 
+// D25: a mutate-only contract defaults to SIGHASH_SINGLE|FORKID, so the
+// continuation keeps `_newAmount` and drops the uncommitted change params
+// (TS reference ABI).
 const setAt_continuation =
     "\"name\":\"setAt\",\"params\":[" ++
     "{\"name\":\"i\",\"type\":\"bigint\"}," ++
     "{\"name\":\"v\",\"type\":\"bigint\"}," ++
-    "{\"name\":\"_changePKH\",\"type\":\"Ripemd160\"}," ++
-    "{\"name\":\"_changeAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"_newAmount\",\"type\":\"bigint\"}," ++
     "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}]," ++
-    "\"isPublic\":true,\"usesCodePart\":true";
+    "\"isPublic\":true,\"usesCodePart\":true,\"sigHashType\":67";
 
 fn expectContinuation(src: []const u8, file_name: []const u8, fragment: []const u8) !void {
     const allocator = std.testing.allocator;

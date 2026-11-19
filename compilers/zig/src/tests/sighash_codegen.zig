@@ -116,9 +116,11 @@ test "sighash: SINGLE|FORKID swaps the flag byte 0x41 -> 0x43 (two positions) + 
 
 test "sighash: ALL|ANYONECANPAY|FORKID swaps binding-blob flag to 0xC1 + ABI mode 193" {
     const a = std.testing.allocator;
-    const dflt = try compiler_api.compileSource(a, fundSrc(""), "Fund.runar.ts");
+    // D25: an addOutput body, because a mutate-only contract (fundSrc) maps
+    // ALL|ANYONECANPAY|FORKID to SINGLE|ANYONECANPAY|FORKID (0xC3).
+    const dflt = try compiler_api.compileSource(a, counterSrc(""), "Counter.runar.ts");
     defer dflt.deinit(a);
-    const acp = try compiler_api.compileSource(a, fundSrc("/** @sighash ALL|ANYONECANPAY|FORKID */"), "Fund.runar.ts");
+    const acp = try compiler_api.compileSource(a, counterSrc("/** @sighash ALL|ANYONECANPAY|FORKID */"), "Counter.runar.ts");
     defer acp.deinit(a);
 
     // The OP_PUSH_TX binding blob appends `01<flag>` immediately before OP_CAT
@@ -140,7 +142,9 @@ test "sighash: ALL|ANYONECANPAY|FORKID swaps binding-blob flag to 0xC1 + ABI mod
 
 test "sighash: default method has no ABI sigHashType" {
     const a = std.testing.allocator;
-    const dflt = try compiler_api.compileSource(a, fundSrc(""), "Fund.runar.ts");
+    // D25: an addOutput body, because a mutate-only contract defaults to
+    // SINGLE (fundSrc("") now carries 0x43).
+    const dflt = try compiler_api.compileSource(a, counterSrc(""), "Counter.runar.ts");
     defer dflt.deinit(a);
     try std.testing.expect(abiSigHash(dflt.artifact_json.?) == null);
 }
@@ -203,7 +207,10 @@ const counter_default_golden = "61ab52798201149d757676aa517f517f517f517f517f517f
 const counter_single_golden = "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01437e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686853798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101439d7601687f7782012c947f758258947f758258947f778102e803785479016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7eaa7b820128947f7701207f75877777";
 // F-024 (R14) re-pin: +16 B for the injected _newAmount >= extractAmount(txPreimage) check; the check-stripped ANF re-emits the previous pin exactly.
 // #180 / #213 re-pin: the TS reference now carries the _changePKH entry width gate (+7 B).
-const fund_acp_golden = "61ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01c17e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8102c1009d7601687f7782012c947f758258947f758258947f778176567a937778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f758777";
+// D25 re-pin (TS reference, fold-OFF; equals the Go tier's fundAcpScript): a
+// mutate-only contract maps ALL|ANYONECANPAY|FORKID to SINGLE|ANYONECANPAY|FORKID
+// (0xC3), so the change segment and its params drop out.
+const fund_acp_golden = "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01c37e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686855798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8102c3009d7601687f7782012c947f758258947f758258947f778176547a937778820134947f77587f758153797ca269588078537a7c7558806b5279016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7eaa7c820128947f7701207f758777";
 
 test "sighash golden: default counter == TS reference (fold-OFF)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -219,7 +226,7 @@ test "sighash golden: SINGLE|FORKID counter == TS reference (0x43, fold-OFF)" {
     try std.testing.expectEqualStrings(counter_single_golden, hex);
 }
 
-test "sighash golden: ALL|ANYONECANPAY|FORKID fund == TS reference (0xC1, fold-OFF)" {
+test "sighash golden: ALL|ANYONECANPAY|FORKID fund == TS reference (0xC3 after D25, fold-OFF)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const hex = try compileFoldOff(arena.allocator(), fundSrc("/** @sighash ALL|ANYONECANPAY|FORKID */"), "Fund.runar.ts");

@@ -135,8 +135,11 @@ test "sighash-validate: NONE rejects state continuation" {
 
 // ---- Rule 4: SINGLE -------------------------------------------------------
 
-// F1: the mutate-only auto-continuation is value-skimmable under SINGLE.
-test "sighash-validate: SINGLE rejects mutate-only continuation (F1)" {
+// D25: the #123 (F1) refusal predated the F-024 `_newAmount` floor and N-038;
+// SINGLE hashes the whole same-index output, value included, so a mutate-only
+// SINGLE continuation is sound (and the default for a contract whose
+// continuation methods are all mutate-only).
+test "sighash-validate: SINGLE accepts a mutate-only continuation (the F-024 floor pins its value)" {
     const a = std.testing.allocator;
     const src =
         \\class Counter extends StatefulSmartContract {
@@ -146,8 +149,8 @@ test "sighash-validate: SINGLE rejects mutate-only continuation (F1)" {
         \\  public bump(): void { this.n = this.n + 1n; }
         \\}
     ;
-    try std.testing.expect(try hasError(a, src, "mutate-only SINGLE continuation is unsound") or
-        try hasError(a, src, "sized by the caller-chosen _newAmount"));
+    // An empty needle matches any error: there must be none.
+    try std.testing.expect(!try hasError(a, src, ""));
 }
 
 test "sighash-validate: SINGLE rejects >1 committed output" {
