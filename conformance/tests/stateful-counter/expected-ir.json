@@ -58,7 +58,8 @@
           "name": "t1",
           "value": {
             "kind": "check_preimage",
-            "preimage": "t0"
+            "preimage": "t0",
+            "sighashFlag": 67
           }
         },
         {
@@ -89,7 +90,7 @@
           "name": "t5",
           "value": {
             "kind": "load_const",
-            "value": 65
+            "value": 67
           }
         },
         {
@@ -196,162 +197,84 @@
         {
           "name": "t19",
           "value": {
-            "kind": "load_param",
-            "name": "_changePKH"
+            "kind": "get_state_script"
           }
         },
         {
           "name": "t20",
           "value": {
             "kind": "load_param",
-            "name": "_changeAmount"
-          }
-        },
-        {
-          "name": "t21",
-          "value": {
-            "kind": "load_const",
-            "value": 0
-          }
-        },
-        {
-          "name": "t22",
-          "value": {
-            "kind": "bin_op",
-            "left": "t20",
-            "op": "!==",
-            "right": "t21"
-          }
-        },
-        {
-          "name": "t25",
-          "value": {
-            "cond": "t22",
-            "else": [
-              {
-                "name": "t24",
-                "value": {
-                  "kind": "load_const",
-                  "value": ""
-                }
-              }
-            ],
-            "kind": "if",
-            "then": [
-              {
-                "name": "t23",
-                "value": {
-                  "args": [
-                    "t19",
-                    "t20"
-                  ],
-                  "func": "buildChangeOutput",
-                  "kind": "call"
-                }
-              }
-            ]
-          }
-        },
-        {
-          "name": "t26",
-          "value": {
-            "kind": "get_state_script"
-          }
-        },
-        {
-          "name": "t27",
-          "value": {
-            "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t28",
+          "name": "t21",
           "value": {
             "kind": "load_param",
             "name": "_newAmount"
           }
         },
         {
-          "name": "t29",
+          "name": "t22",
           "value": {
             "args": [
-              "t27",
-              "t26",
-              "t28"
+              "t20",
+              "t19",
+              "t21"
             ],
             "func": "computeStateOutput",
             "kind": "call"
           }
         },
         {
-          "name": "t30",
+          "name": "t23",
           "value": {
             "args": [
-              "t29",
-              "t25"
-            ],
-            "func": "cat",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t31",
-          "value": {
-            "args": [
-              "t30"
+              "t22"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t32",
+          "name": "t24",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t33",
+          "name": "t25",
           "value": {
             "args": [
-              "t32"
+              "t24"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t34",
+          "name": "t26",
           "value": {
             "kind": "bin_op",
-            "left": "t31",
+            "left": "t23",
             "op": "===",
             "result_type": "bytes",
-            "right": "t33"
+            "right": "t25"
           }
         },
         {
-          "name": "t35",
+          "name": "t27",
           "value": {
             "isAutoInjectedStateCheck": true,
             "kind": "assert",
-            "value": "t34"
+            "value": "t26"
           }
         }
       ],
       "isPublic": true,
       "name": "increment",
       "params": [
-        {
-          "name": "_changePKH",
-          "type": "Ripemd160"
-        },
-        {
-          "name": "_changeAmount",
-          "type": "bigint"
-        },
         {
           "name": "_newAmount",
           "type": "bigint"
@@ -360,7 +283,8 @@
           "name": "txPreimage",
           "type": "SigHashPreimage"
         }
-      ]
+      ],
+      "sigHashType": 67
     },
     {
       "body": [
@@ -375,7 +299,8 @@
           "name": "t1",
           "value": {
             "kind": "check_preimage",
-            "preimage": "t0"
+            "preimage": "t0",
+            "sighashFlag": 67
           }
         },
         {
@@ -406,7 +331,7 @@
           "name": "t5",
           "value": {
             "kind": "load_const",
-            "value": 65
+            "value": 67
           }
         },
         {
@@ -543,162 +468,84 @@
         {
           "name": "t23",
           "value": {
-            "kind": "load_param",
-            "name": "_changePKH"
+            "kind": "get_state_script"
           }
         },
         {
           "name": "t24",
           "value": {
             "kind": "load_param",
-            "name": "_changeAmount"
-          }
-        },
-        {
-          "name": "t25",
-          "value": {
-            "kind": "load_const",
-            "value": 0
-          }
-        },
-        {
-          "name": "t26",
-          "value": {
-            "kind": "bin_op",
-            "left": "t24",
-            "op": "!==",
-            "right": "t25"
-          }
-        },
-        {
-          "name": "t29",
-          "value": {
-            "cond": "t26",
-            "else": [
-              {
-                "name": "t28",
-                "value": {
-                  "kind": "load_const",
-                  "value": ""
-                }
-              }
-            ],
-            "kind": "if",
-            "then": [
-              {
-                "name": "t27",
-                "value": {
-                  "args": [
-                    "t23",
-                    "t24"
-                  ],
-                  "func": "buildChangeOutput",
-                  "kind": "call"
-                }
-              }
-            ]
-          }
-        },
-        {
-          "name": "t30",
-          "value": {
-            "kind": "get_state_script"
-          }
-        },
-        {
-          "name": "t31",
-          "value": {
-            "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t32",
+          "name": "t25",
           "value": {
             "kind": "load_param",
             "name": "_newAmount"
           }
         },
         {
-          "name": "t33",
+          "name": "t26",
           "value": {
             "args": [
-              "t31",
-              "t30",
-              "t32"
+              "t24",
+              "t23",
+              "t25"
             ],
             "func": "computeStateOutput",
             "kind": "call"
           }
         },
         {
-          "name": "t34",
+          "name": "t27",
           "value": {
             "args": [
-              "t33",
-              "t29"
-            ],
-            "func": "cat",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t35",
-          "value": {
-            "args": [
-              "t34"
+              "t26"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t36",
+          "name": "t28",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t37",
+          "name": "t29",
           "value": {
             "args": [
-              "t36"
+              "t28"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t38",
+          "name": "t30",
           "value": {
             "kind": "bin_op",
-            "left": "t35",
+            "left": "t27",
             "op": "===",
             "result_type": "bytes",
-            "right": "t37"
+            "right": "t29"
           }
         },
         {
-          "name": "t39",
+          "name": "t31",
           "value": {
             "isAutoInjectedStateCheck": true,
             "kind": "assert",
-            "value": "t38"
+            "value": "t30"
           }
         }
       ],
       "isPublic": true,
       "name": "decrement",
       "params": [
-        {
-          "name": "_changePKH",
-          "type": "Ripemd160"
-        },
-        {
-          "name": "_changeAmount",
-          "type": "bigint"
-        },
         {
           "name": "_newAmount",
           "type": "bigint"
@@ -707,7 +554,8 @@
           "name": "txPreimage",
           "type": "SigHashPreimage"
         }
-      ]
+      ],
+      "sigHashType": 67
     }
   ],
   "parentClass": "StatefulSmartContract",

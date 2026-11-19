@@ -1,19 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from '../index.js';
 
-const COUNTER = (directive: string) => `
-  class Counter extends StatefulSmartContract {
-    n: bigint;
-    constructor(n: bigint) { super(n); this.n = n; }
-    ${directive}
-    public bump(): void { this.n = this.n + 1n; }
-  }
-`;
-
-// SINGLE-safe body: a legitimate pairwise covenant emits an explicit single
-// addOutput carrying the protected value at this input's index. A mutate-only
-// continuation is rejected under SINGLE (issue #123 F1 — value-skimmable), so
-// the SINGLE codegen cases use this shape. It still exercises the same
+// An explicit single addOutput carrying the protected value at this input's
+// index: a contract of only such methods stays on ALL|FORKID by default (D25
+// gives a mutate-only contract SINGLE instead), so the SINGLE codegen cases
+// can compare the declared mode against the default. It still exercises the same
 // mode-aware OP_PUSH_TX flag byte + preimage-type assert as any other method.
 const COUNTER_OUT = (directive: string) => `
   class Counter extends StatefulSmartContract {

@@ -29,7 +29,8 @@
           "name": "t1",
           "value": {
             "kind": "check_preimage",
-            "preimage": "t0"
+            "preimage": "t0",
+            "sighashFlag": 67
           }
         },
         {
@@ -60,7 +61,7 @@
           "name": "t5",
           "value": {
             "kind": "load_const",
-            "value": 65
+            "value": 67
           }
         },
         {
@@ -270,76 +271,76 @@
           }
         },
         {
-          "name": "t80",
+          "name": "t72",
           "value": {
             "kind": "load_param",
             "name": "i"
           }
         },
         {
-          "name": "t81",
+          "name": "t73",
           "value": {
             "kind": "load_const",
             "value": 1
           }
         },
         {
-          "name": "t82",
+          "name": "t74",
           "value": {
             "kind": "bin_op",
-            "left": "t80",
+            "left": "t72",
             "op": "===",
-            "right": "t81"
+            "right": "t73"
           }
         },
         {
-          "name": "t83",
+          "name": "t75",
           "value": {
             "kind": "load_param",
             "name": "i"
           }
         },
         {
-          "name": "t84",
+          "name": "t76",
           "value": {
             "kind": "load_const",
             "value": 2
           }
         },
         {
-          "name": "t85",
+          "name": "t77",
           "value": {
             "kind": "bin_op",
-            "left": "t83",
+            "left": "t75",
             "op": "===",
-            "right": "t84"
+            "right": "t76"
           }
         },
         {
-          "name": "t86",
+          "name": "t78",
           "value": {
             "kind": "load_param",
             "name": "i"
           }
         },
         {
-          "name": "t87",
+          "name": "t79",
           "value": {
             "kind": "load_const",
             "value": 3
           }
         },
         {
-          "name": "t88",
+          "name": "t80",
           "value": {
             "kind": "bin_op",
-            "left": "t86",
+            "left": "t78",
             "op": "===",
-            "right": "t87"
+            "right": "t79"
           }
         },
         {
-          "name": "t89",
+          "name": "t81",
           "value": {
             "kind": "unary_op",
             "op": "!",
@@ -347,133 +348,133 @@
           }
         },
         {
+          "name": "t82",
+          "value": {
+            "kind": "bin_op",
+            "left": "t81",
+            "op": "&&",
+            "right": "t74"
+          }
+        },
+        {
+          "name": "t83",
+          "value": {
+            "kind": "unary_op",
+            "op": "!",
+            "operand": "t74"
+          }
+        },
+        {
+          "name": "t84",
+          "value": {
+            "kind": "bin_op",
+            "left": "t81",
+            "op": "&&",
+            "right": "t83"
+          }
+        },
+        {
+          "name": "t85",
+          "value": {
+            "kind": "bin_op",
+            "left": "t84",
+            "op": "&&",
+            "right": "t77"
+          }
+        },
+        {
+          "name": "t86",
+          "value": {
+            "kind": "unary_op",
+            "op": "!",
+            "operand": "t77"
+          }
+        },
+        {
+          "name": "t87",
+          "value": {
+            "kind": "bin_op",
+            "left": "t81",
+            "op": "&&",
+            "right": "t83"
+          }
+        },
+        {
+          "name": "t88",
+          "value": {
+            "kind": "bin_op",
+            "left": "t87",
+            "op": "&&",
+            "right": "t86"
+          }
+        },
+        {
+          "name": "t89",
+          "value": {
+            "kind": "bin_op",
+            "left": "t88",
+            "op": "&&",
+            "right": "t80"
+          }
+        },
+        {
           "name": "t90",
           "value": {
             "kind": "bin_op",
-            "left": "t89",
-            "op": "&&",
-            "right": "t82"
+            "left": "t30",
+            "op": "||",
+            "right": "t74"
           }
         },
         {
           "name": "t91",
           "value": {
-            "kind": "unary_op",
-            "op": "!",
-            "operand": "t82"
+            "kind": "bin_op",
+            "left": "t90",
+            "op": "||",
+            "right": "t77"
           }
         },
         {
           "name": "t92",
           "value": {
             "kind": "bin_op",
-            "left": "t89",
-            "op": "&&",
-            "right": "t91"
+            "left": "t91",
+            "op": "||",
+            "right": "t80"
           }
         },
         {
           "name": "t93",
           "value": {
-            "kind": "bin_op",
-            "left": "t92",
-            "op": "&&",
-            "right": "t85"
+            "kind": "assert",
+            "value": "t92"
           }
         },
         {
           "name": "t94",
-          "value": {
-            "kind": "unary_op",
-            "op": "!",
-            "operand": "t85"
-          }
-        },
-        {
-          "name": "t95",
-          "value": {
-            "kind": "bin_op",
-            "left": "t89",
-            "op": "&&",
-            "right": "t91"
-          }
-        },
-        {
-          "name": "t96",
-          "value": {
-            "kind": "bin_op",
-            "left": "t95",
-            "op": "&&",
-            "right": "t94"
-          }
-        },
-        {
-          "name": "t97",
-          "value": {
-            "kind": "bin_op",
-            "left": "t96",
-            "op": "&&",
-            "right": "t88"
-          }
-        },
-        {
-          "name": "t98",
-          "value": {
-            "kind": "bin_op",
-            "left": "t30",
-            "op": "||",
-            "right": "t82"
-          }
-        },
-        {
-          "name": "t99",
-          "value": {
-            "kind": "bin_op",
-            "left": "t98",
-            "op": "||",
-            "right": "t85"
-          }
-        },
-        {
-          "name": "t100",
-          "value": {
-            "kind": "bin_op",
-            "left": "t99",
-            "op": "||",
-            "right": "t88"
-          }
-        },
-        {
-          "name": "t101",
-          "value": {
-            "kind": "assert",
-            "value": "t100"
-          }
-        },
-        {
-          "name": "t102",
           "value": {
             "kind": "load_prop",
             "name": "table__0"
           }
         },
         {
-          "name": "t105",
+          "name": "t97",
           "value": {
             "cond": "t30",
             "else": [
               {
-                "name": "t104",
+                "name": "t96",
                 "value": {
                   "kind": "load_const",
-                  "value": "@ref:t102"
+                  "value": "@ref:t94"
                 }
               }
             ],
             "kind": "if",
             "then": [
               {
-                "name": "t103",
+                "name": "t95",
                 "value": {
                   "kind": "load_const",
                   "value": "@ref:__val_0"
@@ -483,37 +484,37 @@
           }
         },
         {
-          "name": "t106",
+          "name": "t98",
           "value": {
             "kind": "update_prop",
             "name": "table__0",
-            "value": "t105"
+            "value": "t97"
           }
         },
         {
-          "name": "t107",
+          "name": "t99",
           "value": {
             "kind": "load_prop",
             "name": "table__1"
           }
         },
         {
-          "name": "t110",
+          "name": "t102",
           "value": {
-            "cond": "t90",
+            "cond": "t82",
             "else": [
               {
-                "name": "t109",
+                "name": "t101",
                 "value": {
                   "kind": "load_const",
-                  "value": "@ref:t107"
+                  "value": "@ref:t99"
                 }
               }
             ],
             "kind": "if",
             "then": [
               {
-                "name": "t108",
+                "name": "t100",
                 "value": {
                   "kind": "load_const",
                   "value": "@ref:__val_0"
@@ -523,37 +524,37 @@
           }
         },
         {
-          "name": "t111",
+          "name": "t103",
           "value": {
             "kind": "update_prop",
             "name": "table__1",
-            "value": "t110"
+            "value": "t102"
           }
         },
         {
-          "name": "t112",
+          "name": "t104",
           "value": {
             "kind": "load_prop",
             "name": "table__2"
           }
         },
         {
-          "name": "t115",
+          "name": "t107",
           "value": {
-            "cond": "t93",
+            "cond": "t85",
             "else": [
               {
-                "name": "t114",
+                "name": "t106",
                 "value": {
                   "kind": "load_const",
-                  "value": "@ref:t112"
+                  "value": "@ref:t104"
                 }
               }
             ],
             "kind": "if",
             "then": [
               {
-                "name": "t113",
+                "name": "t105",
                 "value": {
                   "kind": "load_const",
                   "value": "@ref:__val_0"
@@ -563,37 +564,37 @@
           }
         },
         {
-          "name": "t116",
+          "name": "t108",
           "value": {
             "kind": "update_prop",
             "name": "table__2",
-            "value": "t115"
+            "value": "t107"
           }
         },
         {
-          "name": "t117",
+          "name": "t109",
           "value": {
             "kind": "load_prop",
             "name": "table__3"
           }
         },
         {
-          "name": "t120",
+          "name": "t112",
           "value": {
-            "cond": "t97",
+            "cond": "t89",
             "else": [
               {
-                "name": "t119",
+                "name": "t111",
                 "value": {
                   "kind": "load_const",
-                  "value": "@ref:t117"
+                  "value": "@ref:t109"
                 }
               }
             ],
             "kind": "if",
             "then": [
               {
-                "name": "t118",
+                "name": "t110",
                 "value": {
                   "kind": "load_const",
                   "value": "@ref:__val_0"
@@ -603,11 +604,11 @@
           }
         },
         {
-          "name": "t121",
+          "name": "t113",
           "value": {
             "kind": "update_prop",
             "name": "table__3",
-            "value": "t120"
+            "value": "t112"
           }
         },
         {
@@ -667,148 +668,78 @@
         {
           "name": "t63",
           "value": {
-            "kind": "load_param",
-            "name": "_changePKH"
+            "kind": "get_state_script"
           }
         },
         {
           "name": "t64",
           "value": {
             "kind": "load_param",
-            "name": "_changeAmount"
-          }
-        },
-        {
-          "name": "t65",
-          "value": {
-            "kind": "load_const",
-            "value": 0
-          }
-        },
-        {
-          "name": "t66",
-          "value": {
-            "kind": "bin_op",
-            "left": "t64",
-            "op": "!==",
-            "right": "t65"
-          }
-        },
-        {
-          "name": "t69",
-          "value": {
-            "cond": "t66",
-            "else": [
-              {
-                "name": "t68",
-                "value": {
-                  "kind": "load_const",
-                  "value": ""
-                }
-              }
-            ],
-            "kind": "if",
-            "then": [
-              {
-                "name": "t67",
-                "value": {
-                  "args": [
-                    "t63",
-                    "t64"
-                  ],
-                  "func": "buildChangeOutput",
-                  "kind": "call"
-                }
-              }
-            ]
-          }
-        },
-        {
-          "name": "t70",
-          "value": {
-            "kind": "get_state_script"
-          }
-        },
-        {
-          "name": "t71",
-          "value": {
-            "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t72",
+          "name": "t65",
           "value": {
             "kind": "load_param",
             "name": "_newAmount"
           }
         },
         {
-          "name": "t73",
+          "name": "t66",
           "value": {
             "args": [
-              "t71",
-              "t70",
-              "t72"
+              "t64",
+              "t63",
+              "t65"
             ],
             "func": "computeStateOutput",
             "kind": "call"
           }
         },
         {
-          "name": "t74",
+          "name": "t67",
           "value": {
             "args": [
-              "t73",
-              "t69"
-            ],
-            "func": "cat",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t75",
-          "value": {
-            "args": [
-              "t74"
+              "t66"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t76",
+          "name": "t68",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t77",
+          "name": "t69",
           "value": {
             "args": [
-              "t76"
+              "t68"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t78",
+          "name": "t70",
           "value": {
             "kind": "bin_op",
-            "left": "t75",
+            "left": "t67",
             "op": "===",
             "result_type": "bytes",
-            "right": "t77"
+            "right": "t69"
           }
         },
         {
-          "name": "t79",
+          "name": "t71",
           "value": {
             "isAutoInjectedStateCheck": true,
             "kind": "assert",
-            "value": "t78"
+            "value": "t70"
           }
         }
       ],
@@ -820,14 +751,6 @@
           "type": "bigint"
         },
         {
-          "name": "_changePKH",
-          "type": "Ripemd160"
-        },
-        {
-          "name": "_changeAmount",
-          "type": "bigint"
-        },
-        {
           "name": "_newAmount",
           "type": "bigint"
         },
@@ -835,7 +758,8 @@
           "name": "txPreimage",
           "type": "SigHashPreimage"
         }
-      ]
+      ],
+      "sigHashType": 67
     }
   ],
   "parentClass": "StatefulSmartContract",
