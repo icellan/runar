@@ -1615,12 +1615,27 @@ export class RunarContract {
       }
     }
 
+    // D25: a bind-class contract's every continuation carries the hidden
+    // `_spentOutpointHash` = sha256(outpoint this input spends), which the
+    // covenant writes itself. A caller-supplied state (CallOptions.outputs /
+    // newState) cannot be expected to know it — left out, serializeState
+    // refuses; copied from `contract.state`, it is the PREVIOUS outpoint's
+    // hash and the covenant rejects the spend. The value is fully determined
+    // by the outpoint this call spends and no other value can ever validate,
+    // so it is ALWAYS overwritten here, whatever the caller passed.
+    const bindsOutpoint = !!this.artifact.stateFields?.some((f) => f.name === TWIN_BINDING_FIELD);
+    const outpointBinding = bindsOutpoint
+      ? Utils.toHex(Hash.sha256(Utils.toArray(wireOutpointHex(contractUtxo.txid, contractUtxo.outputIndex), 'hex')))
+      : undefined;
+    const withOutpointBinding = (state: Record<string, unknown>): Record<string, unknown> =>
+      outpointBinding !== undefined ? { ...state, [TWIN_BINDING_FIELD]: outpointBinding } : state;
+
     if (isStateful && hasMultiOutput) {
       // N-075: getCodePartHex() carries the inscription envelope (as the
       // single-output path's getLockingScript() does); buildCodeScript() alone dropped it.
       const codeScript = this.getCodePartHex();
       contractOutputs = options!.outputs!.map((out) => {
-        const stateHex = serializeState(this.artifact.stateFields!, out.state);
+        const stateHex = serializeState(this.artifact.stateFields!, withOutpointBinding(out.state));
         return { script: codeScript + '6a' + stateHex, satoshis: out.satoshis ?? 1 };
       });
     } else if (isStateful) {
@@ -1642,7 +1657,7 @@ export class RunarContract {
       newSatoshis = options?.satoshis ?? singleExplicitStateSats ?? this.currentUtxo.satoshis;
       if (options?.newState) {
         // Explicit newState takes priority (backward compat)
-        this._state = { ...this._state, ...options.newState };
+        this._state = { ...this._state, ...withOutpointBinding(options.newState) };
       } else if (methodHasContinuation && autoComputedState && autoFlatState) {
         const merged = { ...autoFlatState, ...autoComputedState };
         const regrouped = regroupFixedArrayState(merged, this.artifact.stateFields);
@@ -1751,7 +1766,7 @@ export class RunarContract {
     } else if (isStateful && hasMultiOutput && contractOutputs) {
       continuations = contractOutputs.map((o, idx) => ({
         outputIndex: idx, satoshis: o.satoshis, script: o.script,
-        state: { ...(options!.outputs![idx]!.state) },
+        state: withOutpointBinding({ ...(options!.outputs![idx]!.state) }),
       }));
     } else if (isStateful && newLockingScript) {
       continuations = [{
@@ -3392,6 +3407,9 @@ function sumKnownInputSatoshis(
 }
 
 /** A spent outpoint as BIP-143 serializes it: txid in wire order || vout u32 LE. */
+/** D25 hidden state field (mirrors runar-compiler's TWIN_BINDING_FIELD). */
+const TWIN_BINDING_FIELD = '_spentOutpointHash';
+
 function wireOutpointHex(txid: string, vout: number): string {
   const txidLE = txid.match(/.{2}/g)!.reverse().join('');
   const voutLE = (vout >>> 0).toString(16).padStart(8, '0').match(/.{2}/g)!.reverse().join('');

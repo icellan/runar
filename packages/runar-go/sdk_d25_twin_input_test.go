@@ -216,3 +216,39 @@ func TestD25SDK_Class2_DataOutputHonestChainedCalls(t *testing.T) {
 		t.Fatalf("count = %d, want 3", got)
 	}
 }
+
+// D25: CallOptions.NewState / Outputs never name the hidden
+// _spentOutpointHash. The SDK must write sha256(the outpoint this call spends)
+// itself — left out, SerializeState has no value; kept from GetState(), it is
+// the previous outpoint's hash and the covenant rejects the spend. The
+// validating MockProvider executes every call below.
+func TestD25SDK_Class2_CallerSuppliedStateGetsSpentOutpointHash(t *testing.T) {
+	art := d12Compile(t, "MixedPot", d25MixedSrc)
+	provider, signer := d25Funded(t)
+	c := NewRunarContract(art, []interface{}{int64(1)})
+	if _, _, err := c.Deploy(provider, signer, DeployOptions{Satoshis: 10_000}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	spent := c.GetCurrentUtxo()
+	if _, _, err := c.Call("bump", nil, provider, signer, &CallOptions{
+		Outputs: []OutputSpec{{Satoshis: spent.Satoshis, State: map[string]interface{}{"count": int64(2)}}},
+	}); err != nil {
+		t.Fatalf("bump with Outputs: %v", err)
+	}
+	if provider.LastValidatedInputCount() == 0 {
+		t.Fatalf("bump: the validating provider executed no input")
+	}
+	// GetState() still carries the deploy-time (zero) hash: copying it is the
+	// stale-hash case.
+	stale := map[string]interface{}{}
+	for k, v := range c.GetState() {
+		stale[k] = v
+	}
+	stale["count"] = int64(3)
+	if _, _, err := c.Call("increment", nil, provider, signer, &CallOptions{NewState: stale}); err != nil {
+		t.Fatalf("increment with NewState copied from GetState(): %v", err)
+	}
+	if provider.LastValidatedInputCount() == 0 {
+		t.Fatalf("increment: the validating provider executed no input")
+	}
+}

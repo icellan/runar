@@ -133,6 +133,10 @@ export interface RealExecResult {
    *  otherwise a reject that fails for an unrelated SDK reason silently passes
    *  and the guard it was meant to exercise stops being tested (audit #12). */
   reachedEngine?: boolean;
+  /** Stateful only: the txid (display order) of the deploy tx whose output 0
+   *  the call spends (`auditCallShape` pins input 0 to it). Lets a spec pin a
+   *  D25 `_spentOutpointHash` independently of the SDK's state derivation. */
+  deployTxid?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -860,5 +864,6 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
     stateDecodeError,
     lockingHex: deployTx.outputs[0]!.lockingScript.toHex(),
     artifact,
+    deployTxid: deployTx.id('hex'),
   };
 }

@@ -1352,10 +1352,38 @@ func (c *RunarContract) prepareCallInner(
 	newLockingScript := ""
 	newSatoshis := int64(0)
 
+	// D25: a bind-class contract's every continuation carries the hidden
+	// _spentOutpointHash = sha256(outpoint this input spends), written by the
+	// covenant itself. A caller-supplied state (Outputs / NewState) cannot be
+	// expected to know it — left out, SerializeState has no value; copied from
+	// GetState(), it is the PREVIOUS outpoint's hash and the covenant rejects
+	// the spend. No other value can ever validate, so it is always overwritten.
+	withOutpointBinding := func(st map[string]interface{}) map[string]interface{} { return st }
+	if n := len(c.Artifact.StateFields); isStateful && n > 0 && c.Artifact.StateFields[n-1].Name == "_spentOutpointHash" {
+		if txidBytes, err := hex.DecodeString(contractUtxo.Txid); err == nil && len(txidBytes) == 32 {
+			wire := make([]byte, 0, 36)
+			for i := 31; i >= 0; i-- {
+				wire = append(wire, txidBytes[i])
+			}
+			vout := uint32(contractUtxo.OutputIndex)
+			wire = append(wire, byte(vout), byte(vout>>8), byte(vout>>16), byte(vout>>24))
+			sum := sha256.Sum256(wire)
+			binding := hex.EncodeToString(sum[:])
+			withOutpointBinding = func(st map[string]interface{}) map[string]interface{} {
+				out := make(map[string]interface{}, len(st)+1)
+				for k, v := range st {
+					out[k] = v
+				}
+				out["_spentOutpointHash"] = binding
+				return out
+			}
+		}
+	}
+
 	if isStateful && hasMultiOutput {
 		codePartHex := c.getCodePartHex()
 		for _, out := range options.Outputs {
-			stateHex := SerializeState(c.Artifact.StateFields, out.State)
+			stateHex := SerializeState(c.Artifact.StateFields, withOutpointBinding(out.State))
 			contractOutputs = append(contractOutputs, ContractOutput{
 				Script:   codePartHex + "6a" + stateHex,
 				Satoshis: out.Satoshis,
@@ -1376,7 +1404,7 @@ func (c *RunarContract) prepareCallInner(
 		}
 		if options != nil && options.NewState != nil {
 			// Explicit newState takes priority (backward compat)
-			for k, v := range options.NewState {
+			for k, v := range withOutpointBinding(options.NewState) {
 				c.state[k] = v
 			}
 		} else if methodHasContinuation && autoComputedState != nil {

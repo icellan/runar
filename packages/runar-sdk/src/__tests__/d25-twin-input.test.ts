@@ -303,4 +303,40 @@ describe('D25 class 2: mixed auto-continuation + addOutput contract (MixedPot)',
     const c = await honestCalls(art, ['increment', 'bump', 'increment']);
     expect(c.state.count).toBe(3n);
   });
+
+  // The caller-supplied-state paths (CallOptions.outputs / newState) never
+  // name the hidden field; the SDK must fill it with sha256(the outpoint this
+  // call spends), not leave it out (serializeState refuses) or keep the
+  // previous call's hash (the covenant rejects). Broadcast validation is ON.
+  it('honest: CallOptions.outputs / newState without the hidden field get the spent-outpoint hash', async () => {
+    const provider = new MockProvider();
+    const signer = new LocalSigner('11'.repeat(32));
+    provider.addUtxo(await signer.getAddress(), {
+      txid: 'ab'.repeat(32), outputIndex: 0, satoshis: 500_000,
+      script: buildP2PKHScript(await signer.getPublicKey()),
+    });
+    const c = new RunarContract(art, [1n]);
+    await c.deploy(provider, signer, { satoshis: 10_000 });
+    const spent = c.getUtxo()!;
+    // (CallOptions.outputs does not advance `contract.state` — pre-existing
+    // behaviour; the continuations are reported in the CallResult instead.)
+    await c.call('bump', [], provider, signer, { outputs: [{ satoshis: spent.satoshis, state: { count: 2n } }] });
+    const spent2 = c.getUtxo()!;
+    expect(spent2.txid).not.toBe(spent.txid);
+    await c.call('increment', [], provider, signer, { newState: { count: 3n } });
+    expect(c.state.count).toBe(3n);
+    expect(c.state[BINDING_FIELD]).toBe(sha256hex(wireOutpoint(spent2.txid, spent2.outputIndex)));
+    // A state copied from `contract.state` carries the PREVIOUS outpoint's
+    // hash; the SDK must replace it (the covenant would reject it as stale).
+    const spent3 = c.getUtxo()!;
+    const stale = c.state[BINDING_FIELD];
+    await c.call('increment', [], provider, signer, { newState: { ...c.state, count: 4n } });
+    expect(c.state[BINDING_FIELD]).toBe(sha256hex(wireOutpoint(spent3.txid, spent3.outputIndex)));
+    expect(c.state[BINDING_FIELD]).not.toBe(stale);
+    const spent4 = c.getUtxo()!;
+    const r = await c.call('bump', [], provider, signer, {
+      outputs: [{ satoshis: spent4.satoshis, state: { ...c.state, count: 5n } }],
+    });
+    expect(r.continuations[0]!.state[BINDING_FIELD]).toBe(sha256hex(wireOutpoint(spent4.txid, spent4.outputIndex)));
+  });
 });

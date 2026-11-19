@@ -1626,7 +1626,9 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return strings.Repeat("00", 32)
 	// D2: the real fields of the transaction PrepareCall builds (its nLockTime,
 	// input 0's nSequence and outpoint), supplied through MockPreimageAmount.
-	// A bare ComputeNewState with no such fields keeps the historical nil.
+	// A bare ComputeNewState with no such fields keeps the historical nil for
+	// extractLocktime / extractSequence; extractOutpoint falls back to the
+	// 36-byte zero dummy (D25, see below).
 	case "extractLocktime", "extractSequence", "extractOutpoint":
 		if len(args) > 0 {
 			if mp, ok := args[0].(MockPreimageAmount); ok {
@@ -1639,6 +1641,12 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 					return mp.Outpoint
 				}
 			}
+		}
+		// D25: an unknown outpoint is the 36-byte zero dummy (TS reference),
+		// not nil — sha256(extractOutpoint) feeds the hidden
+		// _spentOutpointHash, and sha256(nil) = sha256("") would diverge.
+		if funcName == "extractOutpoint" {
+			return strings.Repeat("00", 36)
 		}
 		return nil
 	// R67: the contract's own real codePart when the caller supplied it

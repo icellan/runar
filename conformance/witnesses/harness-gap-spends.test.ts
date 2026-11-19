@@ -30,6 +30,8 @@ import { wotsKeygen, wotsSign } from '../../packages/runar-testing/src/crypto/wo
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TESTS = join(__dirname, '..', 'tests');
 const SCOPE = TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID;
+/** D25: a mutate-only stateful contract commits under SIGHASH_SINGLE|FORKID (0x43). */
+const SCOPE_SINGLE = TransactionSignature.SIGHASH_SINGLE | TransactionSignature.SIGHASH_FORKID;
 const PRIV = PrivateKey.fromHex('0000000000000000000000000000000000000000000000000000000000000007');
 const PUB = PRIV.toPublicKey().toString();
 const TXID_A = 'aa'.repeat(32);
@@ -81,6 +83,8 @@ interface SpendCase {
   /** inputs before the contract input (the contract input index = others.length). */
   others?: Other[];
   unlock: (preimageHex: string, sigFor: (subscriptHex: string) => string) => string;
+  /** BIP-143 sighash scope of the preimage + signatures (default ALL|FORKID). */
+  scope?: number;
 }
 
 function run(c: SpendCase): { ok: boolean; err?: string } {
@@ -97,10 +101,11 @@ function run(c: SpendCase): { ok: boolean; err?: string } {
     inputIndex: others.length, inputSequence: 0xffffffff, lockTime: 0,
   };
   const preimageFor = (sub: string) => hex(TransactionSignature.formatBytes({
-    ...ctx, subscript: LockingScript.fromHex(sub), scope: SCOPE,
+    ...ctx, subscript: LockingScript.fromHex(sub), scope: c.scope ?? SCOPE,
   } as never) as unknown as number[]);
   const sigFor = (sub: string) =>
-    (PRIV.sign(Hash.sha256(Utils.toArray(preimageFor(sub), 'hex'))).toDER('hex') as string) + '41';
+    (PRIV.sign(Hash.sha256(Utils.toArray(preimageFor(sub), 'hex'))).toDER('hex') as string)
+    + (c.scope ?? SCOPE).toString(16).padStart(2, '0');
   const unlocking = c.unlock(preimageFor(c.scriptCodeHex), sigFor);
   const spend = newConsensusSpend({
     ...ctx,
@@ -192,15 +197,21 @@ describe('harness-gap fixtures execute on @bsv/sdk Spend (nVersion 1)', () => {
     const code = c0.getCodePartHex();
     const cont = new RunarContract(a, [expectedHash, 1n]).getLockingScript();
     const sc = scriptCodeOf(lock, a.codeSeparatorIndex!);
-    const changePKH = '00'.repeat(20);
-    const outs = [{ satoshis: 10000, script: cont }, { satoshis: 500, script: p2pkh(changePKH) }];
+    // D25: bind() is mutate-only, so it commits under SINGLE|FORKID — no change
+    // params, and the continuation must sit at the contract input's index (1:
+    // the companion input is input 0). The change output is uncommitted.
+    expect(a.abi.methods.find((m) => m.name === 'bind')!.sigHashType).toBe(SCOPE_SINGLE);
+    const contAt1 = [{ satoshis: 500, script: p2pkh('00'.repeat(20)) }, { satoshis: 10000, script: cont }];
     const others = [{ txid: TXID_B, vout: 1, satoshis: 1000, script: companion }];
-    const spend = (witness: string) => run({ lockingHex: lock, scriptCodeHex: sc, satoshis: 10000, outputs: outs, others,
-      unlock: (pre) => push(code) + push(changePKH) + pushInt(500) + pushInt(10000) + push(pre) + push(witness) });
+    const spend = (witness: string, outs: Out[] = contAt1) => run({
+      lockingHex: lock, scriptCodeHex: sc, satoshis: 10000, outputs: outs, others, scope: SCOPE_SINGLE,
+      unlock: (pre) => push(code) + pushInt(10000) + push(pre) + push(witness) });
     const ok = spend(companion);
     expect(ok.err).toBeUndefined();
     expect(ok.ok).toBe(true);
     expect(spend(p2pkh('12'.repeat(20))).ok).toBe(false);
+    // The continuation at index 0 is not the output SINGLE commits for input 1.
+    expect(spend(companion, [contAt1[1]!, contAt1[0]!]).ok).toBe(false);
   });
 
   it('stateful-wots-gate: a real WOTS+ signature accepts; a tampered one rejects', () => {
@@ -213,11 +224,13 @@ describe('harness-gap fixtures execute on @bsv/sdk Spend (nVersion 1)', () => {
     const kp = wotsKeygen(new Uint8Array(32).fill(5), new Uint8Array(32).fill(6));
     const msg = Utils.toArray('advance the stateful WOTS+ gate', 'utf8');
     const sig = wotsSign(Uint8Array.from(msg), kp.sk, kp.pk.slice(0, 32));
-    const changePKH = '00'.repeat(20);
-    const outs = [{ satoshis: 10000, script: cont }, { satoshis: 500, script: p2pkh(changePKH) }];
+    // D25: advance() is mutate-only -> SINGLE|FORKID, no change params; the
+    // continuation is at index 0 (the contract input's), the change uncommitted.
+    expect(a.abi.methods.find((m) => m.name === 'advance')!.sigHashType).toBe(SCOPE_SINGLE);
+    const outs = [{ satoshis: 10000, script: cont }, { satoshis: 500, script: p2pkh('00'.repeat(20)) }];
     const spend = (s: Uint8Array) => run({ lockingHex: lock, scriptCodeHex: sc, satoshis: 10000, outputs: outs,
-      unlock: (pre) => push(code) + push(hex(msg)) + push(hex(s)) + push(hex(kp.pk)) + push(changePKH)
-        + pushInt(500) + pushInt(10000) + push(pre) });
+      scope: SCOPE_SINGLE,
+      unlock: (pre) => push(code) + push(hex(msg)) + push(hex(s)) + push(hex(kp.pk)) + pushInt(10000) + push(pre) });
     const ok = spend(sig);
     expect(ok.err).toBeUndefined();
     expect(ok.ok).toBe(true);
