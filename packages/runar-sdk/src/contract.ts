@@ -1434,7 +1434,7 @@ export class RunarContract {
 
       // Compute sighash from preimage (C19: the true BIP-143 digest external
       // signers must ECDSA-sign — hash256(preimage), not sha256(preimage)).
-      const sighash = finalPreimage ? computeBip143Sighash(finalPreimage) : '';
+      const sighash = this.userSigDigest(finalPreimage, termTx, contractUtxo, methodIndex);
 
       return {
         sighash,
@@ -1505,6 +1505,25 @@ export class RunarContract {
           'call — only a StatefulSmartContract (with an SDK-derived preimage) builds a real ' +
           'unlock for each extra contract input; any other path would ship a placeholder ' +
           'unlock and the resulting tx would be invalid',
+      );
+    }
+
+    // D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+    // continuation methods are all mutate-only) commits ONE output per input,
+    // at that input's index. A call that spends extra contract inputs into the
+    // one continuation (a many-to-one merge) is exactly the twin-input shape
+    // SINGLE refuses: every extra input would need its own continuation at its
+    // own index, so the tx cannot verify. Fail closed before building it.
+    if (
+      extraContractUtxos.length > 0 &&
+      ((this.artifact.abi.methods.find((m) => m.name === methodName)?.sigHashType ?? 0x41) & 0x1f) === 0x03
+    ) {
+      throw new Error(
+        `RunarContract.call(${methodName}): additionalContractInputs cannot be spent into one ` +
+          'continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation ' +
+          'methods are all mutate-only, D25): SINGLE commits each input to its own output at its own ' +
+          'index. Merge with an addOutput method instead (see FungibleToken.merge), or build each ' +
+          "input's continuation with assembleMultiContractCall",
       );
     }
 
@@ -2211,7 +2230,7 @@ export class RunarContract {
 
     // Compute sighash from preimage (C19: the true BIP-143 digest external
     // signers must ECDSA-sign — hash256(preimage), not sha256(preimage)).
-    const sighash = finalPreimage ? computeBip143Sighash(finalPreimage) : '';
+    const sighash = this.userSigDigest(finalPreimage, tx, contractUtxo, methodIndex);
 
     return {
       sighash,
@@ -2890,6 +2909,27 @@ export class RunarContract {
       codeSepIdx,
       sigHashType,
     );
+  }
+
+  /**
+   * D25: the digest an external signer signs for a user `Sig` argument. User
+   * signatures are ALL|FORKID (the byte every signer appends), so when the
+   * method's covenant preimage is built under another mode (SIGHASH_SINGLE is
+   * the default for a mutate-only contract) the digest is recomputed over the
+   * same tx, subscript and code separator under ALL|FORKID. The covenant's own
+   * preimage (`PreparedCall.preimage`) is unchanged.
+   */
+  private userSigDigest(
+    covenantPreimage: string,
+    tx: BsvTransaction,
+    utxo: UTXO,
+    methodIndex: number,
+  ): string {
+    if (!covenantPreimage) return '';
+    const { codeSepIdx, sigHashType } = this.resolveOpPushTxParams(methodIndex);
+    if (sigHashType === 0x41) return computeBip143Sighash(covenantPreimage);
+    const { preimageHex } = computeOpPushTxPreimage(tx, 0, utxo.script, utxo.satoshis, codeSepIdx, 0x41);
+    return computeBip143Sighash(preimageHex);
   }
 
   private resolveOpPushTxParams(methodIndex?: number): { codeSepIdx: number | undefined; sigHashType: number } {

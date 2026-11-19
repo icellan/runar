@@ -35,7 +35,8 @@ import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
-import { emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
+import { emitOutpointBinding, emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
+import { TWIN_BINDING_FIELD } from './continuation-binding.js';
 import { isByteReturningBuiltin, isByteStringFamilyType } from './03-typecheck.js';
 import { loopOutputIntrinsicMessage, ternaryOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
@@ -402,7 +403,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // to the full runtime output set. Locked in by the all-tier
       // `private-helper-outputs` conformance fixture (its `partition`
       // and `log` methods route outputs through private helpers).
-      emitStatefulContinuation(methodCtx, shape, addOutputRefs, addDataOutputRefs);
+      emitStatefulContinuation(methodCtx, shape, addOutputRefs, addDataOutputRefs, methodCtx.bindsOutpoint);
 
       // Build augmented params list for ABI
       const augmentedParams: ParamNode[] = method.params.filter(param => !isStatefulContextParam(param));
@@ -636,6 +637,10 @@ class LoweringContext {
    * lowering to inline later.
    */
   private readonly sideEffects: SideEffectSummary | null;
+  /** D25: the contract carries the hidden spent-outpoint field ('bind' class). */
+  get bindsOutpoint(): boolean {
+    return this.contract.properties.some((p) => p.name === TWIN_BINDING_FIELD);
+  }
   /** Debug: source location to attach to emitted ANF bindings. */
   currentSourceLoc: { file: string; line: number; column: number } | undefined;
   /**
@@ -2612,6 +2617,8 @@ function lowerCallExpr(
     const argRefs = normalizedAddOutputArgs.map(arg => lowerExprToRef(arg, ctx));
     const satoshis = argRefs[0]!;
     const stateValues = argRefs.slice(1);
+    // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+    if (ctx.bindsOutpoint) stateValues.push(emitOutpointBinding(ctx));
     const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
     ctx.addOutputRef(ref);
     return ref;
@@ -2653,6 +2660,8 @@ function lowerCallExpr(
     const argRefs = normalizedAddOutputArgs.map(arg => lowerExprToRef(arg, ctx));
     const satoshis = argRefs[0]!;
     const stateValues = argRefs.slice(1);
+    // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+    if (ctx.bindsOutpoint) stateValues.push(emitOutpointBinding(ctx));
     const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
     ctx.addOutputRef(ref);
     return ref;

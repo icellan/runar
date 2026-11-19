@@ -33,8 +33,10 @@ function compileOk(src: string) {
 
 describe('#123 codegen — sighash mode is threaded into script + ABI', () => {
   it('default (no directive) is byte-identical to an explicit ALL|FORKID', () => {
-    const noDirective = compileOk(COUNTER(''));
-    const explicitAll = compileOk(COUNTER('/** @sighash ALL|FORKID */'));
+    // D25: an addOutput body, because a mutate-only contract defaults to
+    // SINGLE and refuses an explicit ALL sibling.
+    const noDirective = compileOk(COUNTER_OUT(''));
+    const explicitAll = compileOk(COUNTER_OUT('/** @sighash ALL|FORKID */'));
     // ALL|FORKID equals the historically-pinned default → identical script + IR.
     const bigintSafe = (_k: string, v: unknown) => (typeof v === 'bigint' ? `${v}n` : v);
     expect(explicitAll.artifact!.script).toBe(noDirective.artifact!.script);
