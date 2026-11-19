@@ -81,7 +81,12 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 	// diagnostics, 7 tiers; see ir/preimage_rules.go). After the scaffolding
 	// check, as in the TS reference, so a malformed stateful prologue keeps
 	// its own N-101 diagnostic.
-	return ir.AssertPreimageRules(program)
+	if err := ir.AssertPreimageRules(program); err != nil {
+		return err
+	}
+	// D26: IR input skips the validator's locktime-domain rule (stateless and
+	// stateful programs alike); see frontend/locktime_domain.go.
+	return frontend.AssertIRLocktimeDomain(program)
 }
 
 // N-087: the source validator's parentClass rules, which --ir never ran. A

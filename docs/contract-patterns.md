@@ -354,6 +354,7 @@ class Auction extends StatefulSmartContract {
   public close(sig: Sig) {
     assert(checkSig(sig, this.auctioneer));
     assert(extractLocktime(this.txPreimage) >= this.deadline);
+    assert(extractLocktime(this.txPreimage) < 500000000n);
     assert(extractSequence(this.txPreimage) !== 0xffffffffn);
     // No state continuation injected -- no state mutation
   }
@@ -387,6 +388,13 @@ A contract that genuinely needs "before T" needs a time source it can read as
 spending transaction's own locktime. v1 ships no such source, so the canonical
 auction drops the exclusive bidding window and documents that late bids land
 until the auctioneer closes.
+
+> **Pin the locktime domain.** Consensus reads an `nLockTime` below 500000000
+> as a block height and one at or above it as a Unix timestamp. A timestamp is
+> far past any height, so without the `< 500000000n` assert above the
+> auctioneer could close at once by stamping `nLockTime = 500000000`. The
+> compiler refuses a lower-bound locktime compare on any path that does not
+> assert the domain (`>= 500000000n` instead for a deadline in Unix time).
 
 > **Pair `extractLocktime` with an `extractSequence` finality guard.** A
 > transaction's `nLockTime` is only enforced by consensus when at least one

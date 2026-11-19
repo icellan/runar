@@ -508,6 +508,7 @@ describe('End-to-end: compile()', () => {
           public close(sig: Sig) {
             assert(checkSig(sig, this.auctioneer));
             assert(extractLocktime(this.txPreimage) >= this.deadline);
+            assert(extractLocktime(this.txPreimage) < 500000000n);
           }
         }
       `;

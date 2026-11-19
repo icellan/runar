@@ -15,6 +15,7 @@ const std = @import("std");
 const types = @import("../ir/types.zig");
 const anf_lower = @import("anf_lower.zig");
 const continuation_rules = @import("continuation_rules.zig");
+const locktime_domain = @import("locktime_domain.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -1411,9 +1412,26 @@ const TypeChecker = struct {
             // D18: in a method that declares its own outputs, a path that
             // writes state and reaches no addOutput drops its write (see
             // continuation_rules.zig).
-            if (method.is_public and continuation_rules.dropsContinuation(method, self.contract)) {
+            const continuation: continuation_rules.Verdict =
+                if (method.is_public) continuation_rules.continuationVerdict(method, self.contract) else .none;
+            if (continuation == .dropped) {
                 self.addError(continuation_rules.DROPPED_CONTINUATION_FMT, .{method.name});
             }
+            // D27: a write after a path's last addOutput is dead on chain (see
+            // continuation_rules.zig).
+            if (continuation == .dead_write) {
+                self.addError(continuation_rules.DEAD_STATE_WRITE_FMT, .{method.name});
+            }
+        }
+
+        // D26: a lower-bound locktime gate needs an asserted domain pin on its
+        // path (locktime_domain.zig), in stateless and stateful contracts
+        // alike. Here, beside D18 / D27, so a contract's other typecheck errors
+        // (D14's unchecked-preimage extractor among them) are still reported.
+        if (method.is_public and locktime_domain.contractReadsLocktime(self.contract) and
+            locktime_domain.hasUnpinnedLocktimeGate(self.contract, method))
+        {
+            self.addError(locktime_domain.LOCKTIME_DOMAIN_FMT, .{method.name});
         }
     }
 

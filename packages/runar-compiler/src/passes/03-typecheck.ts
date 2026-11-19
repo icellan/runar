@@ -18,7 +18,8 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { computeSideEffectSummary } from './side-effect-summary.js';
-import { dropsContinuation } from './continuation-rules.js';
+import { continuationVerdict } from './continuation-rules.js';
+import { contractReadsLocktime, hasUnpinnedLocktimeGate } from './locktime-domain.js';
 import type { MethodEffects, SideEffectSummary } from './side-effect-summary.js';
 
 // ---------------------------------------------------------------------------
@@ -1107,7 +1108,8 @@ class TypeChecker {
       // D18: a state write whose only declared outputs are raw ones is dropped
       // (see continuation-rules.ts). Same text as droppedContinuationMessage,
       // spelled out here so the R-101 extractor can read the template.
-      if (method.visibility === 'public' && dropsContinuation(this.contract, method, effects)) {
+      const continuation = method.visibility === 'public' ? continuationVerdict(this.contract, method, effects) : undefined;
+      if (continuation === 'dropped') {
         this.errors.push(makeDiagnostic(
           `method '${method.name}' writes contract state on a path that reaches no addOutput(): a method ` +
             `that declares its own outputs (addOutput/addRawOutput) gets no auto-injected continuation, ` +
@@ -1118,6 +1120,40 @@ class TypeChecker {
           method.sourceLocation,
         ));
       }
+      // D27: a write after a path's last addOutput is dead on chain (see
+      // continuation-rules.ts). Same text as deadStateWriteMessage, spelled out
+      // here so the R-101 extractor can read the template.
+      if (continuation === 'dead-write') {
+        this.errors.push(makeDiagnostic(
+          `method '${method.name}' writes contract state after the last addOutput() on a path: a method that declares its own ` +
+            `outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the ` +
+            `write never reaches the chain and a caller that tracks the final state builds a continuation the script ` +
+            `refuses. Pass the new value to addOutput(...) instead, or remove the write`,
+          'error',
+          method.sourceLocation,
+        ));
+      }
+    }
+
+    // D26: a lower-bound locktime gate needs an asserted domain pin on its path
+    // (locktime-domain.ts), in stateless and stateful contracts alike. It sits
+    // here, beside D18 / D27, so a contract's other typecheck errors (D14's
+    // unchecked-preimage extractor among them) are still reported with it.
+    // Same text as locktimeDomainMessage, spelled out here so the R-101
+    // extractor can read the template.
+    if (
+      method.visibility === 'public' &&
+      contractReadsLocktime(this.contract) &&
+      hasUnpinnedLocktimeGate(this.contract, method)
+    ) {
+      this.errors.push(makeDiagnostic(
+        `method '${method.name}' compares extractLocktime against a lower bound without pinning the locktime domain: ` +
+          `consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime ` +
+          `passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < ` +
+          `500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate`,
+        'error',
+        method.sourceLocation,
+      ));
     }
   }
 

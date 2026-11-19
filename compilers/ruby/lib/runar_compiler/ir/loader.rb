@@ -22,6 +22,7 @@ require_relative "synthetic_array_chain"
 require_relative "rabin_key_provenance"
 require_relative "preimage_rules"
 require_relative "continuation_rules"
+require_relative "locktime_domain"
 
 module RunarCompiler
   module IR
@@ -136,6 +137,10 @@ module RunarCompiler
       # D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
       # diagnostics, 7 tiers; see preimage_rules.rb).
       PreimageRules.assert!(program)
+
+      # D26: IR input skips typecheck's locktime-domain rule (stateless and
+      # stateful programs alike; see locktime_domain.rb).
+      LocktimeDomain.assert!(program)
 
       program
     end

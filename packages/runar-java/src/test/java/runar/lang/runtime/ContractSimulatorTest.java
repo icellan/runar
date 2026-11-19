@@ -179,8 +179,9 @@ class ContractSimulatorTest {
             @Public
             void increment() {
                 Bigint next = this.count.plus(Bigint.ONE);
-                this.addOutput(1000L, next);
+                // D27: the write precedes the addOutput that commits it.
                 this.count = next;
+                this.addOutput(1000L, next);
             }
         }
         """;

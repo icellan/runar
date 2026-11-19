@@ -141,3 +141,59 @@ fn d18_ir_path_refuses_dropped_continuation() {
         compile_from_ir_str(&json).unwrap_or_else(|e| panic!("{} --ir refused: {e}", s(case, "name")));
     }
 }
+
+/// The unchecked ANF of `src` (validate / typecheck skipped), as IR JSON, or
+/// None when the lowerer itself refuses a write inside an output-declaring branch.
+fn unchecked_ir(src: &str, file: &str, name: &str) -> Option<String> {
+    let parsed = parse_source(src, Some(file));
+    let contract = parsed.contract.unwrap_or_else(|| panic!("{name} parse failed"));
+    let expanded = expand_fixed_arrays(&contract);
+    assert!(expanded.errors.is_empty(), "{name} expand failed");
+    match try_lower_to_anf(&expanded.contract) {
+        Ok(p) => Some(serde_json::to_string(&p).unwrap()),
+        Err(e) if e.message.contains("both declares outputs and assigns contract properties") => None,
+        Err(e) => panic!("{name} lowering failed: {e}"),
+    }
+}
+
+/// The shared refuse / accept matrix of one corpus, on the source path and
+/// the --ir path.
+fn refuse_and_accept(refuse: &[Value], accept: &[Value]) {
+    for case in refuse {
+        let name = s(case, "name");
+        let (errors, _) = compile(s(case, "src"), s(case, "file"));
+        assert!(errors.iter().any(|e| e.contains(s(case, "error"))), "{name} not refused; got {errors:?}");
+        if let Some(json) = unchecked_ir(s(case, "src"), s(case, "file"), name) {
+            let err = compile_from_ir_str(&json).err().unwrap_or_else(|| panic!("{name} --ir accepted"));
+            assert!(err.contains(s(case, "error")), "{name}: {err}");
+        }
+    }
+    for case in accept {
+        let name = s(case, "name");
+        let r = compile_from_source_str_with_result(s(case, "src"), Some(s(case, "file")), &opts());
+        let anf = r.anf.unwrap_or_else(|| panic!("{name} source refused: {:?}", r.diagnostics));
+        let json = serde_json::to_string(&anf).unwrap();
+        compile_from_ir_str(&json).unwrap_or_else(|e| panic!("{name} --ir refused: {e}"));
+    }
+}
+
+/// D27: a state write after a path's last addOutput is dead on chain.
+#[test]
+fn d27_refuses_a_write_after_the_last_add_output() {
+    let c = corpus("dropped-continuation-cases.json");
+    let refuse = cases(&c, "refuse_after_last");
+    assert!(refuse.len() >= 5);
+    for case in refuse {
+        assert!(s(case, "error").contains("writes contract state after the last addOutput()"), "{}", s(case, "name"));
+    }
+    refuse_and_accept(refuse, cases(&c, "accept"));
+}
+
+/// D26: a lower-bound compare on extractLocktime needs an asserted locktime
+/// domain pin on its path. Corpus: conformance/negatives/locktime-domain-cases.json.
+#[test]
+fn d26_refuses_an_unpinned_locktime_gate() {
+    let c = corpus("locktime-domain-cases.json");
+    assert!(cases(&c, "refuse").len() >= 10 && cases(&c, "accept").len() >= 10);
+    refuse_and_accept(cases(&c, "refuse"), cases(&c, "accept"));
+}

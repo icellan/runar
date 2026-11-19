@@ -162,6 +162,13 @@ export function extractOutputs(_txPreimage: SigHashPreimage): Sha256 {
  * - `extractLocktime(p) >= T` is sound: the spend cannot confirm before T.
  *   Pair it with `extractSequence(p) !== 0xffffffffn` or consensus ignores
  *   nLockTime altogether and the gate is script-only theatre.
+ * - ...and pin the DOMAIN. Consensus reads an nLockTime below 500000000 as a
+ *   block height and one at or above it as a Unix timestamp, so a height gate
+ *   `>= T` is passed at once by any timestamp-domain locktime. Assert
+ *   `extractLocktime(p) < 500000000n` next to a height gate (or
+ *   `>= 500000000n` for a timestamp gate). That pin is a check on the
+ *   field's unit, not on time, so the next point does not apply to it. The
+ *   compiler refuses a lower-bound compare on a path that carries no pin.
  * - `extractLocktime(p) < T` proves NOTHING about the current height. A
  *   spender at height T+1000 simply stamps a stale `nLockTime` of T-1 and
  *   the node mines it. Do not use this field to close a window.
@@ -282,7 +289,8 @@ export function requireOutputP2PKH(
  * NOT read the chain height. It reads the spending transaction's own
  * `nLockTime` — a number the spender writes — so every caveat in
  * {@link extractLocktime} applies verbatim: it is a NOT-BEFORE, it is only
- * consensus-enforced on a non-final transaction, and comparing it UPWARDS
+ * consensus-enforced on a non-final transaction, it needs the same
+ * `< 500000000n` domain pin next to a `>=` gate, and comparing it UPWARDS
  * (`currentBlockHeight() < T`) proves nothing at all. Read it as
  * `txLocktime()`. Prefer spelling {@link extractLocktime} directly.
  */

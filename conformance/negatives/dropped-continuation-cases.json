@@ -136,6 +136,76 @@
       "name": "add-output-in-helper",
       "src": "import { StatefulSmartContract, SmartContract, assert, ByteString, PubKey, Sig, checkSig, cat, toByteString } from 'runar-lang';\n\nclass RtAddInHelper extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public pay(script: ByteString) {\n    this.addRawOutput(1000n, script);\n    this.count = this.count + 1n;\n    this.cont();\n  }\n\n  private cont(): void {\n    this.addOutput(0n, this.count);\n  }\n}\n",
       "file": "Rt.runar.ts"
+    },
+    {
+      "name": "write-between-add-outputs",
+      "file": "Ra.runar.ts",
+      "src": "import { StatefulSmartContract, assert, ByteString } from 'runar-lang';\n\nclass RaH extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.addOutput(1000n, this.count + 1n);\n    this.count = this.count + x;\n    this.addOutput(1000n, this.count);\n  }\n}\n"
+    },
+    {
+      "name": "write-before-add-output-then-data-output",
+      "file": "Ra.runar.ts",
+      "src": "import { StatefulSmartContract, assert, ByteString, toByteString } from 'runar-lang';\n\nclass RaI extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.count = this.count + x;\n    this.addOutput(1000n, this.count);\n    this.addDataOutput(0n, toByteString('00'));\n  }\n}\n"
+    }
+  ],
+  "after_last_error_template": "method '<method>' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write",
+  "_comment_after_last": "D27, the same family: in a method that declares any addOutput/addRawOutput, a state write that NO later addOutput on its path observes (a write after the path's last addOutput, directly, in a helper, or after a helper's addOutput) is refused with the after_last text: the script commits only the values its addOutput calls carry, so the write is dead on chain, and an SDK that builds the continuation from the final state is refused on every honest call. A write followed by another addOutput is accepted. D18 wins when one method has both shapes. Source path: gk-frontend-parity.test.ts; --ir path: ir-release-trap.test.ts.",
+  "refuse_after_last": [
+    {
+      "name": "write-after-add-output",
+      "method": "bump",
+      "src": "import { StatefulSmartContract, assert, ByteString } from 'runar-lang';\n\nclass RaA extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.addOutput(1000n, this.count + 1n);\n    this.count = this.count + x;\n  }\n}\n",
+      "file": "Ra.runar.ts",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    },
+    {
+      "name": "increment-after-add-output",
+      "method": "bump",
+      "src": "import { StatefulSmartContract, assert, ByteString } from 'runar-lang';\n\nclass RaB extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.addOutput(1000n, this.count + 1n);\n    this.count++;\n  }\n}\n",
+      "file": "Ra.runar.ts",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    },
+    {
+      "name": "write-after-helper-add-output",
+      "method": "bump",
+      "src": "import { StatefulSmartContract, assert, ByteString } from 'runar-lang';\n\nclass RaC extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.cont();\n    this.count = this.count + x;\n  }\n\n  private cont(): void {\n    this.addOutput(1000n, this.count + 1n);\n  }\n}\n",
+      "file": "Ra.runar.ts",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    },
+    {
+      "name": "helper-writes-after-its-add-output",
+      "method": "bump",
+      "src": "import { StatefulSmartContract, assert, ByteString } from 'runar-lang';\n\nclass RaD extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.cont(x);\n  }\n\n  private cont(x: bigint): void {\n    this.addOutput(1000n, this.count + 1n);\n    this.count = this.count + x;\n  }\n}\n",
+      "file": "Ra.runar.ts",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    },
+    {
+      "name": "write-after-second-add-output",
+      "method": "bump",
+      "src": "import { StatefulSmartContract, assert, ByteString } from 'runar-lang';\n\nclass RaE extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.count = this.count + x;\n    this.addOutput(1000n, this.count);\n    this.addOutput(1000n, this.count + 1n);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "file": "Ra.runar.ts",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    },
+    {
+      "name": "write-after-every-branch-add-output",
+      "method": "bump",
+      "src": "import { StatefulSmartContract, assert, ByteString } from 'runar-lang';\n\nclass RaF extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    if (flag > 0n) {\n      this.addOutput(1000n, this.count + 1n);\n    } else {\n      this.addOutput(2000n, this.count + 2n);\n    }\n    this.count = this.count + x;\n  }\n}\n",
+      "file": "Ra.runar.ts",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    },
+    {
+      "name": "write-after-raw-and-add-output",
+      "method": "bump",
+      "src": "import { StatefulSmartContract, assert, ByteString, toByteString } from 'runar-lang';\n\nclass RaG extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public bump(x: bigint, flag: bigint) {\n    this.addOutput(1000n, this.count + 1n);\n    this.addRawOutput(1000n, toByteString('51'));\n    this.count = this.count + x;\n  }\n}\n",
+      "file": "Ra.runar.ts",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    },
+    {
+      "name": "python-write-after-add-output",
+      "method": "bump",
+      "src": "from runar import StatefulSmartContract, Bigint, public\n\n\nclass RaPy(StatefulSmartContract):\n    count: Bigint\n\n    def __init__(self, count: Bigint):\n        super().__init__(count)\n        self.count = count\n\n    @public\n    def bump(self, x: Bigint):\n        self.add_output(1000, self.count + 1)\n        self.count = self.count + x\n",
+      "file": "RaPy.runar.py",
+      "error": "method 'bump' writes contract state after the last addOutput() on a path: a method that declares its own outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the write never reaches the chain and a caller that tracks the final state builds a continuation the script refuses. Pass the new value to addOutput(...) instead, or remove the write"
     }
   ]
 }

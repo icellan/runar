@@ -165,7 +165,9 @@ export class N054Plus extends SmartContract {
   constructor(x: bigint) { super(x); this.x = x; }
   public go(p: SigHashPreimage) {
     assert(checkPreimage(p));
-    assert(extractLocktime(p) + 1n > 0n);
+    // \`!==\`, not \`>\`: a lower bound on a locktime read is a D26 height
+    // gate and would need a domain pin, which adds a second OP_CAT.
+    assert(extractLocktime(p) + 1n !== 0n);
     assert(extractAmount(p) + 1n > 0n);
   }
 }

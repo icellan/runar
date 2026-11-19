@@ -631,6 +631,24 @@ export class Neg extends SmartContract {
     ),
   },
   {
+    target: 'writes contract state after the last addOutput() on a path',
+    name: 'd27-write-after-add-output',
+    source: stateful(
+      `    this.addOutput(1000n, this.count + x);
+    this.count = this.count + x;
+    assert(x > 0n);`,
+    ),
+  },
+  {
+    target: 'compares extractLocktime against a lower bound without pinning the locktime domain',
+    name: 'd26-unpinned-height-gate',
+    source: stateful(
+      `    assert(extractLocktime(this.txPreimage) >= x);
+    assert(extractSequence(this.txPreimage) !== 0xffffffffn);`,
+      { imports: 'StatefulSmartContract, assert, extractLocktime, extractSequence' },
+    ),
+  },
+  {
     target: 'addRawOutput() first argument (satoshis) must be bigint',
     name: 'addrawoutput-satoshis-not-bigint',
     source: stateful(

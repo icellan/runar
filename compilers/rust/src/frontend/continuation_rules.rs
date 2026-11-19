@@ -16,6 +16,12 @@
 //! only addOutput carries state, so a path that writes state and reaches no
 //! addOutput drops its write and the contract's value leaves with the spend.
 //! A path that writes nothing is terminal by design and is accepted.
+//!
+//! D27 (error, typecheck; `--ir` likewise), PER PATH, same family: in such a
+//! method a state write after the path's last addOutput is dead on chain (the
+//! script commits only the values its addOutput calls carry), so an SDK that
+//! builds the continuation from the final state is refused on every honest
+//! call. D18 wins when a method has both.
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,12 +47,38 @@ writing state on a path meant to end the contract"
     )
 }
 
-/// Path-state bits: state written / addOutput reached.
+/// D27: the shared error text (D18's sibling).
+pub fn dead_state_write_message(method: &str) -> String {
+    format!(
+        "method '{method}' writes contract state after the last addOutput() on a path: a method that declares its own \
+outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the \
+write never reaches the chain and a caller that tracks the final state builds a continuation the script \
+refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    )
+}
+
+/// Path-state bits: state written / addOutput reached / state written since
+/// the path's last addOutput (D27; an addOutput clears it).
 pub(crate) const PATH_W: u8 = 1;
 pub(crate) const PATH_A: u8 = 2;
+pub(crate) const PATH_D: u8 = 4;
 
-/// A set of path states (each 0..=3) as a 4-bit mask: bit `x` set = state `x`
-/// is present. At most four distinct states, so nothing explodes.
+/// D18 / D27 verdict of a method's exit states (D18 wins when both apply).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContinuationVerdict {
+    Dropped,
+    DeadWrite,
+}
+
+/// Run a callee's exit state `y` after the caller's `x`: an addOutput in the
+/// callee clears the caller's pending write.
+fn then(x: u8, y: u8) -> u8 {
+    let d = if y & PATH_A != 0 { y & PATH_D } else { (x | y) & PATH_D };
+    ((x | y) & !PATH_D) | d
+}
+
+/// A set of path states (each 0..=7) as an 8-bit mask: bit `x` set = state `x`
+/// is present. At most eight distinct states, so nothing explodes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct PathSet(u8);
 
@@ -62,31 +94,66 @@ impl PathSet {
         PathSet(self.0 | o.0)
     }
     fn states(self) -> impl Iterator<Item = u8> {
-        (0u8..4).filter(move |x| self.0 & (1 << x) != 0)
+        (0u8..8).filter(move |x| self.0 & (1 << x) != 0)
     }
     /// `{x | bits for x in self}`.
     pub(crate) fn or_all(self, bits: u8) -> PathSet {
         PathSet(self.states().fold(0, |m, x| m | (1 << (x | bits))))
     }
-    /// `{x | y for x in self, y in o}`.
+    /// A state write: sets W and D.
+    pub(crate) fn write(self) -> PathSet {
+        self.or_all(PATH_W | PATH_D)
+    }
+    /// An addOutput: sets A and clears D.
+    pub(crate) fn add_output(self) -> PathSet {
+        PathSet(self.states().fold(0, |m, x| m | (1 << ((x | PATH_A) & !PATH_D))))
+    }
+    /// `{then(x, y) for x in self, y in o}` (D18 / D27 helper composition).
     pub(crate) fn compose(self, o: PathSet) -> PathSet {
+        PathSet(self.states().fold(0, |m, x| o.states().fold(m, |m, y| m | (1 << then(x, y)))))
+    }
+    /// `{x | y for x in self, y in o}` (plain-OR composition, D26).
+    pub(crate) fn compose_or(self, o: PathSet) -> PathSet {
         PathSet(self.states().fold(0, |m, x| o.states().fold(m, |m, y| m | (1 << (x | y)))))
     }
     /// Some path wrote state and reached no addOutput.
     pub(crate) fn dropped(self) -> bool {
         self.states().any(|x| x & PATH_W != 0 && x & PATH_A == 0)
     }
+    /// D27: some path reached an addOutput and wrote state after its last one.
+    pub(crate) fn dead_write(self) -> bool {
+        self.states().any(|x| x & PATH_A != 0 && x & PATH_D != 0)
+    }
+    /// D18 / D27 verdict: D18 wins.
+    pub(crate) fn verdict(self) -> Option<ContinuationVerdict> {
+        if self.dropped() {
+            Some(ContinuationVerdict::Dropped)
+        } else if self.dead_write() {
+            Some(ContinuationVerdict::DeadWrite)
+        } else {
+            None
+        }
+    }
+    /// Some path carries a gate (bit 1) and no pin (bit 2) (D26).
+    pub(crate) fn unpinned(self, gate: u8, pin: u8) -> bool {
+        self.states().any(|x| x & gate != 0 && x & pin == 0)
+    }
 }
 
-/// D18 (source path), per path: the method declares a state output somewhere
-/// (so it gets no auto-continuation) and some path through it writes state
-/// without reaching an addOutput. Mirrors `dropsContinuation` /
+/// D18 + D27 (source path), per path, in a method that declares a state
+/// output somewhere (so it gets no auto-continuation): `Dropped` when some
+/// path writes state and reaches no addOutput, else `DeadWrite` when some path
+/// writes state after its last addOutput. Mirrors `continuationVerdict` /
 /// `SourcePaths` in continuation-rules.ts.
-pub fn drops_continuation(contract: &ContractNode, method: &MethodNode, effects: &MethodEffects) -> bool {
+pub fn continuation_verdict(
+    contract: &ContractNode,
+    method: &MethodNode,
+    effects: &MethodEffects,
+) -> Option<ContinuationVerdict> {
     if !effects.has_state_output {
-        return false;
+        return None;
     }
-    SourcePaths::new(contract).exits(&method.body).dropped()
+    SourcePaths::new(contract).exits(&method.body).verdict()
 }
 
 struct SourcePaths<'a> {
@@ -179,7 +246,7 @@ impl<'a> SourcePaths<'a> {
                 let mut s = self.expr(target, states);
                 s = self.expr(value, s);
                 if self.writes_mutable(target) {
-                    s = s.or_all(PATH_W);
+                    s = s.write();
                 }
                 (s, none)
             }
@@ -222,7 +289,7 @@ impl<'a> SourcePaths<'a> {
             Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
                 let s = self.expr(operand, states);
                 if self.writes_mutable(operand) {
-                    s.or_all(PATH_W)
+                    s.write()
                 } else {
                     s
                 }
@@ -237,7 +304,7 @@ impl<'a> SourcePaths<'a> {
                 }
                 let (name, member) = callee_name(callee);
                 if member && name == Some("addOutput") {
-                    return s.or_all(PATH_A);
+                    return s.add_output();
                 }
                 if let Some(n) = name {
                     if self.privates.contains_key(n) {

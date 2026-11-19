@@ -734,7 +734,7 @@
             "args": [
               "t19"
             ],
-            "func": "extractSequence",
+            "func": "extractLocktime",
             "kind": "call"
           }
         },
@@ -742,7 +742,7 @@
           "name": "t21",
           "value": {
             "kind": "load_const",
-            "value": 4294967295
+            "value": 500000000
           }
         },
         {
@@ -750,7 +750,7 @@
           "value": {
             "kind": "bin_op",
             "left": "t20",
-            "op": "!==",
+            "op": "<",
             "right": "t21"
           }
         },
@@ -759,6 +759,46 @@
           "value": {
             "kind": "assert",
             "value": "t22"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t25",
+          "value": {
+            "args": [
+              "t24"
+            ],
+            "func": "extractSequence",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "kind": "load_const",
+            "value": 4294967295
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "kind": "bin_op",
+            "left": "t25",
+            "op": "!==",
+            "right": "t26"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "kind": "assert",
+            "value": "t27"
           }
         }
       ],

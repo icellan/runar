@@ -236,9 +236,13 @@ windowSecs` — provided the covenant also asserts
 `runar.ExtractSequence(c.TxPreimage) != 4294967295`, without which consensus
 ignores `nLockTime` altogether. The reverse comparison (`<`, "still inside the
 window") proves nothing at all: a spender past the window writes a stale
-locktime and the node mines it.
+locktime and the node mines it. `TOpen` and `windowSecs` are Unix seconds, so
+the covenant must also pin the timestamp domain on that path: a height-domain
+locktime (below 500000000) is not comparable with them, and the compiler
+refuses the compare without the pin (D26).
 
 ```go
+runar.Assert(runar.CurrentBlockHeight() >= 500000000) // timestamp domain
 if runar.CurrentBlockHeight() > c.TOpen + windowSecs {
     // expired branch — sound only alongside the ExtractSequence finality guard
 }
