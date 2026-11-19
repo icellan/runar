@@ -160,6 +160,17 @@ export function computeNewState(
 export interface ContinuationContext {
   inputAmount?: bigint;
   scriptCode?: string;
+  /**
+   * D12 D2: the nLockTime, the spent input's nSequence, and the spent outpoint
+   * (32-byte txid in wire order, i.e. reversed display hex, || 4-byte LE vout)
+   * of the transaction being built — what `extractLocktime`,
+   * `extractSequence` and `extractOutpoint` read on chain. `contract.ts`
+   * always supplies them; a bare `computeNewState` probe without them keeps
+   * the historical dummies.
+   */
+  locktime?: bigint;
+  sequence?: bigint;
+  outpoint?: string;
 }
 
 /** Stand-in for `txPreimage` when the caller supplied the input amount and/or scriptCode. */
@@ -167,6 +178,9 @@ interface MockPreimageValue {
   readonly __runarMockPreimage: true;
   readonly amount?: bigint;
   readonly scriptCode?: string;
+  readonly locktime?: bigint;
+  readonly sequence?: bigint;
+  readonly outpoint?: string;
 }
 
 /** N-360: the source name of a param bound under its `<name>@local` slot, else undefined. */
@@ -447,13 +461,18 @@ function runMethod(
     }
   }
   if (
-    (continuation?.inputAmount !== undefined || continuation?.scriptCode !== undefined)
+    (continuation?.inputAmount !== undefined || continuation?.scriptCode !== undefined
+      || continuation?.locktime !== undefined || continuation?.sequence !== undefined
+      || continuation?.outpoint !== undefined)
     && method.params.some((p) => p.name === 'txPreimage')
   ) {
     const mock: MockPreimageValue = {
       __runarMockPreimage: true,
       amount: continuation?.inputAmount,
       scriptCode: continuation?.scriptCode,
+      locktime: continuation?.locktime,
+      sequence: continuation?.sequence,
+      outpoint: continuation?.outpoint,
     };
     env['txPreimage'] = mock;
   }
@@ -613,6 +632,15 @@ function evalValue(
         }
         return undefined;
       }
+      // D12 BM-F6: a builtin's numeric operands are consumed by numeric
+      // opcodes on chain, which abort on a non-minimal encoding (`1n >> 1n`
+      // leaves [0x00]) exactly as bin_op/unary_op operands do. The one
+      // exception is the VALUE operand of num2bin/int2str: OP_NUM2BIN
+      // re-encodes it and does not require it minimal.
+      value.args.forEach((a, i) => {
+        if (i === 0 && (value.func === 'num2bin' || value.func === 'int2str')) return;
+        assertMinimalNumericOperand(scriptBytes[a], env[a], value.func);
+      });
       return evalCall(
         value.func,
         value.args.map((a) => env[a]),
@@ -1191,6 +1219,14 @@ function evalCall(
     }
     case 'reverseBytes': {
       const hex = String(args[0] ?? '');
+      // D12: the compiled script reverses at most 520 bytes (REVERSE_MAX_BYTES
+      // in 05-stack-lower) and drops the rest, so a full reverse here would
+      // derive a value the covenant never computes. Refuse instead.
+      if (hex.length / 2 > 520) {
+        throw new Error(
+          `reverseBytes: input of ${hex.length / 2} bytes exceeds the 520-byte limit the compiled script reverses`,
+        );
+      }
       const pairs: string[] = [];
       for (let i = 0; i < hex.length; i += 2) pairs.push(hex.slice(i, i + 2));
       return pairs.reverse().join('');
@@ -1369,6 +1405,8 @@ function evalCall(
     case 'extractOutputHash':
       return '00'.repeat(32);
     case 'extractLocktime':
+      // D12 D2: the real nLockTime of the tx being built when known.
+      if (isMockPreimage(args[0]) && args[0].locktime !== undefined) return args[0].locktime;
       return 0n;
     // Dummy nVersion. Peers (runar-py/rs/zig/rb/java) already return 1;
     // runar-lang runtime does too. Without this arm `prepareCall` fails
@@ -1385,6 +1423,8 @@ function evalCall(
     // honest off-chain answer for the same reason `extractLocktime` answers 0:
     // the real value is a property of a transaction that does not exist yet.
     case 'extractSequence':
+      // D12 D2: the real nSequence placed on the spent input when known.
+      if (isMockPreimage(args[0]) && args[0].sequence !== undefined) return args[0].sequence;
       return 0xfffffffen;
     // Dummy 32-byte prevouts hash. The real hash is a property of a
     // transaction that does not exist yet during off-chain state derivation;
@@ -1395,6 +1435,8 @@ function evalCall(
     case 'extractHashSequence':
       return '00'.repeat(32);
     case 'extractOutpoint':
+      // D12 D2: the real spent outpoint when known.
+      if (isMockPreimage(args[0]) && args[0].outpoint !== undefined) return args[0].outpoint;
       return '00'.repeat(36);
     // R67: the contract's own real codePart when the caller supplied it
     // (see `ContinuationContext.scriptCode`'s doc comment) — `contract.ts`
@@ -1706,15 +1748,18 @@ function num2binHex(n: bigint, byteLen: number): string {
     }
   }
 
-  // 2a. Field too narrow for the value: OP_NUM2BIN rejects this outright
-  //     ("impossible encoding"). The interpreter keeps its historical
-  //     truncation rather than growing a new failure mode here; an equal-length
-  //     encoding is already final and needs no sign-bit move.
-  if (bytes.length >= byteLen) {
-    return bytes
-      .slice(0, byteLen)
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
+  // 2a. Field too narrow for the value (or a negative size): OP_NUM2BIN
+  //     aborts the script. D12 BM-F5: refuse the same way instead of the
+  //     historical truncation, which derived a value no covenant computes.
+  //     An equal-length encoding is already final and needs no sign-bit move.
+  if (byteLen < 0 || bytes.length > byteLen) {
+    throw new Error(
+      `num2bin: value ${n} needs ${bytes.length} byte(s), which does not fit a ${byteLen}-byte field — ` +
+        'OP_NUM2BIN aborts the script here',
+    );
+  }
+  if (bytes.length === byteLen) {
+    return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
   // 2b. Padded: lift the sign bit off the magnitude, zero-extend, and re-apply

@@ -1,6 +1,7 @@
 """RunarContract — main contract runtime wrapper."""
 
 from __future__ import annotations
+import copy
 import hashlib
 import warnings
 from typing import Sequence
@@ -277,6 +278,7 @@ class RunarContract:
 
         if not _restoring:
             constructor_args = _check_byte_string_ctor_args(artifact, constructor_args)
+            _check_pq_pubkey_ctor_args(artifact, constructor_args)
 
         self.artifact = artifact
         self._constructor_args = list(constructor_args)
@@ -649,7 +651,33 @@ class RunarContract:
         P2PKH funding inputs and additional contract inputs ARE signed with
         the connected signer.  Only the primary contract input's Sig params
         are left as 72-byte placeholders.
+
+        prepare_call does not change the tracked state or UTXO, on success or
+        on error: the post-call state rides in ``PreparedCall.state_after`` and
+        finalize_call commits it only after a successful broadcast. An
+        abandoned PreparedCall needs no cleanup.
         """
+        # D12 SDK-F1/F2: prepare_call never leaves the tracked state or UTXO
+        # changed -- on success OR on any error. The post-call state travels in
+        # the PreparedCall (``state_after``) and finalize_call commits it only
+        # after a successful broadcast. An abandoned or superseded PreparedCall
+        # therefore needs no cleanup.
+        state_snapshot = copy.deepcopy(self._state)
+        utxo_snapshot = self._current_utxo
+        try:
+            return self._prepare_call_impl(method_name, args, provider, signer, options)
+        finally:
+            self._state = state_snapshot
+            self._current_utxo = utxo_snapshot
+
+    def _prepare_call_impl(
+        self,
+        method_name: str,
+        args: list | None,
+        provider: Provider | None,
+        signer: Signer | None,
+        options: CallOptions | None,
+    ) -> PreparedCall:
         provider = provider or self._provider
         signer = signer or self._signer
         if provider is None or signer is None:
@@ -657,10 +685,7 @@ class RunarContract:
                 "RunarContract.prepare_call: no provider/signer. Call connect() or pass them."
             )
 
-        # The state this call starts from. prepare_call advances self._state to
-        # the post-call state before anything is broadcast; finalize_call
-        # restores this snapshot when the transaction never makes it onto the
-        # network.
+        # The state this call starts from (prepare_call restores it on exit).
         state_before = dict(self._state)
 
         # Funding (and terminal fee) inputs are signed by funding_signer when
@@ -990,6 +1015,16 @@ class RunarContract:
                 intent.mock_preimage_bytes['scriptCode'] = (
                     bytes.fromhex(_encode_varint(len(script_code_body) // 2))
                     + bytes.fromhex(script_code_body)
+                )
+                # D12 D2: the real nLockTime / input-0 nSequence / outpoint of
+                # the transaction this call builds, instead of the historical
+                # dummies (0 / 0xfffffffe / 36 zero bytes) that made a state
+                # field derived from them diverge from the script.
+                intent.mock_preimage['locktime'] = opts.locktime if opts.locktime is not None else 0
+                intent.mock_preimage['sequence'] = resolve_input_sequence(opts.locktime, opts.sequence)
+                intent.mock_preimage_bytes['outpoint'] = (
+                    bytes.fromhex(contract_utxo.txid)[::-1]
+                    + int(contract_utxo.output_index).to_bytes(4, 'little')
                 )
                 computed, data_outs, _raw_outs = compute_new_state_and_data_outputs(
                     self.artifact.anf, method_name, flat_state, interp_args,
@@ -1619,18 +1654,11 @@ class RunarContract:
             cur is not None and spent is not None
             and cur.txid == spent.txid and cur.output_index == spent.output_index
         )
-        try:
-            result = self._finalize_call_once(prepared, signatures, provider)
-        except BaseException:
-            # Nothing was broadcast (or the node refused it): the chain is still
-            # at the state this call started from, so the local state must be
-            # too. Before this, a refused call left the state advanced and the
-            # next call was built from a state the chain never reached.
-            if owns_state and prepared.state_before is not None:
-                self._state = dict(prepared.state_before)
-            raise
-        # A retry of a PreparedCall whose first finalize failed must commit the
-        # post-call state the transaction carries.
+        # D12 SDK-F1/F2: prepare_call left the tracked state untouched, so a
+        # failed finalize has nothing to roll back (and must not: restoring
+        # state_before would clobber a different PreparedCall's commit). The
+        # post-call state is committed only after a successful broadcast.
+        result = self._finalize_call_once(prepared, signatures, provider)
         if owns_state and prepared.state_after is not None:
             self._state = dict(prepared.state_after)
         return result
@@ -2563,6 +2591,68 @@ def _check_byte_string_ctor_args(artifact: RunarArtifact, args: list) -> list:
 
         out[i] = norm(arg)
     return out
+
+
+# D12 PQ-F1: public-key length each post-quantum verifier splits its pk operand
+# at (WOTS+: pubSeed(32) || pkRoot(32); SLH-DSA: PK.seed(n) || PK.root(n)).
+_PQ_PUBKEY_BYTES = {
+    'verifyWOTS': 64,
+    'verifySLHDSA_SHA2_128s': 32, 'verifySLHDSA_SHA2_128f': 32,
+    'verifySLHDSA_SHA2_192s': 48, 'verifySLHDSA_SHA2_192f': 48,
+    'verifySLHDSA_SHA2_256s': 64, 'verifySLHDSA_SHA2_256f': 64,
+}
+
+
+def _pq_pubkey_props(anf: dict) -> dict:
+    """Map property name -> (verifier, required pk bytes) for every property
+    that is loaded straight into a PQ verifier's pk operand (3rd arg)."""
+    found: dict = {}
+
+    def walk(bindings: list, defs: dict) -> None:
+        for b in bindings or []:
+            v = b.get('value') or {}
+            defs[b.get('name')] = v
+            kind = v.get('kind')
+            if kind == 'if':
+                walk(v.get('then'), defs)
+                walk(v.get('else'), defs)
+            elif kind == 'loop':
+                walk(v.get('body'), defs)
+            elif kind == 'call' and v.get('func') in _PQ_PUBKEY_BYTES:
+                args = v.get('args') or []
+                src = defs.get(args[2]) if len(args) > 2 else None
+                if src and src.get('kind') == 'load_prop':
+                    found[src['name']] = (v['func'], _PQ_PUBKEY_BYTES[v['func']])
+
+    for m in (anf or {}).get('methods', []):
+        walk(m.get('body'), {})
+    return found
+
+
+def _check_pq_pubkey_ctor_args(artifact: RunarArtifact, args: list) -> None:
+    """D12 PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA
+    verifier's public key directly when it has the wrong length. The compiled
+    verifier splits the key at fixed offsets, so a wrong-length key deploys an
+    output that refuses the owner's valid signature forever. Only artifacts
+    that carry ANF (stateful contracts) expose the data flow; a hash-committed
+    key cannot be checked at all."""
+    if not artifact.anf:
+        return
+    props = _pq_pubkey_props(artifact.anf)
+    if not props:
+        return
+    for param, arg in zip(artifact.abi.constructor_params, args):
+        hit = props.get(param.name)
+        if hit is None or not isinstance(arg, str):
+            continue
+        func, want = hit
+        got = len(arg) // 2
+        if got != want:
+            raise InvalidConstructorArgError(
+                f"RunarContract: constructor arg '{param.name}' of {artifact.contract_name} is the "
+                f"{func} public key and must be {want} bytes, got {got}: the compiled verifier "
+                "would refuse every valid signature"
+            )
 
 
 def _flatten_fixed_array_args(args: list, abi_params: list) -> list:

@@ -712,14 +712,18 @@ RSpec.describe Runar::SDK::RunarContract do
 
     it 'auto-computes new state from ANF IR when new_state is nil' do
       # count starts at 5; increment() should produce count = 6
-      _prepared = contract.prepare_call('increment', [])
-      expect(contract.get_state['count']).to eq(6)
+      # D12 SDK-F1/F2: prepare_call leaves the tracked state untouched; the
+      # post-state travels in the PreparedCall until finalize_call commits it.
+      prepared = contract.prepare_call('increment', [])
+      expect(prepared.state_after['count']).to eq(6)
+      expect(contract.get_state['count']).to eq(5)
     end
 
     it 'explicit new_state overrides ANF auto-computation' do
       opts = Runar::SDK::CallOptions.new(new_state: { 'count' => 99 })
-      _prepared = contract.prepare_call('increment', [], nil, nil, opts)
-      expect(contract.get_state['count']).to eq(99)
+      prepared = contract.prepare_call('increment', [], nil, nil, opts)
+      expect(prepared.state_after['count']).to eq(99)
+      expect(contract.get_state['count']).to eq(5)
     end
 
     it 'prepare_call works normally when artifact has no ANF' do

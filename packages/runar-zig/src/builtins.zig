@@ -1549,10 +1549,15 @@ pub fn ecOnCurve(point: base.Point) bool {
     return p.isOnCurve();
 }
 
+/// D12 SECP-F1: exactly the compiled script's `((v tmod m) + m) tmod m`
+/// (ec-codegen.ts emitEcModReduce) with TRUNCATED mod, so a negative modulus
+/// gives the script's value (7, -3 -> -2); m == 0 aborts (OP_MOD by zero).
+/// The intermediate sum is taken in i128 so it cannot overflow i64.
 pub fn ecModReduce(value: base.Bigint, modulus: base.Bigint) base.Bigint {
-    if (modulus == 0) return 0;
-    const reduced = @mod(value, modulus);
-    return if (reduced < 0) reduced + modulus else reduced;
+    // CONTRACT-ABORT: OP_MOD by zero is a script abort.
+    if (modulus == 0) @panic("ecModReduce: modulo by zero");
+    const m: i128 = modulus;
+    return @intCast(@rem(@rem(@as(i128, value), m) + m, m));
 }
 
 pub fn ecEncodeCompressedChecked(point: base.Point) EcBuiltinError!base.ByteString {

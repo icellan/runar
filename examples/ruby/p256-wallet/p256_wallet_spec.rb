@@ -8,7 +8,7 @@ require_relative 'P256Wallet.runar'
 # P256Wallet is a hybrid secp256k1 + P-256 ECDSA wallet:
 #   1. secp256k1 ECDSA signature commits to the spending transaction (sighash).
 #   2. P-256 ECDSA signs the secp256k1 signature bytes, proving the secp256k1
-#      sig was authorized by the P-256 (NIST / WebAuthn / TPM) key holder.
+#      sig was authorized by the P-256 (NIST / HSM / TPM) key holder.
 #
 # Mirrors examples/python/p256-wallet/test_p256_wallet.py and
 # examples/ts/p256-wallet/P256Wallet.test.ts.

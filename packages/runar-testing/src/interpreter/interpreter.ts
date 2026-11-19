@@ -1148,6 +1148,13 @@ export class RunarInterpreter {
 
       case 'reverseBytes': {
         const data = this.toBytes(args[0]!);
+        // D12: the compiled script reverses at most 520 bytes and drops the
+        // rest; refuse a longer input instead of reporting a full reverse.
+        if (data.length > 520) {
+          throw new Error(
+            `reverseBytes: input of ${data.length} bytes exceeds the 520-byte limit the compiled script reverses`,
+          );
+        }
         const reversed = new Uint8Array(data.length);
         for (let j = 0; j < data.length; j++) {
           reversed[j] = data[data.length - 1 - j]!;
@@ -1156,7 +1163,9 @@ export class RunarInterpreter {
       }
 
       case 'num2bin': {
-        const value = this.toBigInt(args[0]!);
+        // D12 BM-F8: OP_NUM2BIN re-encodes its VALUE operand and does not
+        // require it minimal (`num2bin(1n >> 1n, 2n)` is 0000 on chain).
+        const value = this.num2binValue(args[0]!);
         const byteLen = this.toBigInt(args[1]!);
         // Encode as a minimal script number, then pad — never TRIM: a width
         // too small for the value aborts (NEW-011).
@@ -1183,7 +1192,7 @@ export class RunarInterpreter {
 
       case 'int2str': {
         // Alias for num2bin — same OP_NUM2BIN, same width guard (NEW-011).
-        const value = this.toBigInt(args[0]!);
+        const value = this.num2binValue(args[0]!);
         const byteLen = this.toBigInt(args[1]!);
         const { encodeScriptNumber: encode } = await_import_utils();
         const encoded = encode(value);
@@ -1878,6 +1887,11 @@ export class RunarInterpreter {
     }
   }
 
+  /** num2bin/int2str VALUE operand: OP_NUM2BIN does not require it minimal. */
+  private num2binValue(val: RunarValue): bigint {
+    return val.kind === 'bigint' ? val.value : this.toBigInt(val);
+  }
+
   private toBigInt(val: RunarValue): bigint {
     switch (val.kind) {
       case 'bigint':
@@ -2508,6 +2522,10 @@ function nistScalarMul(c: NistCurve, x: bigint, y: bigint, k: bigint): [bigint, 
 function nistAddImpl(c: NistCurve, a: Uint8Array, b: Uint8Array): Uint8Array {
   const [ax, ay] = nistDecodePoint(c, a);
   const [bx, by] = nistDecodePoint(c, b);
+  // D12 NIST-F1: O (the all-zero blob) is the identity, as in the compiled
+  // adder; the chord formula from (0, 0) would return garbage.
+  if (ax === 0n && ay === 0n) return nistEncodePoint(c, bx, by);
+  if (bx === 0n && by === 0n) return nistEncodePoint(c, ax, ay);
   const [rx, ry] = nistPointAddCoords(c, ax, ay, bx, by);
   return nistEncodePoint(c, rx, ry);
 }

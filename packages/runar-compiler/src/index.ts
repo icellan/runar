@@ -141,7 +141,7 @@ import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.j
 import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
 import { assertIrNoDroppedContinuation } from './passes/continuation-rules.js';
 import { assertIrLocktimeDomain } from './passes/locktime-domain.js';
-import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
+import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS, pqPubKeyRequirements, pqPubKeyLengthError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Compile options and result
@@ -1619,6 +1619,17 @@ function validateConstructorArgsShape(
     if (!(prop.name in constructorArgs)) continue;
     const msg = constructorArgTypeError(prop.name, prop.type, constructorArgs[prop.name]);
     if (msg !== null) errors.push(msg);
+  }
+
+  // D12 PQ-F1: a value baked as a post-quantum verifier's public key must
+  // have the length that verifier splits it at, or the script refuses every
+  // honest signature. A refusal only — it never changes emitted bytes.
+  if (errors.length === 0) {
+    for (const req of pqPubKeyRequirements(anf)) {
+      if (!(req.property in constructorArgs)) continue;
+      const msg = pqPubKeyLengthError(req, constructorArgs[req.property]);
+      if (msg !== null) errors.push(`constructorArgs ${msg}`);
+    }
   }
 
   return errors;

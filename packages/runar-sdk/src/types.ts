@@ -153,8 +153,21 @@ export interface PreparedCall {
    * emits no continuation. Read directly — never re-derived by script match.
    */
   _continuations: Array<CallContinuation & { script: string }>;
-  /** @internal The local state before prepareCall advanced it; restored when finalizeCall fails. */
-  _stateBefore?: Record<string, unknown>;
+  /**
+   * @internal
+   * The post-call state. `prepareCall` never changes the contract's tracked
+   * state; `finalizeCall` commits this only after a successful broadcast.
+   */
+  _stateAfter?: Record<string, unknown>;
+  /**
+   * @internal
+   * D12 SDK-F4: the UTXOs the tx may spend and the fee rate the call was built
+   * against, so finalizeCall can refuse an underfunded tx before broadcast.
+   */
+  _fundingCheck?: {
+    utxos: Array<{ txid: string; outputIndex: number; satoshis: number }>;
+    feeRate: number;
+  };
   /**
    * @internal
    * Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
@@ -270,6 +283,14 @@ export interface CallOptions {
    * rather than silently sweeping the wallet. Unset → no cap.
    */
   maxFundingInputs?: number;
+
+  /**
+   * D12 SDK-F4: `finalizeCall` refuses ("insufficient funds") a tx whose fee
+   * is below `ceil(size * feeRate / 1000)` at the provider's fee rate, before
+   * broadcasting. Set this only to build a deliberately under-fee tx (e.g. a
+   * zero-fee test against a MockProvider with `enforceFeeFloor: false`).
+   */
+  allowFeeBelowRate?: boolean;
 
   /**
    * Signer for the P2PKH funding (and terminal fee) inputs (issue #134). When

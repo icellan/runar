@@ -159,6 +159,7 @@ func newRunarContract(artifact *RunarArtifact, constructorArgs []interface{}, ch
 
 	if checkByteStringArgs {
 		checkByteStringCtorArgs(artifact, constructorArgs)
+		checkPQPubKeyCtorArgs(artifact, constructorArgs)
 	}
 
 	// Flatten any FixedArray constructor args into their underlying
@@ -216,6 +217,85 @@ var byteStringCtorTypes = map[string]bool{
 	"ByteString": true, "PubKey": true, "Sig": true, "Addr": true,
 	"Ripemd160": true, "Sha256": true, "Point": true, "P256Point": true,
 	"P384Point": true, "SigHashPreimage": true,
+}
+
+// pqPubKeyLen is the public-key length each post-quantum verifier's compiled
+// script splits its pk operand into: WOTS+ pubSeed(32)||pkRoot(32), SLH-DSA
+// PK.seed(n)||PK.root(n) (FIPS 205; n = 16 / 24 / 32).
+var pqPubKeyLen = map[string]int{
+	"verifyWOTS":             64,
+	"verifySLHDSA_SHA2_128s": 32,
+	"verifySLHDSA_SHA2_128f": 32,
+	"verifySLHDSA_SHA2_192s": 48,
+	"verifySLHDSA_SHA2_192f": 48,
+	"verifySLHDSA_SHA2_256s": 64,
+	"verifySLHDSA_SHA2_256f": 64,
+}
+
+// checkPQPubKeyCtorArgs (D12 PQ-F1) refuses a constructor arg that flows
+// straight (as a property load) into a post-quantum verifier's public-key
+// operand with the wrong length for the parameter set. Such a key deploys
+// fine, and then the owner's valid signature is refused forever. Keys that
+// reach the verifier any other way (e.g. hash-committed and supplied at
+// spend time) cannot be checked here. Needs the artifact's ANF.
+func checkPQPubKeyCtorArgs(artifact *RunarArtifact, args []interface{}) {
+	if artifact.ANF == nil {
+		return
+	}
+	paramIdx := make(map[string]int, len(artifact.ABI.Constructor.Params))
+	for i, p := range artifact.ABI.Constructor.Params {
+		paramIdx[p.Name] = i
+	}
+	for _, m := range artifact.ANF.Methods {
+		if m.Name == "constructor" {
+			continue
+		}
+		props := map[string]string{} // binding name -> loaded property
+		var walk func(bindings []interface{})
+		visit := func(name string, v map[string]interface{}) {
+			kind, _ := v["kind"].(string)
+			if kind == "load_prop" {
+				if pn, ok := v["name"].(string); ok {
+					props[name] = pn
+				}
+			}
+			if kind == "call" {
+				fn, _ := v["func"].(string)
+				want, isPQ := pqPubKeyLen[fn]
+				callArgs, _ := v["args"].([]interface{})
+				if isPQ && len(callArgs) == 3 {
+					ref, _ := callArgs[2].(string)
+					if prop, ok := props[ref]; ok {
+						if idx, ok := paramIdx[prop]; ok && idx < len(args) {
+							if h, ok := args[idx].(string); ok && len(h) != want*2 {
+								panic(fmt.Sprintf(
+									"RunarContract: constructor arg '%s' is the %s public key and must be %d bytes, got %d. "+
+										"A key of the wrong length deploys an output the owner's valid signature can never spend (D12 PQ-F1)",
+									prop, fn, want, len(h)/2))
+							}
+						}
+					}
+				}
+			}
+			for _, nested := range []string{"then", "else", "body"} {
+				if arr, ok := v[nested].([]interface{}); ok {
+					walk(arr)
+				}
+			}
+		}
+		walk = func(bindings []interface{}) {
+			for _, b := range bindings {
+				bm, _ := b.(map[string]interface{})
+				name, _ := bm["name"].(string)
+				if v, ok := bm["value"].(map[string]interface{}); ok {
+					visit(name, v)
+				}
+			}
+		}
+		for _, b := range m.Body {
+			visit(b.Name, b.Value)
+		}
+	}
 }
 
 // checkByteStringCtorArgs (N-329) panics with *InvalidConstructorArgError when
@@ -844,10 +924,25 @@ func (c *RunarContract) PrepareCall(
 		return nil, fmt.Errorf("RunarContract.PrepareCall: no provider/signer available. Call Connect() or pass them explicitly")
 	}
 
-	// The state this call starts from. PrepareCall advances c.state to the
-	// post-call state before anything is broadcast; FinalizeCall restores this
-	// snapshot when the transaction never makes it onto the network.
+	// D12 SDK-F1/F2: PrepareCall never leaves the tracked state changed. The
+	// body below derives the post-call state into c.state (every builder reads
+	// it there) and records it in PreparedCall.stateAfter; this snapshot is put
+	// back before returning, on success AND on error. FinalizeCall commits
+	// stateAfter only after a successful broadcast, so a failed or abandoned
+	// PreparedCall needs no cleanup and cannot strand the contract on a state
+	// the chain never reached.
 	stateBefore := copyStateMap(c.state)
+	defer func() { c.state = stateBefore }()
+	return c.prepareCallInner(methodName, args, provider, signer, options)
+}
+
+func (c *RunarContract) prepareCallInner(
+	methodName string,
+	args []interface{},
+	provider Provider,
+	signer Signer,
+	options *CallOptions,
+) (*PreparedCall, error) {
 
 	// Funding (and terminal fee) inputs are signed by fundingSigner when set
 	// (issue #134). The method's own Sig args stay with the connected signer.
@@ -1166,6 +1261,30 @@ func (c *RunarContract) PrepareCall(
 		}
 		mockPreimage := MockPreimageAmount{
 			ScriptCode: writeVarIntHex(len(scriptCodeBody)/2) + scriptCodeBody,
+		}
+		// D2: extractLocktime / extractSequence / extractOutpoint read the
+		// fields of the transaction this call builds: the same locktime and
+		// input sequence BuildCallTransaction puts on it, and input 0's
+		// outpoint (the spent contract UTXO).
+		{
+			var lt uint32
+			var seq *uint32
+			if options != nil {
+				if options.Locktime != nil {
+					lt = *options.Locktime
+				}
+				seq = options.Sequence
+			}
+			mockPreimage.Locktime = new(big.Int).SetUint64(uint64(lt))
+			mockPreimage.Sequence = new(big.Int).SetUint64(uint64(resolveInputSequence(lt, seq)))
+			if txidBytes, err := hex.DecodeString(contractUtxo.Txid); err == nil && len(txidBytes) == 32 {
+				for i, j := 0, len(txidBytes)-1; i < j; i, j = i+1, j-1 {
+					txidBytes[i], txidBytes[j] = txidBytes[j], txidBytes[i]
+				}
+				vout := uint32(contractUtxo.OutputIndex)
+				mockPreimage.Outpoint = hex.EncodeToString(txidBytes) +
+					hex.EncodeToString([]byte{byte(vout), byte(vout >> 8), byte(vout >> 16), byte(vout >> 24)})
+			}
 		}
 		if c.currentUtxo != nil {
 			mockPreimage.Amount = big.NewInt(c.currentUtxo.Satoshis)
@@ -1971,7 +2090,6 @@ func (c *RunarContract) PrepareCall(
 		groth16WAWitnessHex:  groth16WAWitnessHex,
 		intentWitnessHex:     witnessHex,
 		codeSepIdx:           codeSepIdx,
-		stateBefore:          stateBefore,
 		stateAfter:           copyStateMap(c.state),
 	}, nil
 }
@@ -1985,22 +2103,16 @@ func (c *RunarContract) FinalizeCall(
 ) (string, *TransactionData, error) {
 	// Only a PreparedCall that still spends the tracked UTXO owns the state: a
 	// repeat of one that was already committed must not touch it.
-	ownsState := prepared != nil && prepared.stateBefore != nil && c.currentUtxo != nil &&
+	ownsState := prepared != nil && prepared.stateAfter != nil && c.currentUtxo != nil &&
 		c.currentUtxo.Txid == prepared.contractUtxo.Txid &&
 		c.currentUtxo.OutputIndex == prepared.contractUtxo.OutputIndex
 	txid, tx, err := c.finalizeCallOnce(prepared, signatures, provider)
-	if ownsState {
-		if err != nil {
-			// Nothing was broadcast (or the node refused it): the chain is still
-			// at the state this call started from, so the local state must be
-			// too. Before this, a refused call left the state advanced and the
-			// next call was built from a state the chain never reached.
-			c.state = copyStateMap(prepared.stateBefore)
-		} else {
-			// A retry of a PreparedCall whose first finalize failed must commit
-			// the post-call state the transaction carries.
-			c.state = copyStateMap(prepared.stateAfter)
-		}
+	// D12 SDK-F1/F2: PrepareCall left the tracked state untouched, so a failed
+	// finalize has nothing to undo (restoring stateBefore here would clobber a
+	// different PreparedCall's commit). Only a successful broadcast commits the
+	// post-call state the transaction carries.
+	if ownsState && err == nil {
+		c.state = copyStateMap(prepared.stateAfter)
 	}
 	return txid, tx, err
 }

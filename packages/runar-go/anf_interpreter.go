@@ -526,6 +526,12 @@ func ComputeNewStateAndDataOutputs(
 type MockPreimageAmount struct {
 	Amount     *big.Int
 	ScriptCode string
+	// D2: nLockTime, input 0's nSequence and outpoint (txid LE || vout LE) of
+	// the call transaction, for extractLocktime / extractSequence /
+	// extractOutpoint.
+	Locktime *big.Int
+	Sequence *big.Int
+	Outpoint string
 }
 
 // renamedParamSource (N-360) returns the source name of a param bound under
@@ -1226,8 +1232,31 @@ func anfEvalBytesBinOp(op, left, right string) interface{} {
 		return left == right
 	case "!=", "!==":
 		return left != right
+	// D12 BM-F4: OP_AND / OP_OR / OP_XOR on ByteStrings are byte-wise over
+	// equal-length operands and abort on a length mismatch. This used to
+	// return "", a value the script never produces.
+	case "&", "|", "^":
+		lb, errL := hex.DecodeString(left)
+		rb, errR := hex.DecodeString(right)
+		if errL != nil || errR != nil || len(lb) != len(rb) {
+			panic(&ScriptOpcodeError{Opcode: "bytes " + op, Message: fmt.Sprintf(
+				"operands of %d and %d bytes: OP_AND/OP_OR/OP_XOR abort unless both are the same length",
+				len(left)/2, len(right)/2)})
+		}
+		out := make([]byte, len(lb))
+		for i := range lb {
+			switch op {
+			case "&":
+				out[i] = lb[i] & rb[i]
+			case "|":
+				out[i] = lb[i] | rb[i]
+			default:
+				out[i] = lb[i] ^ rb[i]
+			}
+		}
+		return hex.EncodeToString(out)
 	}
-	return ""
+	panic(&ScriptOpcodeError{Opcode: "bytes " + op, Message: "the ANF interpreter does not model this operator on ByteString operands"})
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,10 +1374,20 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return nil
 
 	// Byte operations
-	case "num2bin":
+	// D12 BM-F4: int2str compiles to OP_NUM2BIN, exactly like num2bin. It
+	// used to fall through to the nil default.
+	// D12 BM-F5: OP_NUM2BIN aborts when the width is negative or narrower than
+	// the value's minimal encoding; refuse instead of truncating.
+	case "num2bin", "int2str":
 		n := anfToBigInt(args[0])
-		length := int(anfToBigInt(args[1]).Int64())
-		return anfNum2binHex(n, length)
+		w := anfToBigInt(args[1])
+		minimal := anfMinimalNumLen(n)
+		if w.Sign() < 0 || w.Cmp(big.NewInt(int64(minimal))) < 0 {
+			panic(&ScriptOpcodeError{Opcode: "OP_NUM2BIN", Message: fmt.Sprintf(
+				"%s(%s, %s): the value needs %d bytes; OP_NUM2BIN aborts on a negative or too-narrow size",
+				funcName, n.String(), w.String(), minimal)})
+		}
+		return anfNum2binHex(n, int(w.Int64()))
 
 	case "bin2num":
 		return anfBin2numBigInt(anfToString(args[0]))
@@ -1376,6 +1415,12 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 
 	case "reverseBytes":
 		h := anfToString(args[0])
+		// D12: the compiled script reverses only the first 520 bytes and drops
+		// the rest, so a longer input has no faithful off-chain result.
+		if len(h)/2 > 520 {
+			panic(&ScriptOpcodeError{Opcode: "reverseBytes", Message: fmt.Sprintf(
+				"reverseBytes: input of %d bytes exceeds the 520-byte limit the compiled script reverses", len(h)/2)})
+		}
 		pairs := make([]string, 0, len(h)/2)
 		for i := 0; i+1 < len(h); i += 2 {
 			pairs = append(pairs, h[i:i+2])
@@ -1579,6 +1624,23 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return strings.Repeat("00", 32)
 	case "extractOutputHash":
 		return strings.Repeat("00", 32)
+	// D2: the real fields of the transaction PrepareCall builds (its nLockTime,
+	// input 0's nSequence and outpoint), supplied through MockPreimageAmount.
+	// A bare ComputeNewState with no such fields keeps the historical nil.
+	case "extractLocktime", "extractSequence", "extractOutpoint":
+		if len(args) > 0 {
+			if mp, ok := args[0].(MockPreimageAmount); ok {
+				switch {
+				case funcName == "extractLocktime" && mp.Locktime != nil:
+					return new(big.Int).Set(mp.Locktime)
+				case funcName == "extractSequence" && mp.Sequence != nil:
+					return new(big.Int).Set(mp.Sequence)
+				case funcName == "extractOutpoint" && mp.Outpoint != "":
+					return mp.Outpoint
+				}
+			}
+		}
+		return nil
 	// R67: the contract's own real codePart when the caller supplied it
 	// (see MockPreimageAmount.ScriptCode's doc comment) — sdk_contract.go's
 	// PrepareCall always supplies it now. Falls back to the historical
@@ -2133,6 +2195,18 @@ func anfToInt(v interface{}) int64 {
 //
 // The engine pads FIRST and then puts the sign bit on the new most-significant
 // byte.
+// anfMinimalNumLen is the byte length of n's minimal script-number encoding.
+func anfMinimalNumLen(n *big.Int) int {
+	if n.Sign() == 0 {
+		return 0
+	}
+	l := (new(big.Int).Abs(n).BitLen() + 7) / 8
+	if new(big.Int).Abs(n).BitLen()%8 == 0 {
+		l++ // the top magnitude byte uses bit 7: one more byte for the sign
+	}
+	return l
+}
+
 func anfNum2binHex(n *big.Int, byteLen int) string {
 	// 1. Minimal BSV script-number encoding: little-endian magnitude with the
 	//    sign in bit 7 of the top byte, growing one byte when magnitude data

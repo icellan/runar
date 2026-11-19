@@ -93,7 +93,9 @@ func P256Add(a, b P256Point) P256Point {
 func P256Mul(p P256Point, k *big.Int) P256Point {
 	px, py := p256XYFromPoint(p)
 	curve := elliptic.P256()
-	kBytes := k.Bytes()
+	// D12 NIST-F2: the compiled script reduces k mod n, so a negative scalar
+	// negates the point; k.Bytes() is |k| and dropped the sign.
+	kBytes := new(big.Int).Mod(k, curve.Params().N).Bytes()
 	rx, ry := curve.ScalarMult(px, py, kBytes)
 	return p256PointFromXY(rx, ry)
 }
@@ -101,7 +103,9 @@ func P256Mul(p P256Point, k *big.Int) P256Point {
 // P256MulGen performs scalar multiplication k * G where G is the P-256 generator.
 func P256MulGen(k *big.Int) P256Point {
 	curve := elliptic.P256()
-	kBytes := k.Bytes()
+	// D12 NIST-F2: the compiled script reduces k mod n, so a negative scalar
+	// negates the point; k.Bytes() is |k| and dropped the sign.
+	kBytes := new(big.Int).Mod(k, curve.Params().N).Bytes()
 	rx, ry := curve.ScalarBaseMult(kBytes)
 	return p256PointFromXY(rx, ry)
 }

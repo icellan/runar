@@ -1,0 +1,22 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/bin2num-sign-byte.anf.json",
+  "methodName": "probe",
+  "currentState": {
+    "r": "0n"
+  },
+  "args": {
+    "b": "8000"
+  },
+  "constructorArgs": [
+    "0n"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/Bin2NumSignByte.runar.ts",
+    "constructorArgs": [
+      "0n"
+    ],
+    "methodArgs": [
+      "8000"
+    ]
+  }
+}

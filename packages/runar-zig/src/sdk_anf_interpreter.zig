@@ -300,6 +300,9 @@ pub const MockEnv = struct {
     output_hash_hex: ?[]const u8 = null,
     hash_prevouts_hex: ?[]const u8 = null,
     hash_sequence_hex: ?[]const u8 = null,
+    /// D12 D2: the spent outpoint (txid LE || vout u32 LE, 36 bytes hex)
+    /// surfaced by `extractOutpoint`; null falls back to 36 zero bytes.
+    outpoint_hex: ?[]const u8 = null,
 
     /// R67: the contract's own real codePart (post-OP_CODESEPARATOR,
     /// CompactSize-prefixed exactly as the BIP-143 preimage carries it),
@@ -1060,6 +1063,10 @@ fn evalNode(
             // invent a value (F-134).
             if (mathBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
             if (splitBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
+            // D12: byte builtins whose script aborts (num2bin / int2str too
+            // narrow or negative, reverseBytes past its 520-byte bound) or
+            // whose value lies outside i64 (bin2num).
+            if (bytesBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
             // N-163: not an on-chain abort — the script computes the value,
             // but it lies outside the i64 this interpreter represents. Refuse
             // through the same channel rather than return a wrapped value.
@@ -1682,6 +1689,8 @@ fn mathBuiltinOverflowsI64(func: []const u8, arg_names: []const []const u8, env:
     // overflows); `evalCall`'s `-v` would panic (Debug/ReleaseSafe) or wrap
     // (ReleaseFast) rather than return the on-chain value.
     if (eql(u8, func, "abs")) return a == std.math.minInt(i64);
+    // D12 BM-F7: gcd(minInt(i64), 0) / gcd(minInt, minInt) is 2^63.
+    if (eql(u8, func, "gcd")) return gcdU64(a, b) > std.math.maxInt(i64);
     if (eql(u8, func, "pow")) {
         var result: i64 = 1;
         var i: i64 = 0;
@@ -1733,6 +1742,23 @@ fn splitBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *con
         const length = toInt(getArg(arg_names, 2, env));
         return start < 0 or length < 0 or (start + length) * 2 > @as(i64, @intCast(hex.len));
     }
+    return false;
+}
+
+/// D12 BM-F1 / BM-F5 / reverseBytes: true when the byte builtin's compiled
+/// script aborts on these operands, or (bin2num) its value is outside the i64
+/// this interpreter represents. Refused rather than given an invented value.
+fn bytesBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
+    const eql = std.mem.eql;
+    if (eql(u8, func, "num2bin") or eql(u8, func, "int2str")) {
+        const width = toInt(getArg(arg_names, 1, env));
+        if (width < 0) return true;
+        var buf: [9]u8 = undefined;
+        const enc = scriptNumEncode(toInt(getArg(arg_names, 0, env)), &buf);
+        return @as(i64, @intCast(enc.len)) > width;
+    }
+    if (eql(u8, func, "reverseBytes")) return asHex(getArg(arg_names, 0, env)).len / 2 > 520;
+    if (eql(u8, func, "bin2num")) return bin2numInt(asHex(getArg(arg_names, 0, env))) == null;
     return false;
 }
 
@@ -1854,16 +1880,11 @@ fn evalCall(
         return .{ .int = @intCast(x) };
     }
     if (std.mem.eql(u8, func, "gcd")) {
-        var a = toInt(getArg(arg_names, 0, env));
-        var b = toInt(getArg(arg_names, 1, env));
-        if (a < 0) a = -a;
-        if (b < 0) b = -b;
-        while (b != 0) {
-            const t = b;
-            b = @rem(a, b);
-            a = t;
-        }
-        return .{ .int = a };
+        // D12 BM-F7: magnitudes in u64, so gcd(minInt(i64), x) no longer
+        // panics on `-a`; a result of 2^63 is refused by
+        // mathBuiltinOverflowsI64 before this runs.
+        const g = gcdU64(toInt(getArg(arg_names, 0, env)), toInt(getArg(arg_names, 1, env)));
+        return .{ .int = @intCast(g) };
     }
     if (std.mem.eql(u8, func, "divmod")) {
         const a = toInt(getArg(arg_names, 0, env));
@@ -1965,14 +1986,15 @@ fn evalCall(
         }
         return .{ .bytes = result };
     }
-    if (std.mem.eql(u8, func, "num2bin")) {
+    // D12 BM-F4: int2str compiles to OP_NUM2BIN, exactly like num2bin.
+    if (std.mem.eql(u8, func, "num2bin") or std.mem.eql(u8, func, "int2str")) {
         const n = toInt(getArg(arg_names, 0, env));
         const byte_len: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
         return num2binHex(allocator, n, byte_len);
     }
     if (std.mem.eql(u8, func, "bin2num")) {
         const hex = asHex(getArg(arg_names, 0, env));
-        return .{ .int = bin2numInt(hex) };
+        return .{ .int = bin2numInt(hex) orelse 0 }; // out of range refused by bytesBuiltinAborts
     }
 
     // Baby Bear field arithmetic (p = 2013265921)
@@ -2047,6 +2069,14 @@ fn evalCall(
             if (me.hash_sequence_hex) |h| return .{ .bytes = h };
         }
         return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
+    }
+    // D12 D2: the spent outpoint the call builds (sdk_contract.zig supplies
+    // it via MockEnv.outpoint_hex); 36 zero bytes for a bare probe.
+    if (std.mem.eql(u8, func, "extractOutpoint")) {
+        if (mock_env) |me| {
+            if (me.outpoint_hex) |h| return .{ .bytes = h };
+        }
+        return .{ .bytes = "00" ** 36 };
     }
     // R67: the contract's own real codePart when the caller supplied it via
     // `MockEnv.script_code_hex` -- sdk_contract.zig's call path always
@@ -2577,40 +2607,42 @@ fn num2binHex(allocator: std.mem.Allocator, n: i64, byte_len: usize) ANFValue {
     return .{ .bytes = result };
 }
 
-fn bin2numInt(hex: []const u8) i64 {
-    if (hex.len == 0) return 0;
+fn gcdU64(x: i64, y: i64) u64 {
+    var a: u64 = @abs(x);
+    var b: u64 = @abs(y);
+    while (b != 0) {
+        const t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
 
-    // Decode hex to bytes (LE)
+/// OP_BIN2NUM: sign-magnitude little-endian, the sign is bit 7 of the LAST
+/// byte (a trailing 0x00 is sign padding meaning "non-negative"). D12 BM-F1:
+/// this used to strip trailing zero bytes first and read the sign off the
+/// previous byte (`ff00` -> -127, script 255), and wrapped past 8 bytes.
+/// Returns null when the value is outside i64.
+fn bin2numInt(hex: []const u8) ?i64 {
     const num_bytes = hex.len / 2;
     if (num_bytes == 0) return 0;
-
-    var bytes_buf: [16]u8 = undefined;
-    const decode_len = @min(num_bytes, bytes_buf.len);
-    for (0..decode_len) |i| {
-        bytes_buf[i] = hexByteDecode(hex[i * 2], hex[i * 2 + 1]);
-    }
-
-    // Strip trailing zero bytes (MSB-side padding from num2bin) so the sign bit
-    // is located on the last non-zero byte, matching Bitcoin script-num semantics.
-    var eff_len: usize = decode_len;
-    while (eff_len > 0 and bytes_buf[eff_len - 1] == 0) : (eff_len -= 1) {}
-    if (eff_len == 0) return 0;
-
-    // Check sign bit
-    const negative = (bytes_buf[eff_len - 1] & 0x80) != 0;
-    if (negative) {
-        bytes_buf[eff_len - 1] &= 0x7f;
-    }
-
-    // Build integer from LE bytes
-    var result: i64 = 0;
-    var i: usize = eff_len;
+    const negative = (hexByteDecode(hex[(num_bytes - 1) * 2], hex[(num_bytes - 1) * 2 + 1]) & 0x80) != 0;
+    // Magnitude: every byte, sign bit cleared on the last one.
+    var mag: u128 = 0;
+    var i: usize = num_bytes;
     while (i > 0) {
         i -= 1;
-        result = (result << 8) | @as(i64, bytes_buf[i]);
+        var b = hexByteDecode(hex[i * 2], hex[i * 2 + 1]);
+        if (i == num_bytes - 1) b &= 0x7f;
+        if (mag > (std.math.maxInt(u128) >> 8)) return null;
+        mag = (mag << 8) | b;
     }
-
-    return if (negative) -result else result;
+    if (negative) {
+        if (mag > @as(u128, 1) << 63) return null;
+        return @intCast(-@as(i128, @intCast(mag)));
+    }
+    if (mag > std.math.maxInt(i64)) return null;
+    return @intCast(mag);
 }
 
 fn hexByteDecode(hi: u8, lo: u8) u8 {
@@ -3501,7 +3533,7 @@ test "num2bin and bin2num roundtrip (smoke test only, NOT the evidence)" {
             try std.testing.expectEqual(@as(usize, 8), hex.len); // 4 bytes * 2 hex chars
             // bin2num should recover the original value
             const recovered = bin2numInt(hex);
-            try std.testing.expectEqual(@as(i64, 42), recovered);
+            try std.testing.expectEqual(@as(?i64, 42), recovered);
             allocator.free(hex);
         },
         else => return error.TestUnexpectedResult,
@@ -3512,7 +3544,7 @@ test "num2bin and bin2num roundtrip (smoke test only, NOT the evidence)" {
     switch (neg_result) {
         .bytes => |hex| {
             const recovered = bin2numInt(hex);
-            try std.testing.expectEqual(@as(i64, -5), recovered);
+            try std.testing.expectEqual(@as(?i64, -5), recovered);
             allocator.free(hex);
         },
         else => return error.TestUnexpectedResult,

@@ -398,6 +398,7 @@ impl RunarContract {
 
         if validate_byte_strings {
             check_byte_string_ctor_args(&artifact, &constructor_args);
+            check_pq_pub_key_ctor_args(&artifact, &constructor_args);
         }
 
         // Initialize state from constructor args for stateful contracts.
@@ -800,11 +801,26 @@ impl RunarContract {
         signer: &dyn Signer,
         options: Option<&CallOptions>,
     ) -> Result<PreparedCall, String> {
-        // The state this call starts from. prepare_call advances `self.state`
-        // to the post-call state before anything is broadcast; finalize_call
-        // restores this snapshot when the transaction never makes it onto the
-        // network.
+        // D12 SDK-F1/F2: prepare_call never leaves the tracked state changed.
+        // The body derives the post-call state into `self.state` (every
+        // builder reads it there) and records it in `PreparedCall.state_after`;
+        // this snapshot is put back before returning, on success AND on error.
+        // finalize_call commits `state_after` only after a successful
+        // broadcast, so a failed or abandoned PreparedCall needs no cleanup.
         let state_before = self.state.clone();
+        let result = self.prepare_call_inner(method_name, args, provider, signer, options);
+        self.state = state_before;
+        result
+    }
+
+    fn prepare_call_inner(
+        &mut self,
+        method_name: &str,
+        args: &[SdkValue],
+        provider: &mut dyn Provider,
+        signer: &dyn Signer,
+        options: Option<&CallOptions>,
+    ) -> Result<PreparedCall, String> {
 
         // Validate method exists
         let method = self.find_method(method_name).ok_or_else(|| {
@@ -1145,10 +1161,33 @@ impl RunarContract {
                     compact_size_hex(script_code_body.len() / 2),
                     script_code_body,
                 );
+                // D2: extractLocktime / extractSequence / extractOutpoint read
+                // the fields of the transaction this call builds -- the same
+                // locktime and input sequence build_call_transaction puts on it,
+                // and input 0's outpoint (the spent contract UTXO).
+                let tx_locktime = options.and_then(|o| o.locktime);
+                let tx_sequence = resolve_input_sequence(
+                    tx_locktime, options.and_then(|o| o.sequence),
+                );
+                let outpoint_hex = if current_utxo.txid.len() == 64 {
+                    let mut le: String = (0..32).rev().map(|i| &current_utxo.txid[i * 2..i * 2 + 2]).collect();
+                    for b in current_utxo.output_index.to_le_bytes() {
+                        le.push_str(&format!("{:02x}", b));
+                    }
+                    Some(le)
+                } else {
+                    None
+                };
+                let tx_fields = anf_interpreter::TxFields {
+                    script_code: Some(script_code_hex),
+                    locktime: Some(tx_locktime.unwrap_or(0) as i64),
+                    sequence: Some(tx_sequence as i64),
+                    outpoint: outpoint_hex,
+                };
                 let (state, data_outs, _raw_outs, ordered_outs) =
-                    anf_interpreter::compute_new_state_and_data_outputs_with_script_code(
+                    anf_interpreter::compute_new_state_and_data_outputs_with_tx_fields(
                         anf, method_name, &flat_state, &interp_args,
-                        &self.constructor_args, Some(&script_code_hex),
+                        &self.constructor_args, &tx_fields,
                     )
                     .map_err(|e| {
                         format!(
@@ -1321,7 +1360,9 @@ impl RunarContract {
         // is verified by the on-chain script (hashOutputs check).
         let fee_rate = provider.get_fee_rate()?;
         let change_script_str = build_p2pkh_script_from_address(change_address);
-        let all_funding_utxos = provider.get_utxos(&address).unwrap_or_default();
+        // D12 SDK-F3: a UTXO-lookup failure is an error, not "no funding" (which
+        // built a zero-fee spend).
+        let all_funding_utxos = provider.get_utxos(&address)?;
         // Filter out every contract UTXO this tx spends (the primary and any
         // additional_contract_inputs) from funding UTXOs to avoid duplicate
         // inputs (F-045: a merge's second token UTXO listed at the same
@@ -1970,7 +2011,6 @@ impl RunarContract {
             contract_outputs: prepared_contract_outputs,
             code_sep_idx,
             intent_witness_hex: witness_hex,
-            state_before: Some(state_before),
             state_after: Some(self.state.clone()),
         })
     }
@@ -1995,16 +2035,12 @@ impl RunarContract {
         if !owns_state {
             return result;
         }
-        match (&result, &prepared.state_before, &prepared.state_after) {
-            // Nothing was broadcast (or the node refused it): the chain is
-            // still at the state this call started from, so the local state
-            // must be too. Before this, a refused call left the state advanced
-            // and the next call was built from a state the chain never reached.
-            (Err(_), Some(before), _) => self.state = before.clone(),
-            // A retry of a PreparedCall whose first finalize failed must commit
-            // the post-call state the transaction carries.
-            (Ok(_), _, Some(after)) => self.state = after.clone(),
-            _ => {}
+        // D12 SDK-F1/F2: prepare_call left the tracked state untouched, so a
+        // failed finalize has nothing to undo (restoring `state_before` here
+        // would clobber a different PreparedCall's commit). Only a successful
+        // broadcast commits the post-call state the transaction carries.
+        if let (Ok(_), Some(after)) = (&result, &prepared.state_after) {
+            self.state = after.clone();
         }
         result
     }
@@ -2392,7 +2428,6 @@ impl RunarContract {
             contract_outputs: vec![],
             code_sep_idx: term_code_sep_idx,
             intent_witness_hex: witness_hex.to_string(),
-            state_before: None,
             state_after: None,
         })
     }
@@ -3155,6 +3190,82 @@ const BYTE_STRING_CTOR_TYPES: &[&str] = &[
 /// followed by non-hex text: a corrupt locking script with no error. Panics
 /// (the constructor's existing refusal style) with the diagnostic shared by
 /// the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+/// D12 PQ-F1: the public-key length each post-quantum verifier's compiled
+/// script splits its pk operand into: WOTS+ pubSeed(32)||pkRoot(32), SLH-DSA
+/// PK.seed(n)||PK.root(n) (FIPS 205; n = 16 / 24 / 32).
+fn pq_pub_key_len(func: &str) -> Option<usize> {
+    match func {
+        "verifyWOTS" => Some(64),
+        "verifySLHDSA_SHA2_128s" | "verifySLHDSA_SHA2_128f" => Some(32),
+        "verifySLHDSA_SHA2_192s" | "verifySLHDSA_SHA2_192f" => Some(48),
+        "verifySLHDSA_SHA2_256s" | "verifySLHDSA_SHA2_256f" => Some(64),
+        _ => None,
+    }
+}
+
+/// D12 PQ-F1: refuse a constructor arg that flows straight (as a property
+/// load) into a post-quantum verifier's public-key operand with the wrong
+/// length for the parameter set. Such a key deploys fine, and then the
+/// owner's valid signature is refused forever. Keys reaching the verifier any
+/// other way (e.g. hash-committed, supplied at spend time) cannot be checked.
+/// Needs the artifact's ANF (the compilers emit it for stateful contracts).
+fn check_pq_pub_key_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
+    let Some(anf) = artifact.anf.as_ref() else { return };
+    let params = &artifact.abi.constructor.params;
+    fn walk(
+        bindings: &[(String, &serde_json::Value)],
+        props: &mut HashMap<String, String>,
+        found: &mut Vec<(String, String, usize)>,
+    ) {
+        for (name, v) in bindings {
+            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+            if kind == "load_prop" {
+                if let Some(p) = v.get("name").and_then(|n| n.as_str()) {
+                    props.insert(name.clone(), p.to_string());
+                }
+            }
+            if kind == "call" {
+                let func = v.get("func").and_then(|f| f.as_str()).unwrap_or("");
+                let call_args = v.get("args").and_then(|a| a.as_array());
+                if let (Some(want), Some(a)) = (pq_pub_key_len(func), call_args) {
+                    if a.len() == 3 {
+                        if let Some(prop) = a[2].as_str().and_then(|r| props.get(r)) {
+                            found.push((prop.clone(), func.to_string(), want));
+                        }
+                    }
+                }
+            }
+            for nested in ["then", "else", "body"] {
+                if let Some(arr) = v.get(nested).and_then(|x| x.as_array()) {
+                    let inner: Vec<(String, &serde_json::Value)> = arr
+                        .iter()
+                        .filter_map(|b| Some((b.get("name")?.as_str()?.to_string(), b.get("value")?)))
+                        .collect();
+                    walk(&inner, props, found);
+                }
+            }
+        }
+    }
+    for m in anf.methods.iter().filter(|m| m.name != "constructor") {
+        let bindings: Vec<(String, &serde_json::Value)> = m.body.iter().map(|b| (b.name.clone(), &b.value)).collect();
+        let mut props = HashMap::new();
+        let mut found = Vec::new();
+        walk(&bindings, &mut props, &mut found);
+        for (prop, func, want) in found {
+            let Some(idx) = params.iter().position(|p| p.name == prop) else { continue };
+            if let Some(SdkValue::Bytes(h)) = args.get(idx) {
+                if h.len() != want * 2 {
+                    panic!(
+                        "RunarContract: constructor arg '{}' is the {} public key and must be {} bytes, got {}. \
+                         A key of the wrong length deploys an output the owner's valid signature can never spend (D12 PQ-F1)",
+                        prop, func, want, h.len() / 2
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn check_byte_string_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
     fn leaf_type(t: &str) -> &str {
         let mut cur = t.trim();
