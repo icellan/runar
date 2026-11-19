@@ -252,6 +252,9 @@ public final class AnfLoader {
         // D15: D9 / GK-GAP-010 / D14 re-derived on the ANF (shared rule and
         // diagnostics, 7 tiers; see IrPreimageRules).
         IrPreimageRules.check(props, methods);
+        // D26: IR input skips typecheck's locktime-domain rule (stateless and
+        // stateful programs alike; see LocktimeDomain).
+        LocktimeDomain.checkIr(methods);
         return new AnfProgram(name, props, methods, parentClass);
     }
 

@@ -8,6 +8,7 @@
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "continuation_rules"
+require_relative "locktime_domain"
 
 module RunarCompiler
   module Frontend
@@ -1010,9 +1011,20 @@ module RunarCompiler
 
           # D18: in a method that declares its own outputs, a path that writes
           # state and reaches no addOutput drops its write (see continuation_rules.rb).
-          if method.visibility == "public" && ContinuationRules.drops_continuation?(method, @contract)
-            add_error(ContinuationRules.dropped_continuation_message(method.name))
-          end
+          continuation = method.visibility == "public" ? ContinuationRules.continuation_verdict(method, @contract) : nil
+          add_error(ContinuationRules.dropped_continuation_message(method.name)) if continuation == :dropped
+          # D27: a write after a path's last addOutput is dead on chain (see
+          # continuation_rules.rb).
+          add_error(ContinuationRules.dead_state_write_message(method.name)) if continuation == :dead_write
+        end
+
+        # D26: a lower-bound locktime gate needs an asserted domain pin on its
+        # path (locktime_domain.rb), in stateless and stateful contracts alike.
+        # Beside D18 / D27, so the contract's other typecheck errors (D14's
+        # unchecked-preimage extractor among them) are still reported with it.
+        if method.visibility == "public" && LocktimeDomain.contract_reads_locktime?(@contract) &&
+           LocktimeDomain.unpinned_gate?(@contract, method)
+          add_error(LocktimeDomain.locktime_domain_message(method.name))
         end
       end
 

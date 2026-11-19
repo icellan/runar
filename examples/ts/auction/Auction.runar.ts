@@ -115,6 +115,9 @@ class Auction extends StatefulSmartContract {
 
     // Enforce that the deadline has passed: nLockTime must be >= deadline
     assert(extractLocktime(this.txPreimage) >= this.deadline);
+    // ...and that the locktime is a block height: consensus reads an nLockTime of
+    // 500000000 or more as a Unix timestamp, which passes the height gate above at once.
+    assert(extractLocktime(this.txPreimage) < 500000000n);
 
     // ...and that consensus actually enforces that nLockTime. A transaction
     // whose inputs are all final (nSequence 0xffffffff) is mineable at any

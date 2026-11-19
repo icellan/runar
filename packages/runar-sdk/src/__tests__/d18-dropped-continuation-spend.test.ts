@@ -45,8 +45,8 @@ vi.mock('../../../runar-compiler/src/passes/continuation-rules.js', async (impor
   const real = await importOriginal<typeof import('../../../runar-compiler/src/passes/continuation-rules.js')>();
   return {
     ...real,
-    dropsContinuation: (...a: Parameters<typeof real.dropsContinuation>) =>
-      gate.bypassD18 ? false : real.dropsContinuation(...a),
+    continuationVerdict: (...a: Parameters<typeof real.continuationVerdict>) =>
+      gate.bypassD18 ? undefined : real.continuationVerdict(...a),
   };
 });
 

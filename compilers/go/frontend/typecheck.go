@@ -959,10 +959,25 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 					"terminal (no state mutation)", method.Name))
 		}
 		// D18: in a method that declares its own outputs, a path that writes
-		// state and reaches no addOutput drops its write (see continuation_rules.go).
-		if method.Visibility == "public" && DropsContinuation(tc.contract, method, effects) {
-			tc.addError(DroppedContinuationMessage(method.Name))
+		// state and reaches no addOutput drops its write; D27: a write after a
+		// path's last addOutput is dead on chain (see continuation_rules.go).
+		if method.Visibility == "public" {
+			switch ContinuationVerdict(tc.contract, method, effects) {
+			case VerdictDropped:
+				tc.addError(DroppedContinuationMessage(method.Name))
+			case VerdictDeadWrite:
+				tc.addError(DeadStateWriteMessage(method.Name))
+			}
 		}
+	}
+
+	// D26: a lower-bound locktime gate needs an asserted domain pin on its
+	// path (locktime_domain.go), in stateless and stateful contracts alike.
+	// It sits here, beside D18 / D27, so a contract's other typecheck errors
+	// (D14's unchecked-preimage extractor among them) are still reported.
+	if tc.contract != nil && method.Visibility == "public" &&
+		ContractReadsLocktime(tc.contract) && HasUnpinnedLocktimeGate(tc.contract, method) {
+		tc.addError(LocktimeDomainMessage(method.Name))
 	}
 }
 

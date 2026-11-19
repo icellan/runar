@@ -157,6 +157,7 @@ export class W1Warn extends StatefulSmartContract {
   public unlock() {
     ${guard}
     assert(extractLocktime(this.txPreimage) >= this.deadline);
+    assert(extractLocktime(this.txPreimage) < 500000000n);
     this.count = this.count + 1n;
   }
 }

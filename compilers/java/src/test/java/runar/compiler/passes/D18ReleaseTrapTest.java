@@ -151,4 +151,112 @@ class D18ReleaseTrapTest {
         assertEquals(0, r.exit(), r.diag());
         assertFalse(r.stdout().isBlank());
     }
+    // ------------------------------------------------------------------
+    // D27 (dead state write) and D26 (locktime domain). Ports of
+    // continuation-rules.ts (D27) and locktime-domain.ts (D26). Corpora:
+    // dropped-continuation-cases.json (refuse_after_last) and
+    // locktime-domain-cases.json.
+    // ------------------------------------------------------------------
+
+    private static String corpusError(String file, String key, String name) throws IOException {
+        for (Map<String, Object> c : list(corpus(file), key)) {
+            if (name.equals(c.get("name"))) return (String) c.get("error");
+        }
+        throw new IOException("case not found: " + name);
+    }
+
+    private static void irRefused(String fixture, String error) throws Exception {
+        Path ir = repo().resolve("compilers/java/src/test/java/runar/compiler/passes").resolve(fixture);
+        Result r = run("--ir", ir.toString(), "--hex");
+        assertNotEquals(0, r.exit(), "accepted " + fixture + ": " + r.stdout());
+        assertFalse(r.diag().contains("Exception in thread"), r.diag());
+        assertTrue(r.diag().contains(error), r.diag());
+    }
+
+    @Test
+    void deadStateWriteIsRefused() throws Exception {
+        List<Map<String, Object>> cases = list(corpus("dropped-continuation-cases.json"), "refuse_after_last");
+        assertFalse(cases.isEmpty());
+        for (Map<String, Object> c : cases) {
+            String name = (String) c.get("name");
+            Result r = cli((String) c.get("file"), (String) c.get("src"));
+            assertNotEquals(0, r.exit(), name + " accepted: " + r.stdout());
+            assertTrue(r.diag().contains((String) c.get("error")), name + ": " + r.diag());
+        }
+    }
+
+    @Test
+    void irPathRefusesWriteAfterLastAddOutput() throws Exception {
+        irRefused("d27_write_after_add_output.ir.json",
+            corpusError("dropped-continuation-cases.json", "refuse_after_last", "write-after-add-output"));
+    }
+
+    @Test
+    void unpinnedLocktimeGateIsRefused() throws Exception {
+        List<Map<String, Object>> cases = list(corpus("locktime-domain-cases.json"), "refuse");
+        assertFalse(cases.isEmpty());
+        for (Map<String, Object> c : cases) {
+            String name = (String) c.get("name");
+            Result r = cli((String) c.get("file"), (String) c.get("src"));
+            assertNotEquals(0, r.exit(), name + " accepted: " + r.stdout());
+            assertTrue(r.diag().contains((String) c.get("error")), name + ": " + r.diag());
+        }
+    }
+
+    @Test
+    void pinnedLocktimeShapesCompile() throws Exception {
+        for (Map<String, Object> c : list(corpus("locktime-domain-cases.json"), "accept")) {
+            String name = (String) c.get("name");
+            Result r = cli((String) c.get("file"), (String) c.get("src"));
+            assertEquals(0, r.exit(), name + ": " + r.stderr());
+            assertFalse(r.stdout().isBlank(), name);
+        }
+    }
+
+    @Test
+    void irPathRefusesUnpinnedHeightGate() throws Exception {
+        irRefused("d26_height_gate.ir.json",
+            corpusError("locktime-domain-cases.json", "refuse", "height-gate-literal"));
+    }
+
+    @Test
+    void irPathRefusesGateOnHelperParam() throws Exception {
+        irRefused("d26_gate_on_helper_param.ir.json",
+            corpusError("locktime-domain-cases.json", "refuse", "gate-on-helper-param"));
+    }
+
+    @Test
+    void irPathAcceptsHelperParamGatePinnedByCaller() throws Exception {
+        Path ir = repo().resolve(
+            "compilers/java/src/test/java/runar/compiler/passes/d26_helper_param_pinned_by_caller.ir.json");
+        Result r = run("--ir", ir.toString(), "--hex");
+        assertEquals(0, r.exit(), r.diag());
+        assertFalse(r.stdout().isBlank());
+    }
+
+    /** N534: D26 must not mask the D14 extractor refusal typecheck reports. */
+    @Test
+    void n534CarriesD14BesideD26() throws Exception {
+        String src = Files.readString(repo().resolve("conformance/negatives/N534-ts-extractor-bytestring-property.runar.ts"));
+        Result r = cli("N534.runar.ts", src);
+        assertNotEquals(0, r.exit(), r.stdout());
+        assertTrue(r.diag().contains("extractLocktime() needs a checked SigHashPreimage"), r.diag());
+        assertTrue(r.diag().contains("compares extractLocktime against a lower bound without pinning the locktime domain"), r.diag());
+    }
+
+    /** The Java surface keeps assertThat(...) as its own callee: its pin counts (examples/java Auction). */
+    @Test
+    void javaSurfaceAssertThatPinCounts() throws Exception {
+        String src = Files.readString(repo().resolve("examples/java/src/main/java/runar/examples/auction/Auction.runar.java"));
+        Result r = cli("Auction.runar.java", src);
+        assertEquals(0, r.exit(), r.diag());
+        assertFalse(r.stdout().isBlank());
+    }
+
+    /** SPEC UPDATE 3: only {@code >= 0} is vacuous; an IR literal -1 bound is a gate. */
+    @Test
+    void irPathRefusesNegativeLowerBound() throws Exception {
+        irRefused("d26_negative_bound.ir.json",
+            corpusError("locktime-domain-cases.json", "refuse", "height-gate-literal"));
+    }
 }

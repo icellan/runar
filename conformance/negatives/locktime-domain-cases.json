@@ -1,0 +1,282 @@
+{
+  "_comment": "D26. A lower-bound compare on the transaction locktime (extractLocktime(p) >= X, > X, or the reversed spellings X <= ..., X < ..., directly, through a local bound to it, or through a private helper's parameter; currentBlockHeight() counts as a locktime read) is a block-height gate unless X is a literal >= 500000000 (> 499999999), which is a timestamp gate and pins the domain itself, or the vacuous >= 0n every locktime passes. Consensus reads an nLockTime >= 500000000 as a Unix timestamp, so an unpinned height gate passes for any such locktime. Every path that carries a gate must also carry an ASSERTED domain pin: extractLocktime(p) < N (0 < N <= 500000000) or <= N (0 <= N < 500000000) for heights, >= N (N >= 500000000) or > N (N >= 499999999) for timestamps, or the reversed spellings, as the asserted condition or a conjunct of its top-level && chain (not under ! or ||). The rule is per path (D18's path walk with two bits: gate seen, pin seen), through if arms, loop bodies and private helpers. A value derived from a locktime read is read fail-closed (any lower-bound compare on it is a gate whatever the bound, and no compare on it is a pin): the result of + - * / % & | ^ << >> or unary - ~ on a read, a ternary with a read in an arm, a builtin call taking a read, and a local or helper parameter of which some binding is not a direct read. Upper-bound and equality compares are not gates. Every tier refuses on the source path (validate) and on the --ir path (ir-release-trap.test.ts); every accept compiles to the same bytes in every tier.",
+  "error_template": "method '<method>' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate",
+  "refuse": [
+    {
+      "name": "height-gate-property",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtA extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "height-gate-literal",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtB extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= 800000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "height-gate-strict",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtC extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) > this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "height-gate-reversed",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtD extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(this.h <= extractLocktime(p));\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "height-gate-alias",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtE extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    const lt = extractLocktime(p);\n    assert(lt >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "stateful-auction-close",
+      "method": "close",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtF extends StatefulSmartContract {\n  readonly owner: PubKey;\n  readonly h: bigint;\n\n  constructor(owner: PubKey, h: bigint) {\n    super(owner, h);\n    this.owner = owner;\n    this.h = h;\n  }\n\n  public close(sig: Sig) {\n    assert(checkSig(sig, this.owner));\n    assert(extractLocktime(this.txPreimage) >= this.h);\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'close' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "pin-on-other-branch",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtG extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    if (f > 0n) {\n      assert(extractLocktime(p) < 500000000n);\n    } else {\n      assert(extractLocktime(p) >= this.h);\n    }\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "pin-under-or",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtH extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    assert(extractLocktime(p) < 500000000n || f > 0n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "pin-under-not",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtI extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    assert(!(extractLocktime(p) >= 500000000n));\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "pin-not-a-domain-bound",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtJ extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    assert(extractLocktime(p) < 600000000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "pin-not-asserted",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtK extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    const pinned = extractLocktime(p) < 500000000n;\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "gate-in-helper",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtL extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    this.gate(p);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n\n  private gate(p: SigHashPreimage): void {\n    assert(extractLocktime(p) >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "gate-in-condition",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtM extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    let ok = f;\n    if (extractLocktime(p) >= this.h) {\n      ok = f + 1n;\n    }\n    assert(ok > 0n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-gate",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtN extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) - 1n >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-gate-alias",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtO extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    const lt = extractLocktime(p) + f;\n    assert(this.h < lt);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-gate-timestamp-literal",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtP extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) - f >= 500000000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-pin-does-not-count",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtQ extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    assert(extractLocktime(p) + f < 500000000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "gate-on-helper-param",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtR extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    this.gate(extractLocktime(p));\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n\n  private gate(lt: bigint): void {\n    assert(lt >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "pin-on-rebound-local",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtT extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    let lt = extractLocktime(p);\n    assert(lt >= this.h);\n    lt = 0n;\n    assert(lt < 500000000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-gate-shift",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtU extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert((extractLocktime(p) >> 0n) >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-gate-bitand",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtV extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert((extractLocktime(p) & 0xffffffffn) >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-gate-ternary",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtW extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    const lt = f > 0n ? extractLocktime(p) : 0n;\n    assert(lt >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "derived-gate-builtin",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtX extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(max(extractLocktime(p), 0n) >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "negative-lower-bound-is-gate",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtY extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) > -1n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "gate-on-helper-param-derived",
+      "method": "unlock",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LtS extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    this.gate(extractLocktime(p) - f);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n\n  private gate(lt: bigint): void {\n    assert(lt >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'unlock' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "python-height-gate",
+      "method": "close",
+      "src": "from runar import StatefulSmartContract, PubKey, Sig, Bigint, public, assert_, check_sig, extract_locktime, extract_sequence\n\n\nclass LtPy(StatefulSmartContract):\n    owner: PubKey\n    deadline: Bigint\n\n    def __init__(self, owner: PubKey, deadline: Bigint):\n        super().__init__(owner, deadline)\n        self.owner = owner\n        self.deadline = deadline\n\n    @public\n    def close(self, sig: Sig):\n        assert_(check_sig(sig, self.owner))\n        assert_(extract_locktime(self.tx_preimage) >= self.deadline)\n        assert_(extract_sequence(self.tx_preimage) != 4294967295)\n",
+      "file": "LtPy.runar.py",
+      "error": "method 'close' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "go-height-gate",
+      "method": "close",
+      "src": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype LtGo struct {\n\trunar.StatefulSmartContract\n\tOwner    runar.PubKey `runar:\"readonly\"`\n\tDeadline runar.Bigint `runar:\"readonly\"`\n}\n\nfunc (c *LtGo) Close(sig runar.Sig) {\n\trunar.Assert(runar.CheckSig(sig, c.Owner))\n\trunar.Assert(runar.ExtractLocktime(c.TxPreimage) >= c.Deadline)\n\trunar.Assert(runar.ExtractSequence(c.TxPreimage) != 0xffffffff)\n}\n",
+      "file": "LtGo.runar.go",
+      "error": "method 'close' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    }
+  ],
+  "accept": [
+    {
+      "name": "height-gate-pinned",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaA extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    assert(extractLocktime(p) < 500000000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "timestamp-gate-pinned",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaB extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= 500000000n);\n    assert(extractLocktime(p) >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "timestamp-literal-gate",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaC extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= 1700000000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "pin-reversed-and-inclusive",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaD extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(this.h < extractLocktime(p));\n    assert(extractLocktime(p) <= 499999999n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "pin-reversed-strict",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaE extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(500000000n > extractLocktime(p));\n    assert(extractLocktime(p) >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "pin-in-conjunct",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaF extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h && extractLocktime(p) < 500000000n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "pin-in-helper",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaG extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= this.h);\n    this.pin(p);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n\n  private pin(p: SigHashPreimage): void {\n    assert(extractLocktime(p) < 500000000n);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "alias-pinned",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaH extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    const lt = extractLocktime(p);\n    assert(lt < 500000000n);\n    assert(lt >= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "pin-and-gate-same-branch",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaI extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    if (f > 0n) {\n      assert(extractLocktime(p) < 500000000n);\n      assert(extractLocktime(p) >= this.h);\n    } else {\n      assert(f < 0n);\n    }\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "vacuous-lower-bound",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaQ extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) >= 0n);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "upper-bound-only",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaJ extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) <= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "equality-only",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaK extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) === this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "helper-param-pinned-in-helper",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaM extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    this.gate(extractLocktime(p));\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n\n  private gate(lt: bigint): void {\n    assert(lt < 500000000n);\n    assert(lt >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "helper-param-gate-pinned-by-caller",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaN extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) < 500000000n);\n    this.gate(extractLocktime(p));\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n\n  private gate(lt: bigint): void {\n    assert(lt >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "helper-param-untainted",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaO extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) < 500000000n);\n    this.gate(f);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n\n  private gate(x: bigint): void {\n    assert(x >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "derived-upper-bound",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaP extends SmartContract {\n  readonly h: bigint;\n\n  constructor(h: bigint) {\n    super(h);\n    this.h = h;\n  }\n\n  public unlock(p: SigHashPreimage, f: bigint) {\n    assert(checkPreimage(p));\n    assert(extractLocktime(p) - f <= this.h);\n    assert(extractSequence(p) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "stateful-auction-close-pinned",
+      "src": "import { SmartContract, StatefulSmartContract, assert, checkPreimage, checkSig, extractLocktime, extractSequence, max } from 'runar-lang';\nimport type { PubKey, Sig, SigHashPreimage } from 'runar-lang';\n\nclass LaL extends StatefulSmartContract {\n  readonly owner: PubKey;\n  readonly h: bigint;\n\n  constructor(owner: PubKey, h: bigint) {\n    super(owner, h);\n    this.owner = owner;\n    this.h = h;\n  }\n\n  public close(sig: Sig) {\n    assert(checkSig(sig, this.owner));\n    assert(extractLocktime(this.txPreimage) >= this.h);\n    assert(extractLocktime(this.txPreimage) < 500000000n);\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    }
+  ]
+}

@@ -27,8 +27,16 @@
  * terminal path by design and is accepted. `addDataOutput` does not replace
  * the continuation and is no trigger.
  *
- * The analysis tracks, per path, two flags (state written, addOutput reached),
- * so a statement list has at most four distinct path states and nothing
+ * D27 (error), PER PATH, same family. In such a method a state write that no
+ * later addOutput on its path observes (a write after the path's last
+ * addOutput) is dead on chain: the script commits only the values its
+ * addOutput calls carry. An SDK that builds the continuation from the final
+ * state is then refused on every honest call. D18 wins when a method has both.
+ *
+ * The analysis tracks, per path, three flags (state written, addOutput
+ * reached, written since the last addOutput; an addOutput clears the third,
+ * and a helper that reaches one clears its caller's), so a statement list has
+ * at most eight distinct path states and nothing
  * explodes: `if` unions its arms, a loop body unions with skipping it, a
  * private helper call composes the caller's states with the helper's exit
  * states (a helper `return` ends the helper's path, not the caller's), and an
@@ -62,22 +70,55 @@ export function droppedContinuationMessage(method: string): string {
   );
 }
 
-/** Path-state bits: state written / addOutput reached. */
-const W = 1;
-const A = 2;
-/** A path that wrote state and reached no addOutput. */
-const dropped = (states: Iterable<number>): boolean => [...states].some((x) => (x & W) !== 0 && (x & A) === 0);
-const orAll = (states: Set<number>, bits: number): Set<number> => new Set([...states].map((x) => x | bits));
+/** D27: the shared error text (D18's sibling, same family). */
+export function deadStateWriteMessage(method: string): string {
+  return (
+    `method '${method}' writes contract state after the last addOutput() on a path: a method that declares its own ` +
+    `outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the ` +
+    `write never reaches the chain and a caller that tracks the final state builds a continuation the script ` +
+    `refuses. Pass the new value to addOutput(...) instead, or remove the write`
+  );
+}
 
 /**
- * D18 (source path): `effects` is the method's side-effect summary entry. True
- * iff the method declares a state output somewhere (so it gets no
- * auto-continuation) and some path through it writes state without reaching
- * an addOutput.
+ * Path-state bits: state written / addOutput reached / state written since
+ * the path's last addOutput (D27; an addOutput clears it).
  */
-export function dropsContinuation(contract: ContractNode, method: MethodNode, effects: MethodEffects): boolean {
-  if (!effects.hasStateOutput) return false;
-  return dropped(new SourcePaths(contract).exits(method.body));
+const W = 1;
+const A = 2;
+const D = 4;
+/** A path that wrote state and reached no addOutput. */
+const dropped = (states: Iterable<number>): boolean => [...states].some((x) => (x & W) !== 0 && (x & A) === 0);
+/** D27: a path that reached an addOutput and wrote state after its last one. */
+const deadWrite = (states: Iterable<number>): boolean => [...states].some((x) => (x & A) !== 0 && (x & D) !== 0);
+const orAll = (states: Set<number>, bits: number): Set<number> => new Set([...states].map((x) => x | bits));
+const write = (states: Set<number>): Set<number> => orAll(states, W | D);
+const addOutput = (states: Set<number>): Set<number> => new Set([...states].map((x) => (x | A) & ~D));
+/** Run a callee's exit states `y` after the caller's `x`: an addOutput in the callee clears the caller's pending write. */
+const then = (x: number, y: number): number => ((x | y) & ~D) | ((y & A) !== 0 ? y & D : (x | y) & D);
+const compose = (xs: Set<number>, ys: Set<number>): Set<number> => {
+  const out = new Set<number>();
+  for (const x of xs) for (const y of ys) out.add(then(x, y));
+  return out;
+};
+
+/** D18 / D27 verdict of a method's exit states: D18 wins when both apply. */
+export type ContinuationVerdict = 'dropped' | 'dead-write' | undefined;
+const verdict = (states: Set<number>): ContinuationVerdict =>
+  dropped(states) ? 'dropped' : deadWrite(states) ? 'dead-write' : undefined;
+
+/**
+ * D18 + D27 (source path): 'dropped' when some path writes state and reaches
+ * no addOutput, else 'dead-write' when some path writes state after its last
+ * addOutput, in a method that declares a state output somewhere.
+ */
+export function continuationVerdict(
+  contract: ContractNode,
+  method: MethodNode,
+  effects: MethodEffects,
+): ContinuationVerdict {
+  if (!effects.hasStateOutput) return undefined;
+  return verdict(new SourcePaths(contract).exits(method.body));
 }
 
 class SourcePaths {
@@ -115,7 +156,7 @@ class SourcePaths {
       case 'assignment': {
         let s = this.expr(st.target, states);
         s = this.expr(st.value, s);
-        if (this.writesMutable(st.target)) s = orAll(s, W);
+        if (this.writesMutable(st.target)) s = write(s);
         return { live: s, returned: none };
       }
       case 'expression_statement':
@@ -157,7 +198,7 @@ class SourcePaths {
       case 'increment_expr':
       case 'decrement_expr': {
         const s = this.expr(e.operand, states);
-        return this.writesMutable(e.operand) ? orAll(s, W) : s;
+        return this.writesMutable(e.operand) ? write(s) : s;
       }
       case 'call_expr': {
         let s = states;
@@ -169,15 +210,10 @@ class SourcePaths {
             : callee.kind === 'identifier' ? callee.name
               : undefined;
         if ((callee.kind === 'property_access' || callee.kind === 'member_expr') && name === 'addOutput') {
-          return orAll(s, A);
+          return addOutput(s);
         }
         const helper = name !== undefined ? this.privates.get(name) : undefined;
-        if (helper) {
-          const ex = this.helper(helper);
-          const out = new Set<number>();
-          for (const x of s) for (const y of ex) out.add(x | y);
-          return out;
-        }
+        if (helper) return compose(s, this.helper(helper));
         return s;
       }
       case 'binary_expr':
@@ -245,9 +281,9 @@ export function assertIrNoDroppedContinuation(program: ANFProgram): void {
   );
   for (const method of program.methods) {
     if (!method.isPublic || method.name === 'constructor') continue;
-    if (irDropsContinuation(method, privates)) {
-      throw new Error(droppedContinuationMessage(method.name));
-    }
+    const v = irContinuationVerdict(method, privates);
+    if (v === 'dropped') throw new Error(droppedContinuationMessage(method.name));
+    if (v === 'dead-write') throw new Error(deadStateWriteMessage(method.name));
   }
 }
 
@@ -257,7 +293,7 @@ export function assertIrNoDroppedContinuation(program: ANFProgram): void {
  * auto-continuation). `if` unions its arms, a loop body unions with skipping
  * it, a method_call to a private method composes with that method's exits.
  */
-function irDropsContinuation(method: ANFMethod, privates: Map<string, ANFMethod>): boolean {
+function irContinuationVerdict(method: ANFMethod, privates: Map<string, ANFMethod>): ContinuationVerdict {
   const declares = (bs: ANFBinding[], seen: Set<string>): boolean =>
     bs.some((b) => {
       const v = b.value;
@@ -272,7 +308,7 @@ function irDropsContinuation(method: ANFMethod, privates: Map<string, ANFMethod>
       const n = v as { then?: ANFBinding[]; else?: ANFBinding[]; body?: ANFBinding[] };
       return [n.then, n.else, n.body].some((x) => Array.isArray(x) && declares(x, seen));
     });
-  if (!declares(method.body, new Set())) return false;
+  if (!declares(method.body, new Set())) return undefined;
 
   const exitsOf = new Map<string, Set<number>>();
   const inProgress = new Set<string>();
@@ -280,8 +316,8 @@ function irDropsContinuation(method: ANFMethod, privates: Map<string, ANFMethod>
     let s = states;
     for (const b of bs) {
       const v = b.value;
-      if (v.kind === 'update_prop') s = orAll(s, W);
-      else if (v.kind === 'add_output') s = orAll(s, A);
+      if (v.kind === 'update_prop') s = write(s);
+      else if (v.kind === 'add_output') s = addOutput(s);
       else if (v.kind === 'method_call') {
         const t = privates.get(v.method);
         if (t) {
@@ -295,9 +331,7 @@ function irDropsContinuation(method: ANFMethod, privates: Map<string, ANFMethod>
               exitsOf.set(t.name, ex);
             }
           }
-          const out = new Set<number>();
-          for (const x of s) for (const y of ex) out.add(x | y);
-          s = out;
+          s = compose(s, ex);
         }
       } else {
         const n = v as { then?: ANFBinding[]; else?: ANFBinding[]; body?: ANFBinding[] };
@@ -312,5 +346,5 @@ function irDropsContinuation(method: ANFMethod, privates: Map<string, ANFMethod>
     }
     return s;
   };
-  return dropped(run(method.body, new Set([0])));
+  return verdict(run(method.body, new Set([0])));
 }

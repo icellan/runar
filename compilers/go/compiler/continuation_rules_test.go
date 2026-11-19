@@ -246,3 +246,100 @@ func TestDroppedContinuationD18IR(t *testing.T) {
 		})
 	}
 }
+
+// uncheckedIR lowers src with validate / typecheck skipped (the IR a frontend
+// without the rule under test emitted). ok=false when the lowerer itself
+// refuses a write inside an output-declaring branch.
+func uncheckedIR(t *testing.T, src, file string) ([]byte, bool) {
+	t.Helper()
+	parsed := frontend.ParseSource([]byte(src), file)
+	if parsed.Contract == nil {
+		t.Fatalf("parse: %v", parsed.ErrorStrings())
+	}
+	expanded := frontend.ExpandFixedArrays(parsed.Contract)
+	if len(expanded.Errors) > 0 {
+		t.Fatalf("expand-fixed-arrays: %v", expanded.Errors)
+	}
+	program, err := lowerToANFRecovering(expanded.Contract)
+	if err != nil {
+		if strings.Contains(err.Error(), "both declares outputs and assigns contract properties") {
+			return nil, false
+		}
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data, true
+}
+
+// refuseAndAccept runs the shared refuse / accept matrix of one corpus on the
+// source path and the --ir path.
+func refuseAndAccept(t *testing.T, refuse, accept []continuationCase) {
+	t.Helper()
+	for _, c := range refuse {
+		t.Run("source-refuse/"+c.Name, func(t *testing.T) {
+			r := CompileFromSourceStrWithResult(c.Src, c.File, CompileOptions{DisableConstantFolding: true})
+			if r.Success {
+				t.Fatal("accepted")
+			}
+			if !contContains(contDiags(r.Diagnostics, frontend.SeverityError), c.Error) {
+				t.Fatalf("missing error %q; got %v", c.Error, contDiags(r.Diagnostics, frontend.SeverityError))
+			}
+		})
+		t.Run("ir-refuse/"+c.Name, func(t *testing.T) {
+			data, ok := uncheckedIR(t, c.Src, c.File)
+			if !ok {
+				return
+			}
+			_, err := CompileFromIRBytes(data)
+			if err == nil {
+				t.Fatal("--ir accepted")
+			}
+			if !strings.Contains(err.Error(), c.Error) {
+				t.Fatalf("want %q, got %v", c.Error, err)
+			}
+		})
+	}
+	for _, c := range accept {
+		t.Run("accept/"+c.Name, func(t *testing.T) {
+			r := CompileFromSourceStrWithResult(c.Src, c.File, CompileOptions{DisableConstantFolding: true})
+			if !r.Success || r.ANF == nil {
+				t.Fatalf("source refused: %v", contDiags(r.Diagnostics, frontend.SeverityError))
+			}
+			data, err := json.Marshal(r.ANF)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := CompileFromIRBytes(data, CompileOptions{DisableConstantFolding: true}); err != nil {
+				t.Fatalf("--ir refused: %v", err)
+			}
+		})
+	}
+}
+
+// D27: a state write after a path's last addOutput is dead on chain. Source
+// and --ir paths; the D18 accept cases must stay accepted.
+func TestDeadStateWriteD27(t *testing.T) {
+	corpus := continuationCorpus(t, "dropped-continuation-cases.json")
+	if len(corpus["refuse_after_last"]) < 5 {
+		t.Fatalf("corpus too small: %d refuse_after_last", len(corpus["refuse_after_last"]))
+	}
+	for _, c := range corpus["refuse_after_last"] {
+		if !strings.Contains(c.Error, "writes contract state after the last addOutput()") {
+			t.Fatalf("%s: not a D27 error: %q", c.Name, c.Error)
+		}
+	}
+	refuseAndAccept(t, corpus["refuse_after_last"], corpus["accept"])
+}
+
+// D26: a lower-bound compare on extractLocktime needs an asserted locktime
+// domain pin on its path. Corpus: conformance/negatives/locktime-domain-cases.json.
+func TestLocktimeDomainD26(t *testing.T) {
+	corpus := continuationCorpus(t, "locktime-domain-cases.json")
+	if len(corpus["refuse"]) < 10 || len(corpus["accept"]) < 10 {
+		t.Fatalf("corpus too small: %d refuse, %d accept", len(corpus["refuse"]), len(corpus["accept"]))
+	}
+	refuseAndAccept(t, corpus["refuse"], corpus["accept"])
+}

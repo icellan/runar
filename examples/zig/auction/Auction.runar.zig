@@ -59,6 +59,9 @@ pub const Auction = struct {
     pub fn close(self: *const Auction, ctx: runar.StatefulContext, sig: runar.Sig) void {
         runar.assert(runar.checkSig(sig, self.auctioneer));
         runar.assert(runar.extractLocktime(ctx.txPreimage) >= self.deadline);
+        // ...and that the locktime is a block height: consensus reads an nLockTime of
+        // 500000000 or more as a Unix timestamp, which passes the height gate above at once.
+        runar.assert(runar.extractLocktime(ctx.txPreimage) < 500000000);
         // ...and that consensus actually enforces that nLockTime. A transaction
         // whose inputs are all final (nSequence 0xffffffff) is mineable at any height
         // with nLockTime ignored, so without this the assert above is script-only

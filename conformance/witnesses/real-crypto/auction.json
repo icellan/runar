@@ -1,7 +1,7 @@
 {
   "fixture": "auction",
   "kind": "stateful",
-  "note": "Auction: bid() verifies a real checkSig and reads NO preimage time field (W7 — nLockTime is a spender-chosen NOT-BEFORE and cannot bound the chain from above). close() verifies the auctioneer's checkSig plus extractLocktime(preimage) >= deadline AND extractSequence(preimage) !== 0xffffffff. The call tx nLockTime and nSequence are threaded via CallOptions, so both on-chain bindings are real. Real checkPreimage continuation. N-045: highestBidder (PubKey) is now width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY) before the continuation commit. bid() copies the bidder argument into it, but checkSig(sig, bidder) already refuses a wrong-width key, so the WideHash attack is not a separate near-miss here; the accepted bids re-prove the honest path through the new check.",
+  "note": "Auction: bid() verifies a real checkSig and reads NO preimage time field (W7 — nLockTime is a spender-chosen NOT-BEFORE and cannot bound the chain from above). close() verifies the auctioneer's checkSig plus extractLocktime(preimage) >= deadline AND extractLocktime(preimage) < 500000000 (D26: the locktime must be a block height, not a Unix timestamp) AND extractSequence(preimage) !== 0xffffffff. The call tx nLockTime and nSequence are threaded via CallOptions, so both on-chain bindings are real. Real checkPreimage continuation. N-045: highestBidder (PubKey) is now width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY) before the continuation commit. bid() copies the bidder argument into it, but checkSig(sig, bidder) already refuses a wrong-width key, so the WideHash attack is not a separate near-miss here; the accepted bids re-prove the honest path through the new check.",
   "spends": [
     {
       "method": "close",
@@ -207,6 +207,55 @@
       }
     },
     {
+      "method": "close",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 500000000,
+      "sequence": 4294967293,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "D26 THEFT: nLockTime 500000000 >= deadline 1000 on a NON-FINAL tx, but consensus reads 500000000 as a Unix timestamp (1985), long past, so the node would mine this at height 1 and the auctioneer closes before anyone can bid. The extractLocktime(preimage) < 500000000 domain pin must refuse it."
+    },
+    {
+      "method": "close",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 499999999,
+      "sequence": 4294967293,
+      "expect": "accept",
+      "note": "D26 DISCRIMINATOR: identical spend at nLockTime 499999999, the largest block height. Accepted, so the reject above is the domain pin specifically and not a fee/size/binding difference.",
+      "expectedState": {
+        "highestBidder": {
+          "$pubkey": "alice"
+        },
+        "highestBid": "1n"
+      }
+    },
+    {
       "method": "bid",
       "args": [
         null,
@@ -240,6 +289,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "0c0e05fe56bc7b32a6be30209446974ac870d1e84c1ead49f18fe87204db5533"
+    "expected-script.hex": "ce56a789b598151f878a1528ca1f125265ed7ebf5cbb6c10af2dd1fbf399c215",
+    "expected-ir.json": "765f01d03b25551646afe31d01a618ebc607dbe7c0e52c1c762ba52e5bd4b5f1"
   }
 }

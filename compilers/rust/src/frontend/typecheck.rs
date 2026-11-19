@@ -970,13 +970,31 @@ terminal (no state mutation)",
                 ));
             }
             // D18: in a method that declares its own outputs, a path that
-            // writes state and reaches no addOutput drops its write (see
+            // writes state and reaches no addOutput drops its write; D27: a
+            // write after a path's last addOutput is dead on chain (see
             // continuation_rules.rs).
-            if method.visibility == Visibility::Public
-                && super::continuation_rules::drops_continuation(self.contract, method, &effects)
-            {
-                self.add_error(super::continuation_rules::dropped_continuation_message(&method.name));
+            if method.visibility == Visibility::Public {
+                use super::continuation_rules::{
+                    continuation_verdict, dead_state_write_message, dropped_continuation_message, ContinuationVerdict,
+                };
+                match continuation_verdict(self.contract, method, &effects) {
+                    Some(ContinuationVerdict::Dropped) => self.add_error(dropped_continuation_message(&method.name)),
+                    Some(ContinuationVerdict::DeadWrite) => self.add_error(dead_state_write_message(&method.name)),
+                    None => {}
+                }
             }
+        }
+
+        // D26: a lower-bound locktime gate needs an asserted domain pin on its
+        // path (locktime_domain.rs), in stateless and stateful contracts alike.
+        // It sits here, beside D18 / D27, so a contract's other typecheck
+        // errors (D14's unchecked-preimage extractor among them) are still
+        // reported with it.
+        if method.visibility == Visibility::Public
+            && super::locktime_domain::contract_reads_locktime(self.contract)
+            && super::locktime_domain::has_unpinned_locktime_gate(self.contract, method)
+        {
+            self.add_error(super::locktime_domain::locktime_domain_message(&method.name));
         }
     }
 

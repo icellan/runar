@@ -28,6 +28,13 @@ import { isCiEnv } from '../env.js';
  * in a method declaring any add_output / add_raw_output, every path reaching an
  * update_prop must reach an add_output.
  *
+ * D27 (`refuse_after_last`): a path whose last add_output is followed by an
+ * update_prop is refused with D18's sibling text (the write is dead on chain).
+ *
+ * D26 (locktime-domain-cases.json): a lower-bound bin_op on an extractLocktime
+ * call (through `@ref:` aliases) on a path with no asserted domain pin is
+ * refused, for stateless and stateful programs alike.
+ *
  * Does not prove: the source path (gk-frontend-parity.test.ts), or that the
  * accepted shapes are spendable (packages/runar-sdk d18-dropped-continuation-spend).
  */
@@ -35,6 +42,11 @@ import { isCiEnv } from '../env.js';
 type Ir = Record<string, unknown>;
 interface Case { name: string; file: string; src: string; error?: string }
 const corpus = JSON.parse(readFileSync(join(__dirname, 'dropped-continuation-cases.json'), 'utf8')) as {
+  refuse: Case[];
+  refuse_after_last: Case[];
+  accept: Case[];
+};
+const ltCorpus = JSON.parse(readFileSync(join(__dirname, 'locktime-domain-cases.json'), 'utf8')) as {
   refuse: Case[];
   accept: Case[];
 };
@@ -131,7 +143,9 @@ function writeOnRawBranchIr(): Ir {
 }
 
 const REFUSE = [
-  ...corpus.refuse.filter(lowerable).map((c) => ({ name: c.name, ir: loweredUnchecked(c.src, c.file), error: c.error! })),
+  ...[...corpus.refuse, ...corpus.refuse_after_last]
+    .filter(lowerable)
+    .map((c) => ({ name: c.name, ir: loweredUnchecked(c.src, c.file), error: c.error! })),
   {
     name: 'ir-write-on-raw-branch-sibling-add-output',
     ir: writeOnRawBranchIr(),
@@ -139,7 +153,52 @@ const REFUSE = [
   },
 ];
 
-describe('D18: --ir refuses a state write with no state continuation (all 7 tiers)', () => {
+/** D26: the frontend's own ANF of each locktime accept case, and the unchecked ANF of each refuse case. */
+const LT_ACCEPT = ltCorpus.accept.map((c) => ({ name: c.name, ir: irOf(c.src, c.file) }));
+const LT_REFUSE = ltCorpus.refuse.map((c) => ({ name: c.name, ir: loweredUnchecked(c.src, c.file), error: c.error! }));
+
+describe('D26: --ir refuses a locktime lower-bound gate with no domain pin on its path (all 7 tiers)', () => {
+  it('the corpus is non-trivial', () => {
+    expect(LT_REFUSE.length).toBeGreaterThanOrEqual(10);
+    expect(LT_ACCEPT.length).toBeGreaterThanOrEqual(10);
+    for (const c of LT_REFUSE) expect(JSON.stringify(c.ir), c.name).toContain('"extractLocktime"');
+  });
+
+  for (const a of LT_ACCEPT) {
+    it(`all tiers compile ${a.name} to the same bytes as TS`, () => {
+      const hex = tsHex(a.ir);
+      const input = write(`lt-accept-${a.name}`, a.ir);
+      for (const tier of available) {
+        expect(compileHex(tier, input), `${tier.id} on ${a.name}`).toBe(hex);
+      }
+    });
+  }
+
+  for (const c of LT_REFUSE) {
+    it(`ts refuses ${c.name} with the shared diagnostic`, () => {
+      let message = '<accepted>';
+      try {
+        tsHex(c.ir);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain(c.error);
+    });
+  }
+
+  for (const tier of available) {
+    for (const c of LT_REFUSE) {
+      it(`${tier.id} refuses ${c.name} with the shared diagnostic, without crashing`, () => {
+        const { status, out, diag } = runIr(tier, write(`lt-refuse-${c.name}`, c.ir));
+        expect(status, `${tier.id} accepted ${c.name} (emitted "${out.slice(0, 80)}")`).not.toBe(0);
+        expect(diag).not.toMatch(/panic|Traceback|Exception in thread|stack backtrace/);
+        expect(diag).toContain(c.error);
+      });
+    }
+  }
+});
+
+describe('D18 / D27: --ir refuses a state write no state continuation carries (all 7 tiers)', () => {
   it('the matrix names all IR-capable tiers', () => {
     expect(TIERS.map((t) => t.id).sort()).toEqual([...IR_TIER_IDS].sort());
   });

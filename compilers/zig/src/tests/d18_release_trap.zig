@@ -175,3 +175,142 @@ test "D18: the IR loader refuses the issue #180 Lock ANF" {
         return error.TestWrongDiagnostic;
     }
 }
+
+// ---------------------------------------------------------------------------
+// D27 (dead state write) and D26 (locktime domain). Ports of
+// packages/runar-compiler/src/passes/continuation-rules.ts (D27) and
+// locktime-domain.ts (D26). Corpora: dropped-continuation-cases.json
+// (`refuse_after_last`) and locktime-domain-cases.json.
+// ---------------------------------------------------------------------------
+
+fn corpusText(a: std.mem.Allocator, file: []const u8, key: []const u8, case_name: []const u8) ![]const u8 {
+    const c = try corpus(a, file);
+    for (c.object.get(key).?.array.items) |case| {
+        if (std.mem.eql(u8, str(case, "name"), case_name)) return str(case, "error");
+    }
+    return error.TestCaseMissing;
+}
+
+fn irRefusedWith(fixture: []const u8, want: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ir = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, fixture, a, .limited(1 << 20));
+    // Clear the channel first: a stale diagnostic from an earlier test must not pass for this one.
+    required_fields.setDiag("", .{});
+    if (json.parseANFProgram(a, ir)) |_| {
+        return error.TestUnexpectedlyAccepted;
+    } else |err| {
+        if (err != error.LocktimeDomain and err != error.DroppedContinuation) {
+            std.debug.print("{s}: refused for the wrong reason: {s}\n", .{ fixture, @errorName(err) });
+            return error.TestWrongDiagnostic;
+        }
+    }
+    const diag = required_fields.lastDiagnostic() orelse "<none>";
+    if (std.mem.indexOf(u8, diag, want) == null) {
+        std.debug.print("diag: {s}\n", .{diag});
+        return error.TestWrongDiagnostic;
+    }
+}
+
+test "D27: every refuse_after_last shape is refused with the shared text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try corpus(a, "dropped-continuation-cases.json");
+    const cases = c.object.get("refuse_after_last").?.array.items;
+    try std.testing.expect(cases.len > 0);
+    var failed: usize = 0;
+    for (cases) |case| {
+        const fe = try frontend(a, str(case, "src"), str(case, "file"));
+        if (!contains(fe.errors, str(case, "error"))) {
+            std.debug.print("{s}: not refused\n", .{str(case, "name")});
+            failed += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "D27: the IR loader refuses a write after the last add_output" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const want = try corpusText(arena.allocator(), "dropped-continuation-cases.json", "refuse_after_last", "write-after-add-output");
+    try irRefusedWith("src/tests/d27_write_after_add_output.ir.json", want);
+}
+
+test "D26: every locktime refuse shape is refused with the shared text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try corpus(a, "locktime-domain-cases.json");
+    const cases = c.object.get("refuse").?.array.items;
+    try std.testing.expect(cases.len > 0);
+    var failed: usize = 0;
+    for (cases) |case| {
+        const fe = try frontend(a, str(case, "src"), str(case, "file"));
+        if (!contains(fe.errors, str(case, "error"))) {
+            std.debug.print("{s}: not refused\n", .{str(case, "name")});
+            failed += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "D26: every locktime accept shape compiles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try corpus(a, "locktime-domain-cases.json");
+    for (c.object.get("accept").?.array.items) |case| {
+        const fe = try frontend(a, str(case, "src"), str(case, "file"));
+        if (fe.errors.len != 0) {
+            std.debug.print("{s}: refused: {s}\n", .{ str(case, "name"), fe.errors[0] });
+            return error.TestUnexpectedRefusal;
+        }
+        try compiles(str(case, "src"), str(case, "file"));
+    }
+}
+
+test "D26: the IR loader refuses an unpinned height gate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const want = try corpusText(arena.allocator(), "locktime-domain-cases.json", "refuse", "height-gate-literal");
+    try irRefusedWith("src/tests/d26_height_gate.ir.json", want);
+}
+
+test "D26: the IR loader refuses a gate on a helper parameter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const want = try corpusText(arena.allocator(), "locktime-domain-cases.json", "refuse", "gate-on-helper-param");
+    try irRefusedWith("src/tests/d26_gate_on_helper_param.ir.json", want);
+}
+
+test "D26: the IR loader accepts a helper-parameter gate the caller pins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ir = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/tests/d26_helper_param_pinned_by_caller.ir.json", a, .limited(1 << 20));
+    _ = try json.parseANFProgram(a, ir);
+}
+
+// N534: D26 must not mask the D14 extractor refusal typecheck reports.
+test "D26: N534 still carries the D14 diagnostic beside D26" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "../../conformance/negatives/N534-ts-extractor-bytestring-property.runar.ts", a, .limited(1 << 20));
+    var diag: compiler_api.Diagnostics = .{};
+    if (compiler_api.runPipeline(a, src, "N534.runar.ts", .{}, &diag)) |_| {
+        return error.TestUnexpectedlyAccepted;
+    } else |_| {}
+    try std.testing.expect(contains(diag.errors.items, "extractLocktime() needs a checked SigHashPreimage"));
+    try std.testing.expect(contains(diag.errors.items, "compares extractLocktime against a lower bound without pinning the locktime domain"));
+}
+
+// SPEC UPDATE 3: only `>= 0` is vacuous; an IR literal -1 bound is a gate.
+test "D26: the IR loader refuses a negative lower bound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const want = try corpusText(arena.allocator(), "locktime-domain-cases.json", "refuse", "height-gate-literal");
+    try irRefusedWith("src/tests/d26_negative_bound.ir.json", want);
+}

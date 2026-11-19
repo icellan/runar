@@ -15,6 +15,11 @@ auto-injected continuation for the whole method, and only addOutput carries
 state, so a path that writes state and reaches no addOutput drops its write and
 the contract's value leaves with the spend. A path that writes nothing is
 terminal by design and is accepted.
+
+D27 (error, same family and placement), PER PATH: in such a method a state
+write that no later addOutput on its path observes (a write after the path's
+last addOutput) is dead on chain: the script commits only the values its
+addOutput calls carry. D18 wins when a method has both.
 """
 
 from __future__ import annotations
@@ -61,18 +66,45 @@ def dropped_continuation_message(method: str) -> str:
     )
 
 
-# Path-state bits: state written / addOutput reached. A set of these (at most
-# four) flows through a method body.
+def dead_state_write_message(method: str) -> str:
+    """D27: the shared error text (D18's sibling, same family)."""
+    return (
+        f"method '{method}' writes contract state after the last addOutput() on a path: a method that declares its own "
+        "outputs (addOutput/addRawOutput) commits only the values passed to its addOutput() calls, so on that path the "
+        "write never reaches the chain and a caller that tracks the final state builds a continuation the script "
+        "refuses. Pass the new value to addOutput(...) instead, or remove the write"
+    )
+
+
+# Path-state bits: state written / addOutput reached / state written since the
+# path's last addOutput (D27; an addOutput clears it). A set of these (at most
+# eight) flows through a method body.
 PATH_W = 1
 PATH_A = 2
+PATH_D = 4
 
 
 def or_all(states: frozenset[int], bits: int) -> frozenset[int]:
     return frozenset(x | bits for x in states)
 
 
+def write(states: frozenset[int]) -> frozenset[int]:
+    return or_all(states, PATH_W | PATH_D)
+
+
+def add_output(states: frozenset[int]) -> frozenset[int]:
+    return frozenset((x | PATH_A) & ~PATH_D for x in states)
+
+
+def _then(x: int, y: int) -> int:
+    """Run a callee's exit state y after the caller's x: an addOutput in the
+    callee clears the caller's pending write."""
+    pending = (y & PATH_D) if y & PATH_A else ((x | y) & PATH_D)
+    return ((x | y) & ~PATH_D) | pending
+
+
 def compose(states: frozenset[int], exits: frozenset[int]) -> frozenset[int]:
-    return frozenset(x | y for x in states for y in exits)
+    return frozenset(_then(x, y) for x in states for y in exits)
 
 
 def paths_dropped(states) -> bool:
@@ -80,18 +112,33 @@ def paths_dropped(states) -> bool:
     return any(x & PATH_W and not x & PATH_A for x in states)
 
 
+def paths_dead_write(states) -> bool:
+    """D27: some path reached an addOutput and wrote state after its last one."""
+    return any(x & PATH_A and x & PATH_D for x in states)
+
+
+def verdict(states) -> str | None:
+    """D18 / D27 verdict of a method's exit states: D18 wins when both apply."""
+    if paths_dropped(states):
+        return "dropped"
+    if paths_dead_write(states):
+        return "dead-write"
+    return None
+
+
 _FRESH = frozenset({0})
 _NONE: frozenset[int] = frozenset()
 
 
-def drops_continuation(contract, method, effects: MethodEffects) -> bool:
-    """D18 (source path), per path: the method declares a state output
-    somewhere (so it gets no auto-continuation) and some path through it writes
-    state without reaching an addOutput. Mirrors dropsContinuation /
+def continuation_verdict(contract, method, effects: MethodEffects) -> str | None:
+    """D18 + D27 (source path), per path, in a method that declares a state
+    output somewhere (so it gets no auto-continuation): 'dropped' when some
+    path writes state and reaches no addOutput, else 'dead-write' when some
+    path writes state after its last addOutput. Mirrors continuationVerdict /
     SourcePaths in continuation-rules.ts."""
     if not effects.has_state_output:
-        return False
-    return paths_dropped(_SourcePaths(contract).exits(method.body))
+        return None
+    return verdict(_SourcePaths(contract).exits(method.body))
 
 
 def _callee_name(callee) -> tuple[str | None, bool]:
@@ -223,7 +270,7 @@ class _SourcePaths:
             s = self._expr(st.target, states)
             s = self._expr(st.value, s)
             if self._writes_mutable(st.target):
-                s = or_all(s, PATH_W)
+                s = write(s)
             return s, _NONE
         if isinstance(st, ExpressionStmt):
             return self._expr(st.expr, states), _NONE
@@ -256,7 +303,7 @@ class _SourcePaths:
             return states
         if isinstance(e, (IncrementExpr, DecrementExpr)):
             s = self._expr(e.operand, states)
-            return or_all(s, PATH_W) if self._writes_mutable(e.operand) else s
+            return write(s) if self._writes_mutable(e.operand) else s
         if isinstance(e, CallExpr):
             s = states
             if not isinstance(e.callee, Identifier):
@@ -265,7 +312,7 @@ class _SourcePaths:
                 s = self._expr(a, s)
             name, member = _callee_name(e.callee)
             if member and name == "addOutput":
-                return or_all(s, PATH_A)
+                return add_output(s)
             if name is not None and name in self.privates:
                 # A helper not yet computed is on a cycle: {0}.
                 return compose(s, self.helper_exits.get(name, _FRESH))

@@ -45,8 +45,14 @@ from runar_compiler.frontend.side_effect_summary import (
     compute_side_effect_summary,
 )
 from runar_compiler.frontend.continuation_rules import (
+    continuation_verdict,
+    dead_state_write_message,
     dropped_continuation_message,
-    drops_continuation,
+)
+from runar_compiler.frontend.locktime_domain import (
+    contract_reads_locktime,
+    has_unpinned_locktime_gate,
+    locktime_domain_message,
 )
 
 
@@ -1158,8 +1164,28 @@ class _TypeChecker:
             # D18: in a method that declares its own outputs, a path that
             # writes state and reaches no addOutput drops its write (see
             # continuation_rules.py).
-            if method.visibility == "public" and drops_continuation(self.contract, method, effects):
+            continuation = (
+                continuation_verdict(self.contract, method, effects)
+                if method.visibility == "public"
+                else None
+            )
+            if continuation == "dropped":
                 self._add_error(dropped_continuation_message(method.name))
+            # D27: a write after a path's last addOutput is dead on chain (see
+            # continuation_rules.py).
+            if continuation == "dead-write":
+                self._add_error(dead_state_write_message(method.name))
+
+        # D26: a lower-bound locktime gate needs an asserted domain pin on its
+        # path (locktime_domain.py), in stateless and stateful contracts alike.
+        # Beside D18 / D27, so the contract's other typecheck errors (D14's
+        # unchecked-preimage extractor among them) are still reported with it.
+        if (
+            method.visibility == "public"
+            and contract_reads_locktime(self.contract)
+            and has_unpinned_locktime_gate(self.contract, method)
+        ):
+            self._add_error(locktime_domain_message(method.name))
 
     def _check_statements(self, stmts: list[Statement], env: _TypeEnv) -> None:
         for stmt in stmts:

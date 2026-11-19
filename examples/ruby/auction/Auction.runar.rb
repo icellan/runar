@@ -52,6 +52,9 @@ class Auction < Runar::StatefulSmartContract
   def close(sig)
     assert check_sig(sig, @auctioneer)
     assert extract_locktime(@tx_preimage) >= @deadline
+    # ...and that the locktime is a block height: consensus reads an nLockTime of
+    # 500000000 or more as a Unix timestamp, which passes the height gate above at once.
+    assert extract_locktime(@tx_preimage) < 500000000
     # ...and that consensus actually enforces that nLockTime. A transaction
     # whose inputs are all final (nSequence 0xffffffff) is mineable at any height
     # with nLockTime ignored, so without this the assert above is script-only

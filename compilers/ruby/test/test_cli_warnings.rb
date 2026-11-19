@@ -139,6 +139,7 @@ class TestCliWarnings < Minitest::Test
         }
         public unlock() {
             assert(extractLocktime(this.txPreimage) >= this.deadline);
+            assert(extractLocktime(this.txPreimage) < 500000000n);
             this.count++;
         }
     }

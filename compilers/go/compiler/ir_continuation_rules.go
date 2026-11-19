@@ -28,19 +28,23 @@ func checkIRNoDroppedContinuation(program *ir.ANFProgram) error {
 		if !m.IsPublic || m.Name == "constructor" {
 			continue
 		}
-		if irDropsContinuation(m, privates) {
+		switch irContinuationVerdict(m, privates) {
+		case frontend.VerdictDropped:
 			return errors.New(frontend.DroppedContinuationMessage(m.Name))
+		case frontend.VerdictDeadWrite:
+			return errors.New(frontend.DeadStateWriteMessage(m.Name))
 		}
 	}
 	return nil
 }
 
-// irDropsContinuation is the per-path rule on ANF: update_prop = state write,
+// irContinuationVerdict is the per-path D18 / D27 rule on ANF (the verdict as
+// frontend.PathVerdict gives it): update_prop = state write,
 // add_output = addOutput, add_raw_output / add_output = a declared output
 // (suppresses the auto-continuation). `if` unions its arms, a loop body unions
 // with skipping it, a method_call to a private method composes with that
 // method's exits.
-func irDropsContinuation(method *ir.ANFMethod, privates map[string]*ir.ANFMethod) bool {
+func irContinuationVerdict(method *ir.ANFMethod, privates map[string]*ir.ANFMethod) string {
 	var declares func(bindings []ir.ANFBinding, seen map[string]bool) bool
 	declares = func(bindings []ir.ANFBinding, seen map[string]bool) bool {
 		for i := range bindings {
@@ -63,7 +67,7 @@ func irDropsContinuation(method *ir.ANFMethod, privates map[string]*ir.ANFMethod
 		return false
 	}
 	if !declares(method.Body, map[string]bool{}) {
-		return false
+		return ""
 	}
 
 	exitsOf := map[string]map[int]bool{}
@@ -92,9 +96,13 @@ func irDropsContinuation(method *ir.ANFMethod, privates map[string]*ir.ANFMethod
 			v := &bindings[i].Value
 			switch {
 			case v.Kind == "update_prop":
-				s = orAll(s, irPathW)
+				s = orAll(s, irPathW|irPathD)
 			case v.Kind == "add_output":
-				s = orAll(s, irPathA)
+				out := map[int]bool{}
+				for x := range s {
+					out[(x|irPathA)&^irPathD] = true
+				}
+				s = out
 			case v.Kind == "method_call":
 				t, ok := privates[v.Method]
 				if !ok {
@@ -114,7 +122,7 @@ func irDropsContinuation(method *ir.ANFMethod, privates map[string]*ir.ANFMethod
 				out := map[int]bool{}
 				for x := range s {
 					for y := range ex {
-						out[x|y] = true
+						out[frontend.PathThen(x, y)] = true
 					}
 				}
 				s = out
@@ -133,15 +141,13 @@ func irDropsContinuation(method *ir.ANFMethod, privates map[string]*ir.ANFMethod
 		}
 		return s
 	}
-	for x := range run(method.Body, map[int]bool{0: true}) {
-		if x&irPathW != 0 && x&irPathA == 0 {
-			return true
-		}
-	}
-	return false
+	return frontend.PathVerdict(run(method.Body, map[int]bool{0: true}))
 }
 
+// Must match frontend's pathW / pathA / pathD (frontend.PathThen and
+// frontend.PathVerdict read these bits).
 const (
 	irPathW = 1
 	irPathA = 2
+	irPathD = 4
 )

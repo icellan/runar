@@ -38,6 +38,7 @@ class TimeLock extends StatefulSmartContract {
         this.deadline = deadline;
     }
     public unlock() {
+        assert(extractLocktime(this.txPreimage) < 500000000n);
         assert(extractLocktime(this.txPreimage) >= this.deadline);
         this.count++;
     }

@@ -1039,6 +1039,9 @@ fn compile_program_checked(program: &ir::ANFProgram, opts: &CompileOptions, prei
             ir::continuation_rules::assert_no_dropped_continuation(program)?;
         }
         ir::preimage_rules::assert_preimage_rules(program)?;
+        // D26: IR input skips typecheck's locktime-domain rule (stateless and
+        // stateful programs alike); see frontend/locktime_domain.rs.
+        frontend::locktime_domain::assert_ir_locktime_domain(program)?;
     }
 
     let mut program = program.clone();
