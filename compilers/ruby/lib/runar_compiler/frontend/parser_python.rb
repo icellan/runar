@@ -1048,12 +1048,15 @@ module RunarCompiler
         expect(TOK_RPAREN)
 
         # Optional return type: -> Type
+        declared_ret = nil
         if match_tok(TOK_ARROW)
-          # The AST keeps no return type; N-331 refuses an unknown name. `None`
-          # is Python's spelling of "returns nothing".
+          # N-331 refuses an unknown name. `None` is Python's spelling of
+          # "returns nothing". D12 FE-F4: the declared type is kept on the
+          # method for the type checker.
           ret_type = parse_type
           unless ret_type.is_a?(CustomType) && ret_type.name == "None"
             Frontend.reject_unknown_return_type(@errors, ret_type, raw_name, location, decorators.include?("public"))
+            declared_ret = Frontend.declared_return_type(ret_type)
           end
         end
 
@@ -1095,7 +1098,8 @@ module RunarCompiler
           body: body,
           visibility: is_public ? "public" : "private",
           source_location: location,
-          sighash_type: sighash && sighash[:value]
+          sighash_type: sighash && sighash[:value],
+          return_type: declared_ret
         )
       end
 

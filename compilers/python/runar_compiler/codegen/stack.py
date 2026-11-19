@@ -4930,8 +4930,14 @@ class _LoweringContext:
                 ],
             ))
 
-        # Drop empty remainder
-        self.emit_op(StackOp(op="drop"))
+        # Stack: [reversed_result, remainder]. D12 BM-F3: the remainder is
+        # empty only when the input fit in the 520 unrolled iterations. It used
+        # to be dropped unchecked, so a longer input "reversed" to the reverse
+        # of its first 520 bytes and the rest was silently discarded. Fail
+        # closed instead: the script aborts unless the remainder is empty
+        # (OP_0 OP_EQUALVERIFY consumes it).
+        self.emit_op(StackOp(op="push", value=big_int_push(0)))
+        self.emit_op(StackOp(op="opcode", code="OP_EQUALVERIFY"))
 
         self.sm.push(binding_name)
         self._track_depth()

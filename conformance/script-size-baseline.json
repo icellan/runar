@@ -21,7 +21,7 @@
     "bounded-loop": 42,
     "branch-merged-locals": 713,
     "branched-readonly-len": 885,
-    "byte-builtins": 5773,
+    "byte-builtins": 5774,
     "compiler-directives": 23,
     "cond-write-multi-field": 707,
     "conditional-data-output-stateful": 793,

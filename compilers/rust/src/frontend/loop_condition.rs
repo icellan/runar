@@ -33,7 +33,7 @@ pub fn normalize_loop_condition(cond: &Expression, iter: &str) -> Expression {
         let is_iter = |e: &Expression| matches!(e, Expression::Identifier { name, .. } if name == iter);
         if let Some(m) = mirrored(op) {
             if is_iter(right) && !is_iter(left) {
-                return Expression::BinaryExpr { op: m, left: right.clone(), right: left.clone(), source_location: None };
+                return Expression::BinaryExpr { operand_type: Default::default(), op: m, left: right.clone(), right: left.clone(), source_location: None };
             }
         }
     }

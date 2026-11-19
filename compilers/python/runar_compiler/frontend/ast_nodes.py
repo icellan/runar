@@ -125,6 +125,12 @@ class BinaryExpr:
     # typecheck falls back to the leftmost leaf (see typecheck._expr_loc). Not part of
     # equality.
     source_location: SourceLocation | None = field(default=None, compare=False)
+    # D12 FE-F1: the operand family ("bytes" | "numeric") the TYPE CHECKER
+    # resolved for ``+ === !== & | ^``. Written by typecheck (and by
+    # expand_fixed_arrays for the nodes it synthesises); ANF lowering reads it
+    # and refuses a typed operator that carries none. Never set by a parser.
+    # Not part of equality.
+    operand_type: str | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -135,6 +141,8 @@ class UnaryExpr:
     operand: Expression
     # The operator token (N-472); every surface parser sets it. Not part of equality.
     source_location: SourceLocation | None = field(default=None, compare=False)
+    # D12 FE-F1: see BinaryExpr.operand_type (set for ``~`` only).
+    operand_type: str | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -351,6 +359,11 @@ class MethodNode:
     # method. ``None`` = the default lowS; ``"all"`` selects the compact
     # non-low-S blob, spendable only when the spending tx has nVersion > 1.
     binding_variant: str | None = None
+    # D12 FE-F4: the return type the source declares, when its surface syntax
+    # can spell one (Ruby cannot; TypeScript may omit it). The type checker
+    # enforces it on every ``return`` and gives it to every call. ``None`` =
+    # inferred from the body by the type checker, with the full environment.
+    return_type: TypeNode | None = None
     source_location: SourceLocation = field(default_factory=SourceLocation)
 
 

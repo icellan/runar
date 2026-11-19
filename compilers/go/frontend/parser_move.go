@@ -1059,11 +1059,14 @@ func (p *moveParser) parseMoveFunction(attrs []moveAttribute) (MethodNode, bool)
 
 	// Optional return type: : Type
 	hasReturnType := false
+	var returnType TypeNode
 	if p.match(moveTokColon) {
-		// The AST keeps no return type; N-331 refuses an unknown name.
-		if d := UnknownReturnTypeDiagnostic(p.parseMoveTypeNode(), name, loc, visibility == "public"); d != nil {
+		// N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+		rt := p.parseMoveTypeNode()
+		if d := UnknownReturnTypeDiagnostic(rt, name, loc, visibility == "public"); d != nil {
 			p.errors = append(p.errors, *d)
 		}
+		returnType = DeclaredReturnType(rt)
 		hasReturnType = true
 	}
 
@@ -1109,6 +1112,7 @@ func (p *moveParser) parseMoveFunction(attrs []moveAttribute) (MethodNode, bool)
 		Body:           body,
 		Visibility:     visibility,
 		SighashType:    sighashType,
+		ReturnType:     returnType,
 		SourceLocation: loc,
 	}, hasMutRecv
 }

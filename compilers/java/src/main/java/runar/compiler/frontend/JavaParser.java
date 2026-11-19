@@ -491,20 +491,30 @@ public final class JavaParser {
             params.add(new ParamNode(p.getName().toString(), convertType(p.getType(), filename)));
         }
 
-        // The AST keeps no return type; N-331 refuses an unknown name. A
-        // primitive return type (`void`, `boolean`) is not a name to check.
-        // N-332: a public method may declare no return type but `void`.
+        // N-331 refuses an unknown name. A primitive return type (`void`,
+        // `boolean`) is not a name to check. N-332: a public method may
+        // declare no return type but `void`. D12 FE-F4: the declared type is
+        // kept on the method for the type checker.
+        TypeNode declaredReturn = null;
         if (!isConstructor && m.getReturnType() != null) {
             if (m.getReturnType() instanceof PrimitiveTypeTree ptt) {
                 if (vis == Visibility.PUBLIC && ptt.getPrimitiveTypeKind() != javax.lang.model.type.TypeKind.VOID) {
                     throw new ParseException(LexDiag.publicReturnType(m.getName().toString()));
                 }
+                if (ptt.getPrimitiveTypeKind() == javax.lang.model.type.TypeKind.BOOLEAN) {
+                    declaredReturn = new PrimitiveType(PrimitiveTypeName.BOOLEAN);
+                } else if (ptt.getPrimitiveTypeKind() == javax.lang.model.type.TypeKind.VOID) {
+                    // This tier carries `void` as a custom name (no VOID primitive).
+                    declaredReturn = new runar.compiler.ir.ast.CustomType("void");
+                }
             } else {
+                TypeNode returnType = convertType(m.getReturnType(), filename);
                 String unknownReturn = LexDiag.unknownReturnType(
-                    convertType(m.getReturnType(), filename), m.getName().toString(), vis == Visibility.PUBLIC);
+                    returnType, m.getName().toString(), vis == Visibility.PUBLIC);
                 if (unknownReturn != null) {
                     throw new ParseException(unknownReturn);
                 }
+                declaredReturn = MethodNode.declaredReturnType(returnType);
             }
         }
 
@@ -520,7 +530,7 @@ public final class JavaParser {
             throw new ParseException(sighash.error());
         }
         return new MethodNode(name, params, body, vis, locationOf(m, cu, filename),
-            sighash == null ? null : sighash.value());
+            sighash == null ? null : sighash.value(), null, declaredReturn);
     }
 
     private static MethodNode syntheticConstructor(List<PropertyNode> properties, String filename) {

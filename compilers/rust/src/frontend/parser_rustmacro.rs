@@ -9,7 +9,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, static_method_message, declared_return_type, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
@@ -565,6 +565,7 @@ impl RustDslParser {
         }
 
         let constructor = MethodNode {
+            return_type: None,
             name: "constructor".to_string(),
             params: uninit_props.iter().map(|p| ParamNode {
                 name: p.name.clone(),
@@ -826,13 +827,15 @@ impl RustDslParser {
         }
 
         // Optional return type
+        let mut return_type = None;
         if matches!(self.current().typ, TokenType::Arrow) {
             self.advance_clone();
-            // The AST keeps no return type; N-331 refuses an unknown name.
+            // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
             let ret_type = self.parse_rust_type();
             if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name, visibility == Visibility::Public) {
                 self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
             }
+            return_type = declared_return_type(&ret_type);
         }
 
         self.expect(&TokenType::LBrace);
@@ -844,7 +847,7 @@ impl RustDslParser {
         }
         self.expect(&TokenType::RBrace);
 
-        MethodNode { name, params, body, visibility, sighash_type: None, binding_variant: None, source_location: loc }
+        MethodNode { return_type, name, params, body, visibility, sighash_type: None, binding_variant: None, source_location: loc }
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
@@ -884,6 +887,7 @@ impl RustDslParser {
                 expression: Expression::CallExpr {
                     callee: Box::new(Expression::Identifier { name: "assert".to_string(), source_location: None }),
                     args: vec![Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1045,6 +1049,7 @@ impl RustDslParser {
                 source_location: loc.clone(),
             };
             let condition = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: if descending { BinaryOp::Ge } else { BinaryOp::Lt },
                 left: Box::new(Expression::Identifier { name: var_name.clone(), source_location: None }),
                 right: Box::new(end_expr),
@@ -1103,7 +1108,7 @@ impl RustDslParser {
             let target = self.convert_self_access(expr.clone());
             return Some(Statement::Assignment {
                 target: target.clone(),
-                value: Expression::BinaryExpr { op: BinaryOp::Add, left: Box::new(target), right: Box::new(rhs), source_location: None },
+                value: Expression::BinaryExpr { operand_type: Default::default(), op: BinaryOp::Add, left: Box::new(target), right: Box::new(rhs), source_location: None },
                 source_location: loc,
             });
         }
@@ -1114,7 +1119,7 @@ impl RustDslParser {
             let target = self.convert_self_access(expr.clone());
             return Some(Statement::Assignment {
                 target: target.clone(),
-                value: Expression::BinaryExpr { op: BinaryOp::Sub, left: Box::new(target), right: Box::new(rhs), source_location: None },
+                value: Expression::BinaryExpr { operand_type: Default::default(), op: BinaryOp::Sub, left: Box::new(target), right: Box::new(rhs), source_location: None },
                 source_location: loc,
             });
         }
@@ -1159,7 +1164,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op: BinaryOp::Or, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1172,7 +1177,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_bit_or();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::And, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op: BinaryOp::And, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1185,7 +1190,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_bit_xor();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1198,7 +1203,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_bit_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1211,7 +1216,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_equality();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1229,7 +1234,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_comparison();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1249,7 +1254,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_shift();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1267,7 +1272,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_add_sub();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1285,7 +1290,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_mul_div();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1304,7 +1309,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_unary();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
+            left = Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
@@ -1312,7 +1317,7 @@ impl RustDslParser {
     fn parse_unary(&mut self) -> Expression {
         let op_loc = self.loc();
         match self.current().typ {
-            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) } }
+            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { operand_type: Default::default(), op: UnaryOp::Not, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) } }
             TokenType::Minus => {
                 self.advance_clone();
                 // F-026: a signed-suffix minimum (`128i8`) is legal under this
@@ -1329,9 +1334,9 @@ impl RustDslParser {
                         self.tokens[k].typ = TokenType::Number(v);
                     }
                 }
-                Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) }
+                Expression::UnaryExpr { operand_type: Default::default(), op: UnaryOp::Neg, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) }
             }
-            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) } }
+            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { operand_type: Default::default(), op: UnaryOp::BitNot, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) } }
             TokenType::Amp => {
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Mut) { self.advance_clone(); }

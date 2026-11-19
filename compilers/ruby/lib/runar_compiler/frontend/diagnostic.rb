@@ -167,6 +167,14 @@ module RunarCompiler
 
     # N-331: append the unknown-return-type diagnostic to +errors+ when +type+
     # (the parsed return annotation) is not a Rúnar type.
+    # D12 FE-F4: the declared return type a method node carries, or nil when
+    # the declaration names no usable Rúnar type (an unknown name is refused by
+    # reject_unknown_return_type; the parser placeholder +unknown+ means "not
+    # given"). The TS reference's +declaredReturnType+.
+    def self.declared_return_type(type)
+      type.is_a?(CustomType) ? nil : type
+    end
+
     def self.reject_unknown_return_type(errors, type, method_name, loc, is_public = false)
       msg = unknown_return_type_message(type, method_name, is_public)
       errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc) if msg

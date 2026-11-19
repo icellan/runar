@@ -32,7 +32,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, declaredReturnType, invalidEscapeSequenceMessage, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { identifierCollisionMessage } from './snake-to-camel.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -947,13 +947,17 @@ class GoParser extends ParserCore<GoToken> {
     this.expect(')');
 
     // Optional return type
+    let returnType: TypeNode | undefined;
     if (this.current().type !== '{') {
       // The AST keeps no return type: could be runar.Bigint, bool, etc.
       // N-331 refuses an unknown name.
       // N-332: an exported method with a receiver is a public entry point.
       const isEntryPoint = hasReceiver && funcName.length > 0 &&
         funcName[0]! === funcName[0]!.toUpperCase() && funcName[0]! !== funcName[0]!.toLowerCase();
-      checkReturnType(this.parseGoType(), funcName, location, this.errors, isEntryPoint);
+      const rt = this.parseGoType();
+      checkReturnType(rt, funcName, location, this.errors, isEntryPoint);
+      // D12 FE-F4: kept on the method for the type checker.
+      returnType = declaredReturnType(rt);
     }
 
     // Body
@@ -991,6 +995,7 @@ class GoParser extends ParserCore<GoToken> {
         body,
         visibility,
         ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+        ...(returnType !== undefined ? { returnType } : {}),
         sourceLocation: location,
       },
       goName: funcName,

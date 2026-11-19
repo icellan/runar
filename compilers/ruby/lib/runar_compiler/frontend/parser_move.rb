@@ -891,10 +891,13 @@ module RunarCompiler
 
         # Optional return type
         has_return_type = false
+        declared_ret = nil
         if check(TOK_COLON)
           advance
-          # The AST keeps no return type; N-331 refuses an unknown name.
-          Frontend.reject_unknown_return_type(@errors, parse_move_type, name, location, visibility == "public")
+          # N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+          ret_type = parse_move_type
+          Frontend.reject_unknown_return_type(@errors, ret_type, name, location, visibility == "public")
+          declared_ret = Frontend.declared_return_type(ret_type)
           has_return_type = true
         end
 
@@ -946,7 +949,8 @@ module RunarCompiler
           body: body,
           visibility: visibility,
           source_location: location,
-          sighash_type: sighash && sighash[:value]
+          sighash_type: sighash && sighash[:value],
+          return_type: declared_ret
         )
         [method, has_mut_receiver]
       end

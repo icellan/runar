@@ -165,6 +165,20 @@ func UnknownReturnTypeDiagnostic(t TypeNode, methodName string, loc SourceLocati
 	return nil
 }
 
+// DeclaredReturnType is the declared return type a method node carries (D12
+// FE-F4), or nil when the declaration names no usable Rúnar type (an unknown
+// name is refused by UnknownReturnTypeDiagnostic; the "unknown" placeholder
+// means "not given").
+func DeclaredReturnType(t TypeNode) TypeNode {
+	if t == nil {
+		return nil
+	}
+	if _, ok := t.(CustomType); ok {
+		return nil
+	}
+	return t
+}
+
 // PublicReturnTypeMsg is N-332's refusal of a PUBLIC method that declares a
 // non-void return type (the TS reference's publicReturnTypeMessage).
 func PublicReturnTypeMsg(methodName string) string {

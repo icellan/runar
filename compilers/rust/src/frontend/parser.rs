@@ -22,7 +22,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, unknown_return_type_message, Diagnostic, OPTIONAL_CHAINING};
+use super::diagnostic::{lex_error, static_method_message, declared_return_type, unknown_return_type_message, Diagnostic, OPTIONAL_CHAINING};
 use super::int_literal::{invalid_integer_literal, parse_int_literal};
 use super::sighash_directive::lost_directive_message;
 
@@ -499,6 +499,7 @@ fn parse_constructor(
             };
 
             return MethodNode {
+                return_type: None,
                 name: "constructor".to_string(),
                 params,
                 body,
@@ -512,6 +513,7 @@ fn parse_constructor(
 
     errors.push(Diagnostic::error("Contract must have a constructor", None));
     MethodNode {
+        return_type: None,
         name: "constructor".to_string(),
         params: Vec::new(),
         body: Vec::new(),
@@ -596,12 +598,15 @@ fn parse_methods(
 
             let params = parse_method_params(&method.function.params, file, errors);
 
-            // N-331: the AST keeps no return type, so an unknown name is refused here.
+            // N-331: an unknown name is refused here. D12 FE-F4: the declared
+            // type is kept on the method so the type checker can enforce it.
+            let mut return_type = None;
             if let Some(ref ann) = method.function.return_type {
                 let ret = parse_type_node(&ann.type_ann, file, errors);
                 if let Some(msg) = unknown_return_type_message(&ret, &name, method.accessibility == Some(Accessibility::Public)) {
                     errors.push(Diagnostic::error(msg, Some(real_loc(cm, file, method.span().lo))));
                 }
+                return_type = declared_return_type(&ret);
             }
 
             let visibility = if method.accessibility == Some(Accessibility::Public) {
@@ -624,6 +629,7 @@ fn parse_methods(
                 parse_binding_variant_on_method(comments, method.span().lo, &name, &visibility, file, errors, cm);
 
             result.push(MethodNode {
+                return_type,
                 name,
                 params,
                 body,
@@ -1385,6 +1391,7 @@ fn parse_assignment_expr(
                 let right = parse_expression(&assign.right, file, errors, cm);
                 let target_for_rhs = parse_assign_target(&assign.left, file, errors, cm);
                 let value = Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: bin_op,
                     left: Box::new(target_for_rhs),
                     right: Box::new(right),
@@ -1818,6 +1825,7 @@ fn parse_binary_expression(
     };
 
     Expression::BinaryExpr {
+        operand_type: Default::default(),
         op,
         left: Box::new(left),
         right: Box::new(right),
@@ -1845,6 +1853,7 @@ fn parse_unary_expression(
     };
 
     Expression::UnaryExpr {
+        operand_type: Default::default(),
         op,
         operand: Box::new(operand),
         // N-472: the operator token.

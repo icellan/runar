@@ -42,7 +42,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{invalid_escape_sequence_message, lex_error, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{invalid_escape_sequence_message, lex_error, declared_return_type, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_go_directive_message};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
@@ -895,6 +895,7 @@ impl<'a> GoParser<'a> {
             _ => return,
         };
         let mut stub = MethodNode {
+            return_type: None,
             name,
             params: Vec::new(),
             body: Vec::new(),
@@ -1200,6 +1201,7 @@ impl<'a> GoParser<'a> {
         }
 
         let constructor = MethodNode {
+            return_type: None,
             name: "constructor".to_string(),
             params: constructor_params,
             body: constructor_body,
@@ -1493,13 +1495,14 @@ impl<'a> GoParser<'a> {
 
         // Optional return type (Rúnar doesn't use it structurally; N-331
         // refuses an unknown name)
-        self.skip_return_type(&method_name, &loc, visibility == Visibility::Public);
+        let return_type = self.skip_return_type(&method_name, &loc, visibility == Visibility::Public);
 
         // Body
         let body = self.parse_block();
 
         (
             MethodNode {
+                return_type,
                 name: method_name,
                 params,
                 body,
@@ -1530,7 +1533,7 @@ impl<'a> GoParser<'a> {
         self.receiver_name = String::new(); // no receiver
 
         let params = self.parse_params();
-        self.skip_return_type(&func_name, &loc, false);
+        let return_type = self.skip_return_type(&func_name, &loc, false);
         let body = self.parse_block();
 
         self.receiver_name = saved_recv;
@@ -1539,6 +1542,7 @@ impl<'a> GoParser<'a> {
         // exactly as in the TS reference.
         Some((
             MethodNode {
+                return_type,
                 name: func_name,
                 params,
                 body,
@@ -1630,13 +1634,15 @@ impl<'a> GoParser<'a> {
     }
 
     /// Skip an optional return type declaration (everything up to `{` or EOF).
-    /// N-331: the AST keeps no return type, so a result type that is not a
-    /// Rúnar type is refused here, where it is spelled.
-    fn skip_return_type(&mut self, method_name: &str, loc: &SourceLocation, is_public: bool) {
+    /// N-331: a result type that is not a Rúnar type is refused here, where it
+    /// is spelled. D12 FE-F4: returns the declared type of a single result
+    /// (kept on the method for the type checker); `None` otherwise.
+    fn skip_return_type(&mut self, method_name: &str, loc: &SourceLocation, is_public: bool) -> Option<TypeNode> {
         // If next token is `{`, no return type
         if matches!(self.current().typ, TokenType::LBrace | TokenType::Eof) {
-            return;
+            return None;
         }
+        let mut declared: Vec<TypeNode> = Vec::new();
         if matches!(self.current().typ, TokenType::LParen) {
             // Parenthesised result list: `(T, U)` or named `(x T, y U)`.
             self.advance();
@@ -1651,6 +1657,7 @@ impl<'a> GoParser<'a> {
                 if let Some(msg) = unknown_return_type_message(&ret, method_name, is_public) {
                     self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
                 }
+                declared.push(ret);
                 if !self.match_tok(&TokenType::Comma) {
                     break;
                 }
@@ -1660,6 +1667,7 @@ impl<'a> GoParser<'a> {
             if let Some(msg) = unknown_return_type_message(&ret, method_name, is_public) {
                 self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
             }
+            declared.push(ret);
         }
         // Otherwise skip until we find `{` (possibly a parenthesized multi-return)
         let mut depth = 0usize;
@@ -1673,6 +1681,11 @@ impl<'a> GoParser<'a> {
                 TokenType::LBrace => break,
                 _ => { self.advance(); }
             }
+        }
+        if declared.len() == 1 {
+            declared_return_type(&declared[0])
+        } else {
+            None
         }
     }
 
@@ -1904,6 +1917,7 @@ impl<'a> GoParser<'a> {
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let new_val = Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: BinaryOp::Add,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
@@ -1917,6 +1931,7 @@ impl<'a> GoParser<'a> {
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let new_val = Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: BinaryOp::Sub,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
@@ -2104,6 +2119,7 @@ impl<'a> GoParser<'a> {
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let new_val = Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: BinaryOp::Add,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
@@ -2115,6 +2131,7 @@ impl<'a> GoParser<'a> {
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let new_val = Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: BinaryOp::Sub,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
@@ -2166,6 +2183,7 @@ impl<'a> GoParser<'a> {
         self.advance();
         let rhs = self.parse_expr()?;
         let new_val = Expression::BinaryExpr {
+            operand_type: Default::default(),
             op,
             left: Box::new(lhs.clone()),
             right: Box::new(rhs),
@@ -2199,7 +2217,7 @@ impl<'a> GoParser<'a> {
             self.errors.push(Diagnostic::error(go_ambiguous_precedence_message(&first, &second), Some(start.clone())));
         }
         self.ladder_top = Some(op.clone());
-        Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) }
+        Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) }
     }
 
     fn parse_or(&mut self) -> Option<Expression> {
@@ -2378,17 +2396,17 @@ impl<'a> GoParser<'a> {
             TokenType::Bang => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
+                Some(Expression::UnaryExpr { operand_type: Default::default(), op: UnaryOp::Not, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
             }
             TokenType::Minus => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
+                Some(Expression::UnaryExpr { operand_type: Default::default(), op: UnaryOp::Neg, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
             }
             TokenType::Tilde | TokenType::Caret => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
+                Some(Expression::UnaryExpr { operand_type: Default::default(), op: UnaryOp::BitNot, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
             }
             _ => self.parse_postfix(),
         }
@@ -2609,6 +2627,7 @@ impl<'a> GoParser<'a> {
                                 let right = args.pop().unwrap();
                                 let left = args.pop().unwrap();
                                 return Some(Expression::BinaryExpr {
+                                    operand_type: Default::default(),
                                     op,
                                     left: Box::new(left),
                                     right: Box::new(right),

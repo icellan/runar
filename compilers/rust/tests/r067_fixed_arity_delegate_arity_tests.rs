@@ -382,7 +382,11 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // OP_BIN2NUM, so the unsigned 32-bit nVersion field is not read as a
     // negative script number.
     ("extractVersion", 1, 6, 0x41fafbc2363896f1),
-    ("reverseBytes", 1, 2083, 0xaa355cbc2102a10c),
+    // D12 BM-F3: 2083 -> 2084 top-level ops; the final OP_DROP of the
+    // unconsumed remainder became <0> OP_EQUALVERIFY, so an input longer than
+    // 520 bytes aborts instead of "reversing" to its first 520 bytes
+    // (fingerprint was 0xaa355cbc2102a10c).
+    ("reverseBytes", 1, 2084, 0x26848aca5895a371),
     ("sign", 1, 2, 0x00a1c571bf6296bf),
     ("sqrt", 1, 10, 0xbfe239cb7a0312f2), // R-169: 2 -> 10 top-level ops (2 domain guards, 8 ops, ahead of the unchanged OP_DUP + OP_IF pair); the 256-round min-clamped Newton body lives inside the If and does not add top-level ops
     // N-103 (user decision R86, 2026-10-21): 386 -> 44 top-level ops; the

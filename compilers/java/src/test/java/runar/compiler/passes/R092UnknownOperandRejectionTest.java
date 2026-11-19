@@ -69,12 +69,18 @@ class R092UnknownOperandRejectionTest {
     // The two probes the audit compiled. Both must be rejected.
     // ------------------------------------------------------------------
 
+    /*
+     * D12 FE-F4: `private h(v: bigint): bigint { return v; }` (the original
+     * probe) is now typed by its declared return type and compiles in every
+     * tier (TS emits 768b7c9c). The helper below keeps the probe's point: its
+     * returns (bigint, PubKey) do not unify, so its call is `<unknown>`.
+     */
     private static final String P6 = """
-        import { SmartContract, assert } from 'runar-lang';
+        import { SmartContract, assert, PubKey } from 'runar-lang';
         export class P6 extends SmartContract {
-          readonly a: bigint;
-          constructor(a: bigint) { super(a); this.a = a; }
-          private h(v: bigint): bigint { return v; }
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          private h(v: bigint) { if (v > 0n) { return v; } return this.pk; }
           public go(x: bigint) { assert(this.h(x) + 1n === x); }
         }
         """;
@@ -121,7 +127,7 @@ class R092UnknownOperandRejectionTest {
     // One probe per guarded operand position, so a partial revert fails here.
     // ------------------------------------------------------------------
 
-    /** Wraps a method body in a contract whose private helper returns `<unknown>`. */
+    /** Wraps a method body in a contract with private helpers `hp` (PubKey) and `hu` (`<unknown>`: its returns do not unify). */
     private static String withHelper(String body) {
         return """
             import { SmartContract, assert, ByteString, PubKey } from 'runar-lang';
@@ -129,6 +135,7 @@ class R092UnknownOperandRejectionTest {
               readonly pk: PubKey;
               constructor(pk: PubKey) { super(pk); this.pk = pk; }
               private hp(): PubKey { return this.pk; }
+              private hu(v: bigint) { if (v > 0n) { return v; } return this.pk; }
               public go(x: bigint) { %s }
             }
             """.formatted(body);
@@ -154,7 +161,9 @@ class R092UnknownOperandRejectionTest {
     @Test
     void unaryBitNotOperandOfUnknownTypeIsRejected() throws Exception {
         assertRejected(
-            withHelper("assert(~this.hp() === x);"), "G.runar.ts", "'~' must be bigint or ByteString"
+            // D12 FE-F4: `this.hp()` is typed PubKey now (`~` accepts a byte
+            // string); `hu`'s returns do not unify, so it is `<unknown>`.
+            withHelper("assert(~this.hu(x) === x);"), "G.runar.ts", "'~' must be bigint or ByteString"
         );
     }
 

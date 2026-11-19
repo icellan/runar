@@ -4503,7 +4503,8 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         -- length reversal by 520 unrolled iterations (max BSV element size).
         --   <data> OP_0 OP_SWAP
         --   520×: DUP SIZE NIP OP_IF <1> SPLIT SWAP ROT CAT SWAP OP_ENDIF
-        --   DROP
+        --   OP_0 OP_EQUALVERIFY   (D12 BM-F3: the remainder must be empty,
+        --   so an input over 520 bytes aborts instead of being truncated)
         match args with
         | [arg] =>
             let (load, sm1) := loadRefLive sm arg currentIndex lastUses outerProtected
@@ -4523,7 +4524,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             let body : List StackOp :=
               [StackOp.push (.bigint 0), StackOp.swap]
                 ++ (List.range 520).flatMap (fun _ => iter)
-                ++ [StackOp.drop]
+                ++ [StackOp.push (.bigint 0), StackOp.opcode "OP_EQUALVERIFY"]
             (load ++ body, smFinal, localBindings)
         | _ =>
             ([.opcode "OP_RUNAR_REVERSEBYTES_ARITY"], sm.push bindingName, localBindings)

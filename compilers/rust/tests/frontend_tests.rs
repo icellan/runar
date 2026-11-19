@@ -2937,10 +2937,15 @@ class SplitTest extends SmartContract {
 
     public check(data: ByteString) {
         const parts = split(data, 4n);
-        assert(parts[0] === this.expected);
+        assert(parts === this.expected);
     }
 }
 "#;
+    // D12 FE-F1: this used to read `parts[0] === this.expected`. `split`
+    // returns a ByteString and indexing one has no resolvable type, so that
+    // `===` is now refused ("Cannot resolve the operand types of '==='") in
+    // every tier instead of being lowered on a guess. The test is about
+    // `split` being an accepted builtin, so it compares the result directly.
     let result = compile_ts(source);
     assert!(
         result.is_ok(),

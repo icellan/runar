@@ -24,6 +24,7 @@ import runar.compiler.ir.ast.IncrementExpr;
 import runar.compiler.ir.ast.IndexAccessExpr;
 import runar.compiler.ir.ast.MemberExpr;
 import runar.compiler.ir.ast.MethodNode;
+import runar.compiler.ir.ast.OperandTypeSlot;
 import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PrimitiveTypeName;
 import runar.compiler.ir.ast.PropertyAccessExpr;
@@ -482,7 +483,8 @@ public final class ExpandFixedArrays {
                 // so dropping it here silently compiles a different
                 // signature-hash commitment than the author declared.
                 method.sighashType(),
-                method.bindingVariant()
+                method.bindingVariant(),
+                method.returnType()
             );
         }
 
@@ -714,7 +716,9 @@ public final class ExpandFixedArrays {
                     stabilizeIndexChain(incOperand, prelude, stmt.sourceLocation());
                 AssignmentStatement assignment = new AssignmentStatement(
                     target,
-                    new BinaryExpr(incOp, cloneExpression(target), new BigIntLiteral(BigInteger.ONE)),
+                    // D12 FE-F1: typecheck already required a bigint operand for ++/--.
+                    new BinaryExpr(incOp, cloneExpression(target), new BigIntLiteral(BigInteger.ONE), null,
+                        OperandTypeSlot.of(OperandTypeSlot.OperandType.NUMERIC)),
                     stmt.sourceLocation()
                 );
                 List<Statement> outAll = new ArrayList<>(prelude);
@@ -787,11 +791,12 @@ public final class ExpandFixedArrays {
                 if (shortCircuit) orderCond++;
                 Expression right = rewriteExpression(be.right(), prelude);
                 if (shortCircuit) orderCond--;
-                return new BinaryExpr(be.op(), left, right);
+                // D12 FE-F1: the rebuilt node keeps the operand family typecheck recorded.
+                return new BinaryExpr(be.op(), left, right, null, OperandTypeSlot.of(be.operandType().get()));
             }
             if (expr instanceof UnaryExpr ue) {
                 Expression operand = rewriteExpression(ue.operand(), prelude);
-                return new UnaryExpr(ue.op(), operand);
+                return new UnaryExpr(ue.op(), operand, null, OperandTypeSlot.of(ue.operandType().get()));
             }
             if (expr instanceof CallExpr ce) {
                 // The callee names a function; it is not a value read.
@@ -983,7 +988,9 @@ public final class ExpandFixedArrays {
                 BinaryExpr cond = new BinaryExpr(
                     Expression.BinaryOp.EQ,
                     cloneExpression(indexRef),
-                    new BigIntLiteral(BigInteger.valueOf(i))
+                    new BigIntLiteral(BigInteger.valueOf(i)),
+                    null,
+                    OperandTypeSlot.of(OperandTypeSlot.OperandType.NUMERIC) // D12 FE-F1: index vs a bigint literal
                 );
                 AssignmentStatement assign = new AssignmentStatement(
                     cloneExpression(target),
@@ -1013,7 +1020,9 @@ public final class ExpandFixedArrays {
                 BinaryExpr cond = new BinaryExpr(
                     Expression.BinaryOp.EQ,
                     cloneExpression(indexRef),
-                    new BigIntLiteral(BigInteger.valueOf(i))
+                    new BigIntLiteral(BigInteger.valueOf(i)),
+                    null,
+                    OperandTypeSlot.of(OperandTypeSlot.OperandType.NUMERIC) // D12 FE-F1: index vs a bigint literal
                 );
                 chain = new TernaryExpr(cond, new PropertyAccessExpr(slot), chain);
             }
@@ -1106,7 +1115,9 @@ public final class ExpandFixedArrays {
                 BinaryExpr cond = new BinaryExpr(
                     Expression.BinaryOp.EQ,
                     cloneExpression(indexRef),
-                    new BigIntLiteral(BigInteger.valueOf(i))
+                    new BigIntLiteral(BigInteger.valueOf(i)),
+                    null,
+                    OperandTypeSlot.of(OperandTypeSlot.OperandType.NUMERIC) // D12 FE-F1: index vs a bigint literal
                 );
                 AssignmentStatement branchAssign = new AssignmentStatement(
                     new PropertyAccessExpr(slot),
@@ -1311,10 +1322,13 @@ public final class ExpandFixedArrays {
         if (expr instanceof Identifier id) return new Identifier(id.name());
         if (expr instanceof PropertyAccessExpr pa) return new PropertyAccessExpr(pa.property());
         if (expr instanceof BinaryExpr be) {
-            return new BinaryExpr(be.op(), cloneExpression(be.left()), cloneExpression(be.right()));
+            // D12 FE-F1: a clone keeps the operand family typecheck recorded.
+            return new BinaryExpr(be.op(), cloneExpression(be.left()), cloneExpression(be.right()), null,
+                OperandTypeSlot.of(be.operandType().get()));
         }
         if (expr instanceof UnaryExpr ue) {
-            return new UnaryExpr(ue.op(), cloneExpression(ue.operand()));
+            return new UnaryExpr(ue.op(), cloneExpression(ue.operand()), null,
+                OperandTypeSlot.of(ue.operandType().get()));
         }
         if (expr instanceof CallExpr ce) {
             List<Expression> args = new ArrayList<>(ce.args().size());

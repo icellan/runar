@@ -6086,8 +6086,15 @@ impl LoweringContext {
             });
         }
 
-        // Drop empty remainder
-        self.emit_op(StackOp::Drop);
+        // Stack: [reversed_result, remainder]. D12 BM-F3: the remainder is
+        // empty only when the input fit in the 520 unrolled iterations. It
+        // used to be dropped unchecked, so a longer input "reversed" to the
+        // reverse of its first 520 bytes and the rest was silently discarded
+        // (two different inputs could satisfy the same claim). Fail closed
+        // instead: the script aborts unless the remainder is empty (OP_0
+        // OP_EQUALVERIFY consumes it).
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".to_string()));
 
         self.sm.push(binding_name);
         self.track_depth();

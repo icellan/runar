@@ -140,6 +140,13 @@ export interface MethodNode {
    * spending tx has nVersion > 1.
    */
   bindingVariant?: BindingVariant;
+  /**
+   * D12 FE-F4: the return type the source declares, when its surface syntax
+   * can spell one (Ruby cannot; TypeScript may omit it). The type checker
+   * enforces it on every `return` and gives it to every call. Absent = inferred
+   * from the body by the type checker, with the full environment.
+   */
+  returnType?: TypeNode;
   sourceLocation: SourceLocation;
 }
 
@@ -232,11 +239,21 @@ export type BinaryOp =
 
 export type UnaryOp = '!' | '-' | '~';
 
+/**
+ * D12 FE-F1: the operand family the TYPE CHECKER resolved for an operator
+ * whose lowering depends on it (`+` = OP_CAT vs OP_ADD, `===` / `!==` =
+ * OP_EQUAL vs OP_NUMEQUAL, `& | ^ ~` on byte strings vs numbers). Written by
+ * 03-typecheck (and by 03b for the nodes it synthesises); ANF lowering reads
+ * it and refuses a node that carries none. Never set by a parser.
+ */
+export type OperandType = 'bytes' | 'numeric';
+
 export interface BinaryExpr {
   kind: 'binary_expr';
   op: BinaryOp;
   left: Expression;
   right: Expression;
+  operandType?: OperandType;
   sourceLocation?: SourceLocation;
 }
 
@@ -244,6 +261,7 @@ export interface UnaryExpr {
   kind: 'unary_expr';
   op: UnaryOp;
   operand: Expression;
+  operandType?: OperandType;
   sourceLocation?: SourceLocation;
 }
 

@@ -1104,7 +1104,7 @@ public final class RustParser {
                 s.addError(sighash.error());
             } else if (sighash != null) {
                 method = new MethodNode(method.name(), method.params(), method.body(), method.visibility(),
-                    method.sourceLocation(), sighash.value());
+                    method.sourceLocation(), sighash.value(), method.bindingVariant(), method.returnType());
             }
             methods.add(method);
         }
@@ -1179,12 +1179,15 @@ public final class RustParser {
         }
 
         boolean hasReturnType = false;
+        TypeNode declaredReturn = null;
         if (s.check(TOK_ARROW)) {
             hasReturnType = true;
             s.advance();
-            // The AST keeps no return type; N-331 refuses an unknown name.
-            String unknownReturn = LexDiag.unknownReturnType(parseRustType(s), rawName, visibility == Visibility.PUBLIC);
+            // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+            TypeNode returnType = parseRustType(s);
+            String unknownReturn = LexDiag.unknownReturnType(returnType, rawName, visibility == Visibility.PUBLIC);
             if (unknownReturn != null) s.addError(unknownReturn);
+            declaredReturn = MethodNode.declaredReturnType(returnType);
         }
 
         s.expect(TOK_LBRACE);
@@ -1204,7 +1207,7 @@ public final class RustParser {
             }
         }
 
-        return new MethodNode(name, params, body, visibility, funcLoc);
+        return new MethodNode(name, params, body, visibility, funcLoc, null, null, declaredReturn);
     }
 
     // -----------------------------------------------------------------

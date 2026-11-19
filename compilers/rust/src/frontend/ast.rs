@@ -163,6 +163,12 @@ pub struct MethodNode {
     /// the compact non-low-S blob, spendable only when the spending tx has
     /// nVersion > 1.
     pub binding_variant: Option<String>,
+    /// D12 FE-F4: the return type the source declares, when its surface
+    /// syntax can spell one (Ruby cannot; TypeScript may omit it). `None` =
+    /// inferred from the body by the type checker, with the full
+    /// environment. The type checker enforces it on every `return` and gives
+    /// it to every call.
+    pub return_type: Option<TypeNode>,
     pub source_location: SourceLocation,
 }
 
@@ -322,6 +328,52 @@ impl UnaryOp {
     }
 }
 
+/// D12 FE-F1: the operand family the type checker records on an operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandType {
+    Bytes,
+    Numeric,
+}
+
+/// D12 FE-F1: the slot an operator node carries its operand family in. The
+/// type checker walks the AST through `&` borrows, so the slot is a `Cell`.
+#[derive(Debug, Clone, Default)]
+pub struct OperandSlot(std::cell::Cell<Option<OperandType>>);
+
+impl OperandSlot {
+    pub fn get(&self) -> Option<OperandType> {
+        self.0.get()
+    }
+    pub fn set(&self, t: Option<OperandType>) {
+        self.0.set(t)
+    }
+}
+
+// The slot holds a `Copy` value replaced whole by `set`, so a panic can never
+// leave it half-written: observing it after `catch_unwind` (as callers of
+// `lower_to_anf` do) is sound. Without this, `Cell` would make every
+// `&ContractNode` non-`RefUnwindSafe`.
+impl std::panic::RefUnwindSafe for OperandSlot {}
+
+/// A slot already holding `t` (for nodes a pass synthesises after the type
+/// checker ran, e.g. expand_fixed_arrays' index dispatch).
+pub fn operand_slot(t: OperandType) -> OperandSlot {
+    OperandSlot(std::cell::Cell::new(Some(t)))
+}
+
+/// Binary operators whose lowering depends on the operand family (D12 FE-F1).
+pub fn is_typed_binary_op(op: &BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::StrictEq
+            | BinaryOp::StrictNe
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+    )
+}
+
 /// Expression variants.
 #[derive(Debug, Clone)]
 pub enum Expression {
@@ -334,12 +386,22 @@ pub enum Expression {
         /// parser synthesizes carries `None` and the type checker falls back
         /// to the leftmost leaf.
         source_location: Option<SourceLocation>,
+        /// D12 FE-F1: the operand family the TYPE CHECKER resolved for an
+        /// operator whose lowering depends on it (`+` = OP_CAT vs OP_ADD,
+        /// `===` / `!==` = OP_EQUAL vs OP_NUMEQUAL, `& | ^` on byte strings vs
+        /// numbers). Written by the type checker through a shared `&` borrow
+        /// (hence the `Cell`) and by expand_fixed_arrays for the nodes it
+        /// synthesises; a clone keeps it. ANF lowering refuses a typed
+        /// operator that carries none. Never set by a parser.
+        operand_type: OperandSlot,
     },
     UnaryExpr {
         op: UnaryOp,
         operand: Box<Expression>,
         /// The operator token (N-472); every surface parser sets it.
         source_location: Option<SourceLocation>,
+        /// D12 FE-F1: see `BinaryExpr::operand_type`; used for `~`.
+        operand_type: OperandSlot,
     },
     CallExpr {
         callee: Box<Expression>,

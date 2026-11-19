@@ -35,7 +35,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{char_index_positions, lex_error_at_index, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{char_index_positions, lex_error_at_index, declared_return_type, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::resolve_native_sighash;
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, type_too_deep, DepthTracker, NestingCounter};
@@ -665,6 +665,7 @@ impl<'a> SolParser<'a> {
                 });
             }
             MethodNode {
+                return_type: None,
                 name: "constructor".to_string(),
                 params,
                 body,
@@ -899,6 +900,7 @@ impl<'a> SolParser<'a> {
         }
 
         MethodNode {
+            return_type: None,
             name: "constructor".to_string(),
             params,
             body: std::iter::once(super_call).chain(fixed_body).collect(),
@@ -986,11 +988,13 @@ impl<'a> SolParser<'a> {
             }
         }
 
-        if let Some(ret) = pending_ret {
-            if let Some(msg) = unknown_return_type_message(&ret, &name, visibility == Visibility::Public) {
+        if let Some(ret) = &pending_ret {
+            if let Some(msg) = unknown_return_type_message(ret, &name, visibility == Visibility::Public) {
                 self.errors.push(Diagnostic::error(msg, Some(location.clone())));
             }
         }
+        // D12 FE-F4: the declared type is kept on the method for the type checker.
+        let return_type = pending_ret.as_ref().and_then(declared_return_type);
 
         let body = self.parse_block();
 
@@ -1004,6 +1008,7 @@ impl<'a> SolParser<'a> {
         };
 
         MethodNode {
+            return_type,
             name,
             params,
             body,
@@ -1129,6 +1134,7 @@ impl<'a> SolParser<'a> {
                         self.advance();
                         let rhs = self.parse_expression();
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Add,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
@@ -1145,6 +1151,7 @@ impl<'a> SolParser<'a> {
                         self.advance();
                         let rhs = self.parse_expression();
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Sub,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
@@ -1161,6 +1168,7 @@ impl<'a> SolParser<'a> {
                         self.advance();
                         let rhs = self.parse_expression();
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Mul,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
@@ -1177,6 +1185,7 @@ impl<'a> SolParser<'a> {
                         self.advance();
                         let rhs = self.parse_expression();
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Div,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
@@ -1193,6 +1202,7 @@ impl<'a> SolParser<'a> {
                         self.advance();
                         let rhs = self.parse_expression();
                         let value = Expression::BinaryExpr {
+                            operand_type: Default::default(),
                             op: BinaryOp::Mod,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
@@ -1447,6 +1457,7 @@ impl<'a> SolParser<'a> {
             let right = self.parse_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1465,6 +1476,7 @@ impl<'a> SolParser<'a> {
             let right = self.parse_bit_or();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1483,6 +1495,7 @@ impl<'a> SolParser<'a> {
             let right = self.parse_bit_xor();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1501,6 +1514,7 @@ impl<'a> SolParser<'a> {
             let right = self.parse_bit_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1519,6 +1533,7 @@ impl<'a> SolParser<'a> {
             let right = self.parse_equality();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1539,6 +1554,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_comparison();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1550,6 +1566,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_comparison();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1573,6 +1590,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1584,6 +1602,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1595,6 +1614,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1606,6 +1626,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_shift();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1629,6 +1650,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1640,6 +1662,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_additive();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1663,6 +1686,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1674,6 +1698,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_multiplicative();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1697,6 +1722,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1708,6 +1734,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1719,6 +1746,7 @@ impl<'a> SolParser<'a> {
                     let right = self.parse_unary();
                     if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
@@ -1738,6 +1766,7 @@ impl<'a> SolParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -1747,6 +1776,7 @@ impl<'a> SolParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -1756,6 +1786,7 @@ impl<'a> SolParser<'a> {
                 self.advance();
                 let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2019,13 +2050,15 @@ fn sol_rename_identifiers_in_expr(
                 .collect(),
             asm_return_type: None,
         },
-        Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, source_location, ..  } => Expression::BinaryExpr {
+            operand_type: Default::default(),
             op,
             left: Box::new(sol_rename_identifiers_in_expr(*left, rename_map)),
             right: Box::new(sol_rename_identifiers_in_expr(*right, rename_map)),
             source_location: source_location,
         },
-        Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, source_location, ..  } => Expression::UnaryExpr {
+            operand_type: Default::default(),
             op,
             operand: Box::new(sol_rename_identifiers_in_expr(*operand, rename_map)),
             source_location: source_location,
@@ -2133,13 +2166,15 @@ fn sol_rewrite_expr_bare_props(
                 asm_return_type: None,
             }
         }
-        Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, source_location, ..  } => Expression::BinaryExpr {
+            operand_type: Default::default(),
             op,
             left: Box::new(sol_rewrite_expr_bare_props(*left, prop_names, locals, method_names)),
             right: Box::new(sol_rewrite_expr_bare_props(*right, prop_names, locals, method_names)),
             source_location: source_location,
         },
-        Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, source_location, ..  } => Expression::UnaryExpr {
+            operand_type: Default::default(),
             op,
             operand: Box::new(sol_rewrite_expr_bare_props(*operand, prop_names, locals, method_names)),
             source_location: source_location,

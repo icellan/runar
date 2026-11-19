@@ -42,6 +42,16 @@ use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFSyn
 pub const CONTINUATION_AMOUNT_UNAVAILABLE: &str = "continuationAmount() is only available in a public StatefulSmartContract method whose state continues through the default single-output continuation (it mutates state or emits a data output, and does not call addOutput/addRawOutput)";
 
 pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
+    // D12 FE-F1: operator lowering reads the operand family the type checker
+    // records on the AST. The compiler always type-checks first; a caller
+    // handing this public entry point a contract that never went through the
+    // type checker gets it run here (its diagnostics are the caller's
+    // business), so the types still come from the checker and never from a
+    // guess. A node the checker could not type keeps no family and is
+    // refused below.
+    if has_untyped_operator(contract) {
+        let _ = super::typecheck::typecheck(contract);
+    }
     let properties = lower_properties(contract);
     let mut methods = lower_methods(contract);
 
@@ -279,6 +289,17 @@ pub(crate) const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// `this.addOutput` is called as `this.addOutput(satoshis, .{ v1, v2, ... })`
 /// (the surface form Zig / Move tuple syntax produce), unwrap the trailing
 /// array literal so each element becomes an individual state value.
+/// `flatten_add_output_args` by reference (D12 FE-F1: the type checker must
+/// tag the original nodes, not clones).
+pub(crate) fn flatten_add_output_arg_refs(args: &[Expression]) -> Vec<&Expression> {
+    if args.len() == 2 {
+        if let Expression::ArrayLiteral { elements } = &args[1] {
+            return std::iter::once(&args[0]).chain(elements.iter()).collect();
+        }
+    }
+    args.iter().collect()
+}
+
 pub(crate) fn flatten_add_output_args(args: &[Expression]) -> Vec<Expression> {
     if args.len() == 2 {
         if let Expression::ArrayLiteral { elements } = &args[1] {
@@ -910,7 +931,6 @@ impl MethodScope {
 struct InlinedScopeState {
     scope_renames: HashMap<String, String>,
     local_names: HashSet<String>,
-    local_byte_vars: HashSet<String>,
     local_aliases: HashMap<String, String>,
     loop_vars: HashSet<String>,
 }
@@ -942,8 +962,6 @@ struct LoweringContext<'a> {
     scope_renames: HashMap<String, String>,
     /// N-046: source names of the loop variables in scope.
     loop_vars: HashSet<String>,
-    /// Tracks local variables known to be byte-typed.
-    local_byte_vars: HashSet<String>,
     /// Maps the CURRENT method's (or constructor's) parameter names to their
     /// declared type strings. Populated once per method/constructor before
     /// lowering its body and shared into if/else sub-contexts. Method-scoped
@@ -1027,7 +1045,6 @@ impl<'a> LoweringContext<'a> {
             shadowing_loop_vars: HashSet::new(),
             scope_renames: HashMap::new(),
             loop_vars: HashSet::new(),
-            local_byte_vars: HashSet::new(),
             param_types: HashMap::new(),
             current_source_loc: None,
             param_alias_stack: HashMap::new(),
@@ -1264,7 +1281,6 @@ impl<'a> LoweringContext<'a> {
         InlinedScopeState {
             scope_renames: std::mem::take(&mut self.scope_renames),
             local_names: self.local_names.clone(),
-            local_byte_vars: self.local_byte_vars.clone(),
             local_aliases: self.local_aliases.clone(),
             loop_vars: self.loop_vars.clone(),
         }
@@ -1273,7 +1289,6 @@ impl<'a> LoweringContext<'a> {
     fn leave_inlined_scope(&mut self, saved: InlinedScopeState) {
         self.scope_renames = saved.scope_renames;
         self.local_names = saved.local_names;
-        self.local_byte_vars = saved.local_byte_vars;
         self.local_aliases = saved.local_aliases;
         self.loop_vars = saved.loop_vars;
     }
@@ -1333,7 +1348,6 @@ impl<'a> LoweringContext<'a> {
         // by value, so a rename made inside it ends with it.
         sub.scope_renames = self.scope_renames.clone();
         sub.loop_vars = self.loop_vars.clone();
-        sub.local_byte_vars = self.local_byte_vars.clone();
         // Share the current method's parameter types so byte-type analysis
         // inside nested blocks resolves params against the SAME method scope
         // the parent reads from (issue #34).
@@ -1745,16 +1759,10 @@ fn source_local_name(binding_name: &str) -> &str {
 /// a named binding that aliases the variable to the computed value via @ref.
 fn lower_variable_decl(name: &str, init: &Expression, ctx: &mut LoweringContext) {
     let value_ref = lower_expr_to_ref(init, ctx);
-    // Byte-typedness of the initialiser is judged before the new name is in
-    // scope (the initialiser reads the OUTER binding of a shadowed name).
-    let is_bytes = is_byte_typed_expr(init, ctx);
     // N-046 / N-047: a declaration reusing an enclosing binding's name is
     // alpha-renamed (see `declare_local`).
     let binding_name = ctx.declare_local(name);
     ctx.add_local(&binding_name);
-    if is_bytes {
-        ctx.local_byte_vars.insert(binding_name.clone());
-    }
     ctx.emit_named(
         &binding_name,
         ANFValue::LoadConst {
@@ -2534,9 +2542,13 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
 
         Expression::MemberExpr { object, property } => lower_member_expr(object, property, ctx),
 
-        Expression::BinaryExpr { op, left, right, .. } => lower_binary_expr(op, left, right, ctx),
+        Expression::BinaryExpr { op, left, right, operand_type, .. } => {
+            lower_binary_expr(op, left, right, operand_type, ctx)
+        }
 
-        Expression::UnaryExpr { op, operand, .. } => lower_unary_expr(op, operand, ctx),
+        Expression::UnaryExpr { op, operand, operand_type, .. } => {
+            lower_unary_expr(op, operand, operand_type, ctx)
+        }
 
         Expression::CallExpr { callee, args, .. } => lower_call_expr(callee, args, ctx),
 
@@ -2706,6 +2718,7 @@ fn lower_binary_expr(
     op: &BinaryOp,
     left: &Expression,
     right: &Expression,
+    slot: &OperandSlot,
     ctx: &mut LoweringContext,
 ) -> String {
     // NEW-014: `&&` and `||` SHORT-CIRCUIT. They desugar to the ternary, which
@@ -2750,25 +2763,16 @@ fn lower_binary_expr(
     let left_ref = lower_expr_to_ref(left, ctx);
     let right_ref = lower_expr_to_ref(right, ctx);
 
-    // For equality operators, annotate with operand type so stack lowering
-    // can choose OP_EQUAL vs OP_NUMEQUAL.
-    // For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
-    // For bitwise &, |, ^, annotate byte-typed operands.
-    //
-    // N-076: "+" used to be named in the comment above and MISSING from the
-    // match below, so `s + t` on two ByteStrings lowered to OP_ADD in this
-    // tier and to OP_CAT in the other six. Executed: `"aa" + "bb" === "aabb"`
-    // was FALSE here and TRUE everywhere else. Keep the operator set here and
-    // the comment in step.
-    let result_type = match op.as_str() {
-        "===" | "!==" | "+" | "&" | "|" | "^" => {
-            if is_byte_typed_expr(left, ctx) || is_byte_typed_expr(right, ctx) {
-                Some("bytes".to_string())
-            } else {
-                None
-            }
-        }
-        _ => None,
+    // D12 FE-F1: `+` (OP_CAT / OP_ADD), `===` / `!==` (OP_EQUAL /
+    // OP_NUMEQUAL) and `& | ^` (byte string vs number) are lowered from the
+    // operand family the TYPE CHECKER resolved and recorded on the node —
+    // never from a guess.
+    let result_type = if is_typed_binary_op(op)
+        && require_operand_type(op.as_str(), slot) == OperandType::Bytes
+    {
+        Some("bytes".to_string())
+    } else {
+        None
     };
 
     ctx.emit(ANFValue::BinOp {
@@ -2782,11 +2786,14 @@ fn lower_binary_expr(
 fn lower_unary_expr(
     op: &UnaryOp,
     operand: &Expression,
+    slot: &OperandSlot,
     ctx: &mut LoweringContext,
 ) -> String {
     let operand_ref = lower_expr_to_ref(operand, ctx);
-    // For ~, annotate byte-typed operands so downstream passes know the result is bytes.
-    let result_type = if op.as_str() == "~" && is_byte_typed_expr(operand, ctx) {
+    // D12 FE-F1: see lower_binary_expr.
+    let result_type = if *op == UnaryOp::BitNot
+        && require_operand_type("~", slot) == OperandType::Bytes
+    {
         Some("bytes".to_string())
     } else {
         None
@@ -3487,113 +3494,71 @@ fn lower_decrement_expr(
 // Type inference helpers for equality semantics
 // ---------------------------------------------------------------------------
 
-/// Does a value of this type sit on the stack as a BYTE STRING rather than as
-/// a script NUMBER?
-///
-/// N-076: there is deliberately no list here. `typecheck::is_bytestring_subtype`
-/// is the authority. The second, hand-maintained copy this replaces carried
-/// `RabinSig` and `RabinPubKey`, which the type checker files under
-/// `is_bigint_subtype` -- so `===` on a Rabin value emitted OP_EQUAL and, far
-/// worse, `+` on one emitted OP_CAT where the source said addition.
-///
-/// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
-/// with OP_ADD.
-fn is_byte_type(type_name: &str) -> bool {
-    super::typecheck::is_bytestring_subtype(type_name)
-}
-
-/// Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).
-/// This is a best-effort heuristic used to annotate equality operators.
-fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
-    match expr {
-        Expression::ByteStringLiteral { .. } => true,
-
-        Expression::Identifier { name, .. } => {
-            // N-046 / N-047: a renamed (shadowing) declaration is judged by its
-            // own binding, never by the parameter or property it shadows.
-            if let Some(renamed) = ctx.scope_renames.get(name.as_str()) {
-                return ctx.local_byte_vars.contains(renamed.as_str());
-            }
-            // Check if it's a parameter or property with a byte type
-            if let Some(t) = get_param_type(name, ctx) {
-                if is_byte_type(&t) {
-                    return true;
-                }
-            }
-            if let Some(t) = get_property_type(name, ctx) {
-                if is_byte_type(&t) {
-                    return true;
-                }
-            }
-            if ctx.local_byte_vars.contains(ctx.local_name(name).as_str()) {
-                return true;
-            }
-            false
-        }
-
-        Expression::PropertyAccess { property, .. } => {
-            if let Some(t) = get_property_type(property, ctx) {
-                if is_byte_type(&t) {
-                    return true;
-                }
-            }
-            false
-        }
-
-        Expression::MemberExpr { object, property } => {
-            if let Expression::Identifier { name, .. } = object.as_ref() {
-                if name == "this" {
-                    if let Some(t) = get_property_type(property, ctx) {
-                        if is_byte_type(&t) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
-        }
-
-        Expression::CallExpr {
-            callee,
-            asm_return_type,
-            ..
-        } => {
-            if let Expression::Identifier { name, .. } = callee.as_ref() {
-                // Expression-form asm<ByteString>({...}) yields a byte value.
-                if name == "asm" {
-                    return asm_return_type.as_deref() == Some("ByteString");
-                }
-                // N-347: the type checker's return table decides, NOT a second
-                // hand-written list here (two such lists drifted: N-054 swept
-                // numeric extractors in, N-345 / N-347 left byte-returning
-                // builtins out, so `===` on them compiled to OP_NUMEQUAL).
-                if super::typecheck::builtin_returns_bytes(name) {
-                    return true;
-                }
-            }
-            false
-        }
-
-        _ => false,
+/// D12 FE-F1: the operand family the type checker recorded on an operator
+/// node. There is deliberately no fallback. The previous heuristic
+/// (`is_byte_typed_expr`) defaulted to numeric whenever it could not see a
+/// byte type — a ternary, a helper result, `this.arr[i]`, a bitwise result,
+/// or a local built from one — and compiled byte-string `+` to OP_ADD and
+/// `===` to OP_NUMEQUAL. A node without the family was never type-checked,
+/// so it is refused.
+fn require_operand_type(op: &str, slot: &OperandSlot) -> OperandType {
+    match slot.get() {
+        Some(t) => t,
+        None => panic!(
+            "ANF lowering: operator '{}' carries no operand type from the type checker; \
+             run typecheck() on the contract before lower_to_anf() (refusing to guess byte string vs number)",
+            op
+        ),
     }
 }
 
-/// Look up the type of a parameter by name within the CURRENT method scope.
-/// Method-scoped (issue #34): reads only the params registered for the method
-/// (or constructor) currently being lowered, so a local in one method cannot
-/// falsely match a same-named parameter of a different method.
-fn get_param_type(name: &str, ctx: &LoweringContext) -> Option<String> {
-    ctx.param_types.get(name).cloned()
-}
-
-/// Look up the type of a contract property by name.
-fn get_property_type(name: &str, ctx: &LoweringContext) -> Option<String> {
-    for p in &ctx.contract.properties {
-        if p.name == name {
-            return Some(type_node_to_string(&p.prop_type));
+/// D12 FE-F1: does any operator whose lowering needs an operand type lack one?
+fn has_untyped_operator(contract: &ContractNode) -> bool {
+    fn stmts(ss: &[Statement]) -> bool {
+        ss.iter().any(stmt)
+    }
+    fn stmt(s: &Statement) -> bool {
+        match s {
+            Statement::VariableDecl { init, .. } => expr(init),
+            Statement::Assignment { target, value, .. } => expr(target) || expr(value),
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                expr(condition) || stmts(then_branch) || else_branch.as_deref().map_or(false, stmts)
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                stmt(init) || expr(condition) || stmt(update) || stmts(body)
+            }
+            Statement::ExpressionStatement { expression, .. } => expr(expression),
+            Statement::ReturnStatement { value, .. } => value.as_ref().map_or(false, expr),
         }
     }
-    None
+    fn expr(e: &Expression) -> bool {
+        match e {
+            Expression::BinaryExpr { op, left, right, operand_type, .. } => {
+                (is_typed_binary_op(op) && operand_type.get().is_none()) || expr(left) || expr(right)
+            }
+            Expression::UnaryExpr { op, operand, operand_type, .. } => {
+                (*op == UnaryOp::BitNot && operand_type.get().is_none()) || expr(operand)
+            }
+            Expression::CallExpr { callee, args, .. } => expr(callee) || args.iter().any(expr),
+            Expression::MemberExpr { object, .. } => expr(object),
+            Expression::TernaryExpr { condition, consequent, alternate } => {
+                expr(condition) || expr(consequent) || expr(alternate)
+            }
+            Expression::IndexAccess { object, index } => expr(object) || expr(index),
+            Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+                expr(operand)
+            }
+            Expression::ArrayLiteral { elements } => elements.iter().any(expr),
+            Expression::Identifier { .. }
+            | Expression::BigIntLiteral { .. }
+            | Expression::BoolLiteral { .. }
+            | Expression::ByteStringLiteral { .. }
+            | Expression::PropertyAccess { .. } => false,
+        }
+    }
+    contract.properties.iter().any(|p| p.initializer.as_ref().map_or(false, expr))
+        || stmts(&contract.constructor.body)
+        || contract.methods.iter().any(|m| stmts(&m.body))
 }
 
 // ---------------------------------------------------------------------------
@@ -3637,10 +3602,9 @@ fn inline_private_method_call(
     // Snapshot the method body + param names before mutating the
     // context (Rust's borrow checker won't let us hold a &MethodNode
     // and mutate ctx simultaneously).
-    let (params, param_types, body): (Vec<String>, Vec<String>, Vec<Statement>) = match ctx.get_private_method(method_name) {
+    let (params, body): (Vec<String>, Vec<Statement>) = match ctx.get_private_method(method_name) {
         Some(m) => (
             m.params.iter().map(|p| p.name.clone()).collect(),
-            m.params.iter().map(|p| type_node_to_string(&p.param_type)).collect(),
             m.body.clone(),
         ),
         None => {
@@ -3685,9 +3649,6 @@ fn inline_private_method_call(
     for &i in &reassigned {
         let binding_name = ctx.declare_local(&params[i]);
         ctx.add_local(&binding_name);
-        if is_byte_type(&param_types[i]) {
-            ctx.local_byte_vars.insert(binding_name.clone());
-        }
         ctx.emit_named(
             &binding_name,
             ANFValue::LoadConst {

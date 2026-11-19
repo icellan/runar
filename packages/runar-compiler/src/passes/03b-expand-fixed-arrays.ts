@@ -775,6 +775,8 @@ class ExpandContext {
         value: {
           kind: 'binary_expr',
           op: expr.kind === 'increment_expr' ? '+' : '-',
+          // D12 FE-F1: typecheck already required a bigint operand for ++/--.
+          operandType: 'numeric',
           left: cloneExpr(target),
           right: {
             kind: 'bigint_literal',
@@ -1134,6 +1136,7 @@ class ExpandContext {
       const cond: BinaryExpr = {
         kind: 'binary_expr',
         op: '===',
+        operandType: 'numeric', // D12 FE-F1: index vs a bigint literal
         left: cloneExpr(indexRef),
         right: { kind: 'bigint_literal', value: BigInt(i), sourceLocation: loc },
         sourceLocation: loc,
@@ -1202,6 +1205,7 @@ class ExpandContext {
       const cond: BinaryExpr = {
         kind: 'binary_expr',
         op: '===',
+        operandType: 'numeric', // D12 FE-F1: index vs a bigint literal
         left: cloneExpr(indexRef),
         right: { kind: 'bigint_literal', value: BigInt(i), sourceLocation: loc },
         sourceLocation: loc,
@@ -1334,6 +1338,7 @@ class ExpandContext {
       const cond: BinaryExpr = {
         kind: 'binary_expr',
         op: '===',
+        operandType: 'numeric', // D12 FE-F1: index vs a bigint literal
         left: cloneExpr(indexRef),
         right: { kind: 'bigint_literal', value: BigInt(i), sourceLocation: loc },
         sourceLocation: loc,

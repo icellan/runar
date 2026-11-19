@@ -1403,6 +1403,7 @@ const Parser = struct {
                 .fixed_array_length = parsed_type.fixed_array_length,
                 .fixed_array_element = parsed_type.fixed_array_element,
                 .fixed_array_nested_length = parsed_type.fixed_array_nested_length,
+                .fixed_array_leaf = parsed_type.fixed_array_leaf,
             }) catch {};
         }
 
@@ -1448,6 +1449,8 @@ const Parser = struct {
         fixed_array_length: u32 = 0,
         fixed_array_element: RunarType = .unknown,
         fixed_array_nested_length: u32 = 0,
+        /// D12 FE-F1: leaf type of a nested array (see PropertyNode).
+        fixed_array_leaf: RunarType = .unknown,
     };
 
     /// Parse a Go field type, capturing FixedArray shape on outer + nested
@@ -1487,8 +1490,10 @@ const Parser = struct {
             // checks `element == .fixed_array && nested_length > 0` to know it
             // needs to recursively expand into a 2-D synthetic grid.
             var nested: u32 = 0;
+            var leaf: RunarType = .unknown;
             if (inner.type_info == .fixed_array) {
                 nested = inner.fixed_array_length;
+                leaf = inner.fixed_array_element;
             }
             return .{
                 .type_info = .fixed_array,
@@ -1496,6 +1501,7 @@ const Parser = struct {
                 .fixed_array_length = size,
                 .fixed_array_element = inner.type_info,
                 .fixed_array_nested_length = nested,
+                .fixed_array_leaf = leaf,
             };
         }
 
@@ -1622,7 +1628,8 @@ const Parser = struct {
 
         // Skip optional return type (anything before '{'); N-331 refuses an
         // unknown name in it.
-        self.checkReturnType(method_name, is_public and has_receiver);
+        // D12 FE-F4: the declared type is kept on the method.
+        const declared_return = self.checkReturnType(method_name, is_public and has_receiver);
         self.skipReturnType();
 
         // Parse body
@@ -1642,10 +1649,10 @@ const Parser = struct {
 
         if (!has_receiver) {
             self.receiver_name = "";
-            return .{ .method = .{ .name = method_name, .is_public = false, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = null };
+            return .{ .method = .{ .name = method_name, .is_public = false, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = method_loc, .return_type = declared_return }, .go_name = raw_name, .receiver_type = null };
         }
 
-        return .{ .method = .{ .name = method_name, .is_public = is_public, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = receiver_type };
+        return .{ .method = .{ .name = method_name, .is_public = is_public, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = method_loc, .return_type = declared_return }, .go_name = raw_name, .receiver_type = receiver_type };
     }
 
     fn parseGoParams(self: *Parser) []ParamNode {
@@ -1758,16 +1765,17 @@ const Parser = struct {
         return params.items;
     }
 
-    /// N-331: the AST keeps no return type, so a single (unparenthesised)
-    /// result type that is not a Rúnar type is refused where it is spelled.
+    /// N-331: a single (unparenthesised) result type that is not a Rúnar type
+    /// is refused where it is spelled. D12 FE-F4: returns the declared type
+    /// (null for none, a parenthesised list, or an unknown name).
     /// A parenthesised result list is left to `skipReturnType`.
     /// N-332: a PUBLIC method (`is_public`) may declare no result at all,
     /// parenthesised list and native `bool` included.
-    fn checkReturnType(self: *Parser, method_name: []const u8, is_public: bool) void {
-        if (self.current.kind == .lbrace or self.current.kind == .eof) return;
+    fn checkReturnType(self: *Parser, method_name: []const u8, is_public: bool) ?types.RunarType {
+        if (self.current.kind == .lbrace or self.current.kind == .eof) return null;
         if (self.current.kind == .lparen) {
             if (is_public) self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{method_name});
-            return;
+            return null;
         }
         var spelled: []const u8 = "";
         const ti = self.parseGoTypeNamed(&spelled);
@@ -1777,6 +1785,7 @@ const Parser = struct {
         } else if (is_public and ti != .void) {
             self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{method_name});
         }
+        return types.declaredReturnType(ti);
     }
 
     fn skipReturnType(self: *Parser) void {

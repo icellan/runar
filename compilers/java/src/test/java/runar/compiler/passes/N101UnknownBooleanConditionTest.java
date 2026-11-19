@@ -21,8 +21,11 @@ import runar.compiler.ir.ast.ContractNode;
  * </pre>
  *
  * <p>{@code this.hp()} is a private helper returning {@code PubKey}. No tier
- * derives a private method's declared return type ({@code MethodNode} carries no
- * {@code returnType}), so it infers as {@code <unknown>}. This tier then lowered
+ * derived a private method's declared return type then ({@code MethodNode}
+ * carried no {@code returnType}), so it inferred as {@code <unknown>}. D12
+ * FE-F4 now types it {@code PubKey} (declared types are kept and enforced), so
+ * the fixtures below take their {@code <unknown>} from a ByteString index
+ * ({@code b[0n]}), which every tier still types {@code <unknown>}. This tier then lowered
  * a 33-byte PubKey into a branch condition, where post-Genesis it is simply
  * truthy — the {@code if} the author wrote is not the {@code if} that ends up on
  * chain. Same soundness argument R-092 made for the operand positions, same
@@ -51,7 +54,7 @@ class N101UnknownBooleanConditionTest {
 
     private static String withHelper(String body) {
         return """
-            import { SmartContract, assert, PubKey } from 'runar-lang';
+            import { SmartContract, assert, PubKey, ByteString } from 'runar-lang';
             class C extends SmartContract {
               readonly pk: PubKey;
               constructor(pk: PubKey) { super(pk); this.pk = pk; }
@@ -65,9 +68,9 @@ class N101UnknownBooleanConditionTest {
 
     /** `if` condition inferred as `<unknown>`. */
     private static final String IF_COND = withHelper("""
-          public go(x: bigint) {
+          public go(x: bigint, b: ByteString) {
             let y: bigint = 0n;
-            if (this.hp()) {
+            if (b[0n]) {
               y = y + 1n;
             }
             assert(x > y);
@@ -76,8 +79,8 @@ class N101UnknownBooleanConditionTest {
 
     /** Ternary condition inferred as `<unknown>`. */
     private static final String TERNARY_COND = withHelper("""
-          public go(x: bigint) {
-            const y: bigint = this.hp() ? 1n : 2n;
+          public go(x: bigint, b: ByteString) {
+            const y: bigint = b[0n] ? 1n : 2n;
             assert(y > 0n);
           }
         """);
@@ -85,13 +88,16 @@ class N101UnknownBooleanConditionTest {
     // --- ACCEPT (over-rejection guards) ------------------------------------
 
     /**
-     * The escape that STAYS. Every one of the seven tiers accepts this and
-     * emits the same 4 hexchars; deleting the assert() escape would have
-     * created a divergence rather than closed one.
+     * The escape that STAYS; deleting the assert() escape would have created
+     * a divergence rather than closed one. D12 FE-F4: {@code this.hp()} is now
+     * typed {@code PubKey} (and refused here by every tier), and a helper whose
+     * returns do not unify is refused at its declaration, so the
+     * {@code <unknown>} comes from a ByteString index, which the TS reference
+     * type-checks clean too.
      */
     private static final String ASSERT_UNKNOWN = withHelper("""
-          public go(x: bigint) {
-            assert(this.hp());
+          public go(x: bigint, b: ByteString) {
+            assert(b[0n]);
           }
         """);
 

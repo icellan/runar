@@ -747,6 +747,8 @@ module RunarCompiler
         if pending_ret
           Frontend.reject_unknown_return_type(@errors, pending_ret, name, location, visibility == "public")
         end
+        # D12 FE-F4: the declared type is kept on the method for the type checker.
+        declared_ret = pending_ret ? Frontend.declared_return_type(pending_ret) : nil
 
         body = parse_sol_block
 
@@ -761,7 +763,8 @@ module RunarCompiler
           body: body,
           visibility: visibility,
           source_location: location,
-          sighash_type: sighash && sighash[:value]
+          sighash_type: sighash && sighash[:value],
+          return_type: declared_ret
         )
       end
 

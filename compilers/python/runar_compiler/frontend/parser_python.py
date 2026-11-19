@@ -6,6 +6,8 @@ Hand-written tokenizer with INDENT/DEDENT + recursive descent parser.
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 from runar_compiler.frontend.ast_nodes import (
     ArrayLiteralExpr,
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
@@ -1118,12 +1120,15 @@ class _PyParser:
 
         params = self.parse_params()
 
+        declared_ret = None
         if self.match(TOK_ARROW):
-            # The AST keeps no return type; N-331 refuses an unknown name.
-            # `None` is Python's spelling of "returns nothing".
+            # N-331 refuses an unknown name. `None` is Python's spelling of
+            # "returns nothing". D12 FE-F4: the declared type is kept on the
+            # method for the type checker.
             ret_type = self.parse_type_annotation()
             if not (isinstance(ret_type, CustomType) and ret_type.name == "None"):
                 reject_unknown_return_type(self.errors, ret_type, name_tok.value, location, visibility == "public")
+                declared_ret = declared_return_type(ret_type)
 
         self.expect(TOK_COLON)
         body = self.parse_block()
@@ -1138,6 +1143,7 @@ class _PyParser:
             body=body,
             visibility=visibility,
             sighash_type=sighash.value if sighash is not None else None,
+            return_type=declared_ret,
             source_location=location,
         )
 

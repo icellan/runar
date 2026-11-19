@@ -64,8 +64,12 @@ class TestN056ReverseBytes < Minitest::Test
   # SHA-256 of the script hex emitted by go / rust / zig / python / java / ts
   # for SOURCE, in BOTH fold modes (constant folding cannot reach a reversal of
   # a runtime parameter, so the two modes coincide).
+  #
+  # D12 BM-F3: re-pinned to the TS reference's bytes after the closing OP_DROP
+  # of the unconsumed remainder became OP_0 OP_EQUALVERIFY (a > 520-byte input
+  # now aborts instead of reversing only its first 520 bytes).
   SIX_TIER_SCRIPT_SHA256 =
-    "74999840f6f0d8114ddee5edb4b9f0f1c6d4418f4c5568fc242c87ac84ab35bf"
+    "7d5f15ae7dd862c516f897a8e81a9613e4ae59fe6d915139c58ed927ffa87975"
 
   # One unrolled iteration, as emitted by every tier:
   # OP_DUP OP_SIZE OP_NIP OP_IF OP_1 OP_SPLIT OP_SWAP OP_ROT OP_CAT OP_SWAP OP_ENDIF
@@ -75,8 +79,9 @@ class TestN056ReverseBytes < Minitest::Test
   # legal ByteString.
   ITERATIONS = 520
 
-  # OP_0 OP_SWAP, 520 unrolled iterations, OP_DROP.
-  REVERSAL_HEX = "007c" + (ITERATION_HEX * ITERATIONS) + "75"
+  # OP_0 OP_SWAP, 520 unrolled iterations, OP_0 OP_EQUALVERIFY (D12 BM-F3:
+  # the remainder must be empty, so a > 520-byte input aborts).
+  REVERSAL_HEX = "007c" + (ITERATION_HEX * ITERATIONS) + "0088"
 
   def compile_script_hex(disable_constant_folding)
     Dir.mktmpdir do |dir|
@@ -135,6 +140,10 @@ class TestN056ReverseBytes < Minitest::Test
       when 0x00 then stack.push("")                       # OP_0
       when 0x51 then stack.push("\x01".b)                 # OP_1
       when 0x75 then stack.pop                            # OP_DROP
+      when 0x88                                           # OP_EQUALVERIFY
+        b = stack.pop
+        a = stack.pop
+        raise "OP_EQUALVERIFY failed" unless a == b
       when 0x76 then stack.push(stack.last.dup)           # OP_DUP
       when 0x77 then stack.delete_at(-2)                  # OP_NIP
       when 0x7c                                           # OP_SWAP

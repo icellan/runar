@@ -1275,8 +1275,10 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // even with an empty constructor-param list). No accepted program's bytes
     // change (multi-format fold-OFF 892/892 against the goldens). Spent, and
     // must be deleted, on the next edit to stack.py.
+    // 2026-11-18 — that entry is SPENT and deleted: the D12 BM-F3 reverseBytes
+    // guard edits stack.py and moves its own pin (byte-builtins golden).
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual(['compilers/python/runar_compiler/codegen/stack.py']);
+    expect(entries.map((e) => e.path).sort()).toEqual([]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {

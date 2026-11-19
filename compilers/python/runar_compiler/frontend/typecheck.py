@@ -857,6 +857,7 @@ _CONSUMING_FUNCTIONS: dict[str, list[int]] = {
 
 def _consumed_param_summary(
     contract: ContractNode,
+    inferred_returns: dict | None = None,
 ) -> dict[str, tuple[list[int], list[str]]]:
     """N-109: run the affine checker over each method body with throwaway
     diagnostics and record which parameters (and, N-288, which ``prop:<name>``
@@ -873,6 +874,10 @@ def _consumed_param_summary(
         changed = False
         for method in contract.methods:
             scratch = _TypeChecker(contract)
+            if inferred_returns is not None:
+                # D12 FE-F4: share the return-type memo (else every scratch
+                # re-infers each helper chain: polynomial in its length).
+                scratch._inferred_returns = inferred_returns
             scratch._consumed_params = summary
             consumed = scratch._consumed_param_indices(method)
             prev = summary[method.name]
@@ -919,12 +924,55 @@ class _TypeChecker:
         if contract.parent_class == "StatefulSmartContract":
             self.prop_types["txPreimage"] = "SigHashPreimage"
 
+        # D12 FE-F4: inferred return types of undeclared private methods,
+        # shared with every scratch checker spawned for this contract.
+        self._inferred_returns: dict[str, str] = {}
+        # Types of the ``return`` values seen while checking (FE-F4 inference).
+        self._return_type_sink: list[str] | None = None
+        # Types of the ``return`` values of the method being checked (FE-F4).
+        self._current_return_types: list[str] = []
+        # The method being checked (its declared return type is enforced).
+        self._current_method: MethodNode | None = None
+
         for method in contract.methods:
             params = [_type_node_to_string(p.type) for p in method.params]
-            ret_type = "void"
-            if method.visibility != "public":
-                ret_type = _infer_method_return_type(method)
-            self.method_sigs[method.name] = FuncSig(params=params, return_type=ret_type)
+            if method.visibility == "public":
+                self.method_sigs[method.name] = FuncSig(params=params, return_type="void")
+            else:
+                # D12 FE-F4: resolved on first use (the declared type, else
+                # inferred from the body with the full environment), so a
+                # helper defined after its caller is still typed.
+                self.method_sigs[method.name] = _MethodSig(self, method, params)
+
+    def method_return_type(self, method: MethodNode) -> str:
+        """D12 FE-F4: what a call of private method *method* evaluates to.
+
+        A declared return type is authoritative (``_check_statement`` enforces
+        it on every ``return``). Without one (Ruby has no syntax for it; other
+        surfaces may omit it) the body is type-checked by a scratch checker with
+        the real parameter environment and the types of its ``return`` values
+        are unified. Values that do not unify, and a helper reached again while
+        its own type is being inferred, are ``<unknown>``: every operator whose
+        lowering depends on the type then refuses to compile instead of
+        guessing. Mirrors ``methodReturnType`` in 03-typecheck.ts.
+        """
+        if method.return_type is not None:
+            return _type_node_to_string(method.return_type)
+        memo = self._inferred_returns
+        known = memo.get(method.name)
+        if known is not None:
+            return known
+        memo[method.name] = "<unknown>"  # recursion guard; the validator refuses recursion
+        scratch = _TypeChecker(self.contract)
+        scratch._inferred_returns = memo
+        scratch._side_effects = self._side_effects
+        # D12 FE-F4: an inference scratch checker's diagnostics are discarded, so it does no affine-consumption bookkeeping (an empty summary): computing the consumption summary from inside an inference would read the in-progress recursion guard of the helper being inferred and memoize '<unknown>' for its callers.
+        scratch._consumed_params = {}
+        scratch._return_type_sink = []
+        scratch.check_method(method)
+        inferred = _unify_return_types(scratch._return_type_sink)
+        memo[method.name] = inferred
+        return inferred
 
     def _refuse_continuation_amount_write(self, target) -> None:
         """F-024 (R14): ``continuationAmount()`` is a read-only view of the
@@ -1004,6 +1052,7 @@ class _TypeChecker:
         for prop in self.contract.properties:
             env.define(prop.name, _type_node_to_string(prop.type))
 
+        self._current_method = None
         self._check_statements(ctor.body, env)
 
     def _method_effects(self, name: str) -> MethodEffects:
@@ -1014,6 +1063,7 @@ class _TypeChecker:
 
     def check_method(self, method: MethodNode) -> None:
         env = _TypeEnv()
+        self._current_method = method
 
         # Set current method location for diagnostics
         self._current_method_loc = method.source_location
@@ -1025,7 +1075,21 @@ class _TypeChecker:
         for param in method.params:
             env.define(param.name, _type_node_to_string(param.type))
 
+        self._current_return_types = []
         self._check_statements(method.body, env)
+
+        # D12 FE-F4: an undeclared private return type is inferred by unifying
+        # the returned values. Values that do not unify used to be typed by
+        # the FIRST return; now the call would be "<unknown>", which assert /
+        # if still accept. Refuse it here.
+        if method.visibility == "private" and method.return_type is None:
+            seen = self._current_return_types
+            if seen and "<unknown>" not in seen and _unify_return_types(seen) == "<unknown>":
+                self.errors.append(Diagnostic(
+                    message=incompatible_return_types_message(method.name, list(dict.fromkeys(seen))),
+                    severity=Severity.ERROR,
+                    loc=method.source_location,
+                ))
 
         # Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in the
         # same method body. The intrinsic's compile-time output-offset
@@ -1215,7 +1279,19 @@ class _TypeChecker:
 
         elif isinstance(stmt, ReturnStmt):
             if stmt.value is not None:
-                self._infer_expr_type(stmt.value, env)
+                value_type = self._infer_expr_type(stmt.value, env)
+                if self._return_type_sink is not None:
+                    self._return_type_sink.append(value_type)
+                self._current_return_types.append(value_type)
+                # D12 FE-F4: the declared return type is enforced, strictly --
+                # an unresolved value is not assignable to anything here.
+                cur = self._current_method
+                if cur is not None and cur.return_type is not None:
+                    declared_type = _type_node_to_string(cur.return_type)
+                    if value_type == "<unknown>" or not is_subtype(value_type, declared_type):
+                        self._add_error(
+                            declared_return_mismatch_message(cur.name, value_type, declared_type)
+                        )
 
         # Restore previous statement location
         self._current_stmt_loc = prev_stmt_loc
@@ -1409,6 +1485,21 @@ class _TypeChecker:
         left_type = self._infer_expr_type(e.left, env)
         right_type = self._infer_expr_type(e.right, env)
 
+        # D12 FE-F1: the operators whose opcode depends on the operand family
+        # record the family the TYPE CHECKER resolved; ANF lowering reads it
+        # and nothing else. `+` and `& | ^` already refuse an operand that is
+        # neither a byte string nor a number (below); equality accepted
+        # `<unknown>`, so it is refused here rather than lowered as a guess.
+        if e.op in _TYPED_BINARY_OPS:
+            lf = _operand_family(left_type)
+            rf = _operand_family(right_type)
+            if lf is not None and lf == rf:
+                e.operand_type = lf
+            elif (lf is None or rf is None) and e.op in ("===", "!=="):
+                self._add_error(
+                    unresolved_operand_types_message(e.op, left_type, right_type), e
+                )
+
         # ByteString concatenation: ByteString + ByteString -> ByteString (via OP_CAT)
         if e.op == "+" and is_byte_family(left_type) and is_byte_family(right_type):
             return "ByteString"
@@ -1526,8 +1617,12 @@ class _TypeChecker:
             return "bigint"
 
         if e.op == "~":
+            # D12 FE-F1: see _check_binary_expr.
             if is_byte_family(operand_type):
+                e.operand_type = "bytes"
                 return "ByteString"
+            if is_bigint_family(operand_type):
+                e.operand_type = "numeric"
             if not is_bigint_family(operand_type):
                 self._add_error(
                     f"operand of '~' must be bigint or ByteString, got '{operand_type}'",
@@ -2026,7 +2121,7 @@ class _TypeChecker:
             if func_name in BUILTIN_FUNCTIONS or func_name not in self.method_sigs:
                 return
             if self._consumed_params is None:
-                self._consumed_params = _consumed_param_summary(self.contract)
+                self._consumed_params = _consumed_param_summary(self.contract, self._inferred_returns)
             consumed_indices, consumed_props = self._consumed_params.get(func_name, ([], []))
 
         for param_index in consumed_indices:
@@ -2117,45 +2212,71 @@ class _TypeChecker:
 # Private method return type inference
 # ---------------------------------------------------------------------------
 
-def _infer_method_return_type(method: MethodNode) -> str:
-    """Walk a private method body, collect return types, and unify them."""
-    return_types = _collect_return_types(method.body)
+class _MethodSig:
+    """A private method's signature whose return type is resolved lazily by
+    ``_TypeChecker.method_return_type`` (D12 FE-F4). Duck-types ``FuncSig``."""
+
+    def __init__(self, checker: "_TypeChecker", method: MethodNode, params: list[str]) -> None:
+        self._checker = checker
+        self._method = method
+        self.params = params
+
+    @property
+    def return_type(self) -> str:
+        return self._checker.method_return_type(self._method)
+
+
+def _unify_return_types(return_types: list[str]) -> str:
+    """D12 FE-F4: unify the types of a private method's ``return`` values
+    (inferred with the full environment). No value-returning ``return`` =
+    void; values in one family unify to that family; anything else is
+    ``<unknown>`` -- never a best-effort pick, because every typed operator
+    refuses ``<unknown>``."""
     if not return_types:
         return "void"
-
     first = return_types[0]
     if all(t == first for t in return_types):
         return first
-
-    # Check if all are in the bigint family
     if all(t in _BIGINT_SUBTYPES for t in return_types):
         return "bigint"
-
-    # Check if all are in the ByteString family
     if all(t in _BYTESTRING_SUBTYPES for t in return_types):
         return "ByteString"
-
-    # Check if all are boolean
-    if all(t == "boolean" for t in return_types):
-        return "boolean"
-
-    return first
+    return "<unknown>"
 
 
-def _collect_return_types(stmts: list[Statement]) -> list[str]:
-    """Recursively collect inferred types from return statements."""
-    types: list[str] = []
-    for stmt in stmts:
-        if isinstance(stmt, ReturnStmt):
-            if stmt.value is not None:
-                types.append(_infer_expr_type_static(stmt.value))
-        elif isinstance(stmt, IfStmt):
-            types.extend(_collect_return_types(stmt.then))
-            if stmt.else_:
-                types.extend(_collect_return_types(stmt.else_))
-        elif isinstance(stmt, ForStmt):
-            types.extend(_collect_return_types(stmt.body))
-    return types
+# Binary operators whose lowering depends on the operand family (D12 FE-F1).
+_TYPED_BINARY_OPS: frozenset[str] = frozenset({"+", "===", "!==", "&", "|", "^"})
+
+
+def _operand_family(t: str) -> str | None:
+    """The lowering family of a resolved type: bytes, a script number, or none."""
+    if t in _BYTESTRING_SUBTYPES:
+        return "bytes"
+    if t in _BIGINT_SUBTYPES or t == "boolean":
+        return "numeric"
+    return None
+
+
+def unresolved_operand_types_message(op: str, left: str, right: str) -> str:
+    """D12 FE-F1: the one wording every tier emits."""
+    return (
+        f"Cannot resolve the operand types of '{op}' (got '{left}' and '{right}'): "
+        "it must be known whether the operands are byte strings or numbers"
+    )
+
+
+def incompatible_return_types_message(method: str, types: list[str]) -> str:
+    """D12 FE-F4: the one wording every tier emits (types in first-seen order)."""
+    listed = ", ".join(f"'{t}'" for t in types)
+    return f"Method '{method}' returns values of incompatible types ({listed}); declare its return type"
+
+
+def declared_return_mismatch_message(method: str, actual: str, declared: str) -> str:
+    """D12 FE-F4: the one wording every tier emits."""
+    return (
+        f"Method '{method}' returns '{actual}', which is not assignable to its "
+        f"declared return type '{declared}'"
+    )
 
 
 def _infer_expr_type_static(expr: Expression | None) -> str:

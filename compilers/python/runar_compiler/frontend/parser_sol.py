@@ -6,6 +6,8 @@ Hand-written tokenizer + recursive descent parser for Solidity-like syntax.
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -682,6 +684,8 @@ class _SolParser:
 
         if pending_ret is not None:
             reject_unknown_return_type(self.errors, pending_ret, name, location, visibility == "public")
+        # D12 FE-F4: the declared type is kept on the method for the type checker.
+        declared_ret = declared_return_type(pending_ret) if pending_ret is not None else None
 
         body = self.parse_sol_block()
 
@@ -695,6 +699,7 @@ class _SolParser:
             body=body,
             visibility=visibility,
             sighash_type=sighash.value if sighash is not None else None,
+            return_type=declared_ret,
             source_location=location,
         )
 

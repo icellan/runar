@@ -47,7 +47,7 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{
-    bare_java_property_assignment_message, lex_error, static_method_message, unknown_return_type_message,
+    bare_java_property_assignment_message, lex_error, static_method_message, declared_return_type, unknown_return_type_message,
     Diagnostic, JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
 };
@@ -950,6 +950,7 @@ impl<'a> JavaParser<'a> {
                     self.errors.push(Diagnostic::error(lost_directive_message("@embedAlways"), Some(loc)));
                 }
                 *constructor = Some(MethodNode {
+                    return_type: None,
                     name: "constructor".to_string(),
                     params,
                     body,
@@ -1026,11 +1027,12 @@ impl<'a> JavaParser<'a> {
                     None => None,
                 };
 
-            // The return type is not used structurally; N-331 refuses an unknown name.
+            // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
             if let Some(msg) = unknown_return_type_message(&member_type, &member_name, visibility == Visibility::Public) {
                 self.errors.push(Diagnostic::error(msg, Some(member_loc.clone())));
             }
             methods.push(MethodNode {
+                return_type: declared_return_type(&member_type),
                 name: member_name,
                 params,
                 body,
@@ -1447,6 +1449,7 @@ impl<'a> JavaParser<'a> {
                 let rhs = self.parse_expr()?;
                 self.match_tok(&TokenType::Semi);
                 let new_val = Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
@@ -1548,6 +1551,7 @@ impl<'a> JavaParser<'a> {
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let new_val = Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
@@ -1619,6 +1623,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_and()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1637,6 +1642,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_bitor()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1655,6 +1661,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_bitxor()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1673,6 +1680,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_bitand()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1691,6 +1699,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_equality()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1775,6 +1784,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_additive()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1798,6 +1808,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_multiplicative()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1822,6 +1833,7 @@ impl<'a> JavaParser<'a> {
             let right = self.parse_unary()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1838,6 +1850,7 @@ impl<'a> JavaParser<'a> {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -1852,6 +1865,7 @@ impl<'a> JavaParser<'a> {
                 }
                 let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -1866,6 +1880,7 @@ impl<'a> JavaParser<'a> {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
                     source_location: Some(op_loc.clone()),
@@ -2351,6 +2366,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
             if args.len() == 1 {
                 if let Some(op) = bigint_binary_method_op(property) {
                     return Expression::BinaryExpr {
+                        operand_type: Default::default(),
                         op,
                         left: object.clone(),
                         right: Box::new(args[0].clone()),
@@ -2360,6 +2376,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
             }
             if args.is_empty() && (property == "neg" || property == "negate") {
                 return Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::Neg,
                     operand: object.clone(),
                     source_location: None,
@@ -2370,6 +2387,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
             // can use it natively.
             if args.is_empty() && property == "not" {
                 return Expression::UnaryExpr {
+                    operand_type: Default::default(),
                     op: UnaryOp::BitNot,
                     operand: object.clone(),
                     source_location: None,
@@ -2387,6 +2405,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
             // consulted; the typechecker rejects misuse.
             if args.len() == 1 && property == "equals" {
                 return Expression::BinaryExpr {
+                    operand_type: Default::default(),
                     op: BinaryOp::StrictEq,
                     left: object.clone(),
                     right: Box::new(args[0].clone()),
@@ -2500,11 +2519,12 @@ fn is_bigint_of_callee(callee: &Expression) -> bool {
 fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression, start: SourceLocation) -> Expression {
     use num_traits::Zero;
     if !is_comparison_op(op.clone()) {
-        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start) };
+        return Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start) };
     }
     if let Some((a, b)) = compare_to_receiver_arg(&left) {
         if matches!(&right, Expression::BigIntLiteral { value } if value.is_zero()) {
             return Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op,
                 left: Box::new(a),
                 right: Box::new(b),
@@ -2515,6 +2535,7 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression, start
     if let Some((a, b)) = compare_to_receiver_arg(&right) {
         if matches!(&left, Expression::BigIntLiteral { value } if value.is_zero()) {
             return Expression::BinaryExpr {
+                operand_type: Default::default(),
                 op,
                 left: Box::new(b),
                 right: Box::new(a),
@@ -2522,7 +2543,7 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression, start
             };
         }
     }
-    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start) }
+    Expression::BinaryExpr { operand_type: Default::default(), op, left: Box::new(left), right: Box::new(right), source_location: Some(start) }
 }
 
 fn compare_to_receiver_arg(e: &Expression) -> Option<(Expression, Expression)> {
@@ -2721,6 +2742,7 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
     }
 
     MethodNode {
+        return_type: None,
         name: "constructor".to_string(),
         params,
         body,

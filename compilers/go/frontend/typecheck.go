@@ -45,6 +45,9 @@ type TypeCheckOptions struct {
 
 // TypeCheckWithOptions is TypeCheck with the caller's TypeCheckOptions.
 func TypeCheckWithOptions(contract *ContractNode, opts TypeCheckOptions) *TypeCheckResult {
+	// D12 FE-F1: every typed operator gets the slot the checker records its
+	// operand family in (see operand_slots.go).
+	allocateOperandSlots(contract)
 	checker := newTypeChecker(contract)
 
 	checker.checkPropertyInitializers()
@@ -514,6 +517,21 @@ type typeChecker struct {
 	// consumes, which a call consumes in the caller. Computed lazily by
 	// consumedParamSummary.
 	consumedParams map[string]methodConsumption
+	// D12 FE-F4: private methods by name; their call type is resolved
+	// lazily by methodReturnType.
+	privateMethods map[string]*MethodNode
+	// inferredReturns memoizes the inferred return types of undeclared
+	// private methods; shared with the scratch checkers that infer them.
+	inferredReturns map[string]string
+	// returnTypeSink collects the types of the `return` values seen while
+	// checking (FE-F4 inference), when non-nil.
+	returnTypeSink *[]string
+	// currentReturnTypes are the types of the `return` values of the method
+	// being checked, in order (D12 FE-F4).
+	currentReturnTypes []string
+	// currentMethod is the method being checked (nil in the constructor);
+	// its declared return type is enforced on every `return` (FE-F4).
+	currentMethod *MethodNode
 }
 
 // methodConsumption is what a contract method consumes when it is called
@@ -539,6 +557,8 @@ func newTypeChecker(contract *ContractNode) *typeChecker {
 		methodSigs:     make(map[string]funcSig),
 		consumedValues: make(map[string]bool),
 		affineAliases:  make(map[string]string),
+		privateMethods: make(map[string]*MethodNode),
+		inferredReturns: make(map[string]string),
 	}
 
 	for _, prop := range contract.Properties {
@@ -550,19 +570,135 @@ func newTypeChecker(contract *ContractNode) *typeChecker {
 		tc.propTypes["txPreimage"] = "SigHashPreimage"
 	}
 
-	for _, method := range contract.Methods {
+	for i, method := range contract.Methods {
 		params := make([]string, len(method.Params))
 		for i, p := range method.Params {
 			params[i] = typeNodeToString(p.Type)
 		}
-		retType := "void"
+		// D12 FE-F4: a private method's return type is resolved on first use
+		// (lookupMethodSig): the declared type, else inferred from the body
+		// with the full environment, so a helper defined after its caller is
+		// still typed.
+		tc.methodSigs[method.Name] = funcSig{params: params, returnType: "void"}
 		if method.Visibility != "public" {
-			retType = inferMethodReturnType(method)
+			tc.privateMethods[method.Name] = &contract.Methods[i]
 		}
-		tc.methodSigs[method.Name] = funcSig{params: params, returnType: retType}
 	}
 
 	return tc
+}
+
+// lookupMethodSig is methodSigs[name] with a private method's return type
+// resolved (D12 FE-F4).
+func (tc *typeChecker) lookupMethodSig(name string) (funcSig, bool) {
+	sig, ok := tc.methodSigs[name]
+	if !ok {
+		return sig, false
+	}
+	if m, isPrivate := tc.privateMethods[name]; isPrivate {
+		sig.returnType = tc.methodReturnType(m)
+	}
+	return sig, true
+}
+
+// methodReturnType is what a call of private method `method` evaluates to
+// (D12 FE-F4).
+//
+// A declared return type is authoritative (checkStatement enforces it on
+// every `return`). Without one (Ruby has no syntax for it; TypeScript may
+// omit it) the body is type-checked by a scratch checker with the real
+// parameter environment and the types of its `return` values are unified.
+// Values that do not unify, and a helper reached again while its own type is
+// being inferred, are `<unknown>`: every operator whose lowering depends on
+// the type then refuses to compile instead of guessing.
+func (tc *typeChecker) methodReturnType(method *MethodNode) string {
+	if method.ReturnType != nil {
+		return typeNodeToString(method.ReturnType)
+	}
+	if t, ok := tc.inferredReturns[method.Name]; ok {
+		return t
+	}
+	tc.inferredReturns[method.Name] = "<unknown>" // recursion guard; the validator refuses recursion
+	scratch := newTypeChecker(tc.contract)
+	scratch.inferredReturns = tc.inferredReturns
+	// D12 FE-F4: an inference scratch checker's diagnostics are discarded, so it does no affine-consumption bookkeeping (an empty summary): computing the consumption summary from inside an inference would read the in-progress recursion guard of the helper being inferred and memoize '<unknown>' for its callers.
+	scratch.consumedParams = map[string]methodConsumption{}
+	scratch.sideEffects = tc.sideEffects
+	var sink []string
+	scratch.returnTypeSink = &sink
+	scratch.checkMethod(*method)
+	inferred := unifyReturnTypes(sink)
+	tc.inferredReturns[method.Name] = inferred
+	return inferred
+}
+
+// unifyReturnTypes unifies the types of a private method's `return` values
+// (D12 FE-F4). No value-returning `return` = void; values in one family unify
+// to that family; anything else is `<unknown>` — never a best-effort pick,
+// because every typed operator refuses `<unknown>`.
+func unifyReturnTypes(types []string) string {
+	if len(types) == 0 {
+		return "void"
+	}
+	all := func(pred func(string) bool) bool {
+		for _, t := range types {
+			if !pred(t) {
+				return false
+			}
+		}
+		return true
+	}
+	first := types[0]
+	if all(func(t string) bool { return t == first }) {
+		return first
+	}
+	if all(func(t string) bool { return bigintSubtypes[t] }) {
+		return "bigint"
+	}
+	if all(func(t string) bool { return byteStringSubtypes[t] }) {
+		return "ByteString"
+	}
+	return "<unknown>"
+}
+
+// operandFamily is the lowering family of a resolved type (D12 FE-F1): a
+// byte string, a script number, or "" (none).
+func operandFamily(t string) string {
+	if byteStringSubtypes[t] {
+		return OperandBytes
+	}
+	if bigintSubtypes[t] || t == "boolean" {
+		return OperandNumeric
+	}
+	return ""
+}
+
+// UnresolvedOperandTypesMsg is D12 FE-F1's refusal; one wording in every tier.
+func UnresolvedOperandTypesMsg(op, left, right string) string {
+	return fmt.Sprintf("Cannot resolve the operand types of '%s' (got '%s' and '%s'): "+
+		"it must be known whether the operands are byte strings or numbers", op, left, right)
+}
+
+// IncompatibleReturnTypesMsg is D12 FE-F4's refusal of an undeclared private
+// return type whose values do not unify; one wording in every tier (distinct
+// types in first-seen order).
+func IncompatibleReturnTypesMsg(method string, types []string) string {
+	var quoted []string
+	seen := map[string]bool{}
+	for _, t := range types {
+		if !seen[t] {
+			seen[t] = true
+			quoted = append(quoted, "'"+t+"'")
+		}
+	}
+	return fmt.Sprintf("Method '%s' returns values of incompatible types (%s); declare its return type",
+		method, strings.Join(quoted, ", "))
+}
+
+// DeclaredReturnMismatchMsg is D12 FE-F4's refusal; one wording in every tier.
+func DeclaredReturnMismatchMsg(method, actual, declared string) string {
+	return fmt.Sprintf("Method '%s' returns '%s', which is not assignable to its declared return type '%s'",
+		method, actual, declared)
 }
 
 // N-321: a diagnostic may echo user-written type text of any length (a 4 MiB
@@ -708,6 +844,7 @@ func (tc *typeChecker) checkConstructor() {
 
 	// Set current method location for diagnostics
 	tc.currentMethodLoc = &ctor.SourceLocation
+	tc.currentMethod = nil
 
 	// Reset affine tracking for this scope
 	tc.consumedValues = make(map[string]bool)
@@ -728,6 +865,7 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 
 	// Set current method location for diagnostics
 	tc.currentMethodLoc = &method.SourceLocation
+	tc.currentMethod = &method
 
 	// Reset affine tracking for this method
 	tc.consumedValues = make(map[string]bool)
@@ -737,7 +875,25 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 		env.define(param.Name, typeNodeToString(param.Type))
 	}
 
+	tc.currentReturnTypes = nil
 	tc.checkStatements(method.Body, env)
+
+	// D12 FE-F4: an undeclared private return type is inferred by unifying the
+	// returned values. Values that do not unify used to be typed by the FIRST
+	// return (so `if (c) return 1n; return true;` was a bigint); now the call
+	// would be `<unknown>`, which `assert` / `if` still accept. Refuse it here.
+	if method.Visibility != "public" && method.ReturnType == nil {
+		seen := tc.currentReturnTypes
+		hasUnknown := false
+		for _, t := range seen {
+			if t == "<unknown>" {
+				hasUnknown = true
+			}
+		}
+		if len(seen) > 0 && !hasUnknown && unifyReturnTypes(seen) == "<unknown>" {
+			tc.addErrorWithLoc(IncompatibleReturnTypesMsg(method.Name, seen), &method.SourceLocation)
+		}
+	}
 
 	// Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in the
 	// same method body. The intrinsic's compile-time output-offset
@@ -926,7 +1082,19 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 
 	case ReturnStmt:
 		if s.Value != nil {
-			tc.inferExprType(s.Value, env)
+			valueType := tc.inferExprType(s.Value, env)
+			if tc.returnTypeSink != nil {
+				*tc.returnTypeSink = append(*tc.returnTypeSink, valueType)
+			}
+			tc.currentReturnTypes = append(tc.currentReturnTypes, valueType)
+			// D12 FE-F4: the declared return type is enforced, strictly — an
+			// unresolved value is not assignable to anything here.
+			if tc.currentMethod != nil && tc.currentMethod.ReturnType != nil {
+				declared := typeNodeToString(tc.currentMethod.ReturnType)
+				if valueType == "<unknown>" || !isSubtype(valueType, declared) {
+					tc.addError(DeclaredReturnMismatchMsg(tc.currentMethod.Name, valueType, declared))
+				}
+			}
 		}
 	}
 
@@ -1168,6 +1336,22 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 	leftType := tc.inferExprType(e.Left, env)
 	rightType := tc.inferExprType(e.Right, env)
 
+	// D12 FE-F1: the operators whose opcode depends on the operand family
+	// record the family the TYPE CHECKER resolved; ANF lowering reads it and
+	// nothing else. `+` and `& | ^` already refuse an operand that is neither
+	// a byte string nor a number (below); equality accepted `<unknown>`, so it
+	// is refused here rather than lowered as a guess.
+	if isTypedBinaryOp(e.Op) {
+		lf, rf := operandFamily(leftType), operandFamily(rightType)
+		if lf != "" && lf == rf {
+			if e.OperandType != nil {
+				*e.OperandType = lf
+			}
+		} else if (lf == "" || rf == "") && (e.Op == "===" || e.Op == "!==") {
+			tc.addErrorAt(UnresolvedOperandTypesMsg(e.Op, leftType, rightType), e)
+		}
+	}
+
 	// Arithmetic: bigint x bigint -> bigint
 	// Special case: ByteString + ByteString -> ByteString (OP_CAT / byte concatenation)
 	switch e.Op {
@@ -1277,9 +1461,16 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 		}
 		return "bigint"
 	case "~":
-		// Bitwise NOT: bigint -> bigint, or ByteString -> ByteString
+		// Bitwise NOT: bigint -> bigint, or ByteString -> ByteString.
+		// D12 FE-F1: see checkBinaryExpr.
 		if isByteFamily(operandType) {
+			if e.OperandType != nil {
+				*e.OperandType = OperandBytes
+			}
 			return "ByteString"
+		}
+		if isBigintFamily(operandType) && e.OperandType != nil {
+			*e.OperandType = OperandNumeric
 		}
 		if !isBigintFamily(operandType) {
 			tc.addUnaryError(fmt.Sprintf("operand of '~' must be bigint or ByteString, got '%s'", operandType), e)
@@ -1460,7 +1651,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			return tc.checkCallArgs(id.Name, sig, e.Args, env)
 		}
 		// Check if it's a known contract method
-		if sig, ok := tc.methodSigs[id.Name]; ok {
+		if sig, ok := tc.lookupMethodSig(id.Name); ok {
 			return tc.checkCallArgs(id.Name, sig, e.Args, env)
 		}
 		// Check if it's a local variable -- F-208: Rúnar has no
@@ -1513,7 +1704,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 		if pa.Property == "addOutput" || pa.Property == "addRawOutput" || pa.Property == "addDataOutput" {
 			return tc.checkOutputIntrinsicArgs(pa.Property, e.Args, env)
 		}
-		if sig, ok := tc.methodSigs[pa.Property]; ok {
+		if sig, ok := tc.lookupMethodSig(pa.Property); ok {
 			return tc.checkCallArgs(pa.Property, sig, e.Args, env)
 		}
 		tc.addError(fmt.Sprintf(
@@ -1541,7 +1732,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			if me.Property == "addOutput" || me.Property == "addRawOutput" || me.Property == "addDataOutput" {
 				return tc.checkOutputIntrinsicArgs(me.Property, e.Args, env)
 			}
-			if sig, ok := tc.methodSigs[me.Property]; ok {
+			if sig, ok := tc.lookupMethodSig(me.Property); ok {
 				return tc.checkCallArgs(me.Property, sig, e.Args, env)
 			}
 		}
@@ -1802,7 +1993,7 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 			return
 		}
 		if tc.consumedParams == nil {
-			tc.consumedParams = consumedParamSummary(tc.contract)
+			tc.consumedParams = consumedParamSummary(tc.contract, tc.inferredReturns)
 		}
 		consumedIndices = tc.consumedParams[funcName].params
 		consumedProps = tc.consumedParams[funcName].props
@@ -1860,7 +2051,10 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 // only grows as summaries grow, so iterating until no entry changes
 // terminates, also for recursive call graphs (refused separately by the
 // validator). Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
-func consumedParamSummary(contract *ContractNode) map[string]methodConsumption {
+// inferred is the caller's private-method return-type memo (D12 FE-F4), shared
+// so the scratch checkers do not re-infer every helper from scratch (that was
+// polynomial in the helper-chain length: N-180's 127-deep chain timed out).
+func consumedParamSummary(contract *ContractNode, inferred map[string]string) map[string]methodConsumption {
 	summary := make(map[string]methodConsumption, len(contract.Methods))
 	for _, method := range contract.Methods {
 		summary[method.Name] = methodConsumption{params: []int{}, props: []string{}}
@@ -1869,6 +2063,7 @@ func consumedParamSummary(contract *ContractNode) map[string]methodConsumption {
 		changed = false
 		for _, method := range contract.Methods {
 			scratch := newTypeChecker(contract)
+			scratch.inferredReturns = inferred
 			scratch.consumedParams = summary
 			consumed := scratch.consumedParamIndices(method)
 			prev := summary[method.Name]
@@ -1991,94 +2186,13 @@ func (tc *typeChecker) affineExprType(expr Expression, env *typeEnv) string {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Private method return type inference
+// Static (environment-free) expression typing
 // ---------------------------------------------------------------------------
 
-// inferMethodReturnType walks the body of a private method, collects
-// return statement expressions, infers their types statically, and returns
-// a unified return type. Falls back to "void" if no return statements.
-func inferMethodReturnType(method MethodNode) string {
-	returnTypes := collectReturnTypes(method.Body)
-	if len(returnTypes) == 0 {
-		return "void"
-	}
-
-	first := returnTypes[0]
-	allSame := true
-	for _, t := range returnTypes[1:] {
-		if t != first {
-			allSame = false
-			break
-		}
-	}
-	if allSame {
-		return first
-	}
-
-	// Check if all are in the bigint family
-	allBigint := true
-	for _, t := range returnTypes {
-		if !bigintSubtypes[t] {
-			allBigint = false
-			break
-		}
-	}
-	if allBigint {
-		return "bigint"
-	}
-
-	// Check if all are in the ByteString family
-	allBytes := true
-	for _, t := range returnTypes {
-		if !byteStringSubtypes[t] {
-			allBytes = false
-			break
-		}
-	}
-	if allBytes {
-		return "ByteString"
-	}
-
-	// Check if all are boolean
-	allBool := true
-	for _, t := range returnTypes {
-		if t != "boolean" {
-			allBool = false
-			break
-		}
-	}
-	if allBool {
-		return "boolean"
-	}
-
-	return first
-}
-
-// collectReturnTypes recursively collects inferred types from return
-// statements in a list of statements.
-func collectReturnTypes(stmts []Statement) []string {
-	var types []string
-	for _, stmt := range stmts {
-		switch s := stmt.(type) {
-		case ReturnStmt:
-			if s.Value != nil {
-				types = append(types, inferExprTypeStatic(s.Value))
-			}
-		case IfStmt:
-			types = append(types, collectReturnTypes(s.Then)...)
-			if len(s.Else) > 0 {
-				types = append(types, collectReturnTypes(s.Else)...)
-			}
-		case ForStmt:
-			types = append(types, collectReturnTypes(s.Body)...)
-		}
-	}
-	return types
-}
-
 // inferExprTypeStatic performs lightweight expression type inference
-// without a type environment. Used for inferring return types of private
-// methods before the full type-check pass runs.
+// without a type environment. Used for property initializers (literals).
+// D12 FE-F4: private-method return types are no longer inferred with it;
+// see methodReturnType.
 func inferExprTypeStatic(expr Expression) string {
 	switch e := expr.(type) {
 	case BigIntLiteral:

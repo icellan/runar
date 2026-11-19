@@ -910,8 +910,9 @@ module RunarCompiler
       # Parse parameter list and method body.
       def parse_method_body(is_constructor:, visibility:, location:,
                             method_name: nil, return_type: nil)
-        # The AST keeps no return type; N-331 refuses an unknown name.
+        # N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
         Frontend.reject_unknown_return_type(@errors, return_type, method_name, location, visibility == "public") unless is_constructor
+        declared_ret = is_constructor || return_type.nil? ? nil : Frontend.declared_return_type(return_type)
         expect(TOK_LPAREN, "'('")
         params = []
         while !check(TOK_RPAREN) && !check(TOK_EOF)
@@ -947,7 +948,8 @@ module RunarCompiler
           params: params,
           body: body,
           visibility: visibility,
-          source_location: location
+          source_location: location,
+          return_type: declared_ret
         )
       end
 

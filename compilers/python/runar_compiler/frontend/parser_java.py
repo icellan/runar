@@ -26,6 +26,8 @@ divergence. The parser is only ever invoked for .runar.java inputs by
 
 from __future__ import annotations
 
+from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
+
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -937,14 +939,15 @@ class _JavaParser:
         params = self._parse_params()
         visibility = "public" if is_public_ann else "private"
         body = self._parse_block()
-        # The AST keeps no return type: methods in Rúnar are declared by their
-        # body structure. N-331 refuses an unknown return type name.
+        # N-331 refuses an unknown return type name; D12 FE-F4 keeps the
+        # declared type on the method for the type checker.
         reject_unknown_return_type(self.errors, return_type, name, loc, visibility == "public")
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility=visibility,
+            return_type=declared_return_type(return_type),
             source_location=loc,
         )
 

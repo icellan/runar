@@ -955,10 +955,13 @@ public final class MoveParser {
             boolean hasMut = pr.hasMut;
 
             boolean hasReturnType = false;
+            TypeNode declaredReturn = null;
             if (match(Kind.COLON)) {
-                // The AST keeps no return type; N-331 refuses an unknown name.
-                String unknownReturn = LexDiag.unknownReturnType(parseTypeNode(), name, visibility == Visibility.PUBLIC);
+                // N-331 refuses an unknown name; D12 FE-F4 keeps the declared type.
+                TypeNode returnType = parseTypeNode();
+                String unknownReturn = LexDiag.unknownReturnType(returnType, name, visibility == Visibility.PUBLIC);
                 if (unknownReturn != null) errors.add(unknownReturn);
+                declaredReturn = MethodNode.declaredReturnType(returnType);
                 hasReturnType = true;
             }
 
@@ -997,7 +1000,7 @@ public final class MoveParser {
 
             return new FnResult(
                 new MethodNode(name, params, body, visibility, location,
-                    sighash == null || sighash.isError() ? null : sighash.value()),
+                    sighash == null || sighash.isError() ? null : sighash.value(), null, declaredReturn),
                 hasMut
             );
         }

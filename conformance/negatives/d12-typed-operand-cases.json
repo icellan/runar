@@ -1,0 +1,95 @@
+{
+  "_comment": "D12 FE-F1 / FE-F4: programs every tier must refuse with the shared diagnostic. Driven by d12-typed-operand-lowering.test.ts.",
+  "cases": [
+    {
+      "name": "f4-declared-return-bigint-as-boolean (ts)",
+      "file": "RetMismatch.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\nclass RetMismatch extends SmartContract {\n  constructor() { super(); }\n  private f(x: bigint): boolean { return x; }\n  public unlock(x: bigint) { assert(this.f(x)); }\n}\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bigint-as-boolean (sol)",
+      "file": "RetMismatch.runar.sol",
+      "src": "pragma runar ^0.1.0;\n\ncontract RetMismatch is SmartContract {\n    constructor() {}\n\n    function f(bigint x) private returns (bool) {\n        return x;\n    }\n\n    function unlock(bigint x) public {\n        require(f(x));\n    }\n}\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bigint-as-boolean (go)",
+      "file": "RetMismatch.runar.go",
+      "src": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype RetMismatch struct {\n\trunar.SmartContract\n}\n\nfunc (c *RetMismatch) f(x runar.Bigint) bool {\n\treturn x\n}\n\nfunc (c *RetMismatch) Unlock(x runar.Bigint) {\n\trunar.Assert(c.f(x))\n}\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bigint-as-boolean (rs)",
+      "file": "RetMismatch.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::contract]\npub struct RetMismatch {}\n\nimpl RetMismatch {\n    pub fn unlock(&self, x: Bigint) {\n        assert!(self.f(x));\n    }\n\n    fn f(&self, x: Bigint) -> bool {\n        x\n    }\n}\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bigint-as-boolean (py)",
+      "file": "RetMismatch.runar.py",
+      "src": "from runar import SmartContract, Bigint, public, assert_\n\nclass RetMismatch(SmartContract):\n    def __init__(self):\n        super().__init__()\n\n    def _f(self, x: Bigint) -> bool:\n        return x\n\n    @public\n    def unlock(self, x: Bigint):\n        assert_(self._f(x))\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bigint-as-boolean (zig)",
+      "file": "RetMismatch.runar.zig",
+      "src": "const runar = @import(\"runar\");\n\npub const RetMismatch = struct {\n    pub const Contract = runar.SmartContract;\n\n    pub fn unlock(self: *const RetMismatch, x: i64) void {\n        runar.assert(self.f(x));\n    }\n\n    fn f(self: *const RetMismatch, x: i64) bool {\n        _ = self;\n        return x;\n    }\n};\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bigint-as-boolean (move)",
+      "file": "RetMismatch.runar.move",
+      "src": "module RetMismatch {\n    use runar::types::{Int};\n\n    struct RetMismatch {\n    }\n\n    public fun unlock(contract: &RetMismatch, x: Int) {\n        assert!(self.f(x), 0);\n    }\n\n    fun f(x: Int): bool {\n        return x;\n    }\n}\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bigint-as-boolean (java)",
+      "file": "RetMismatch.runar.java",
+      "src": "package d12;\n\nimport runar.lang.SmartContract;\nimport runar.lang.annotations.Public;\nimport runar.lang.types.Bigint;\n\nimport static runar.lang.Builtins.assertThat;\n\nclass RetMismatch extends SmartContract {\n\n    RetMismatch() {\n        super();\n    }\n\n    private boolean f(Bigint x) {\n        return x;\n    }\n\n    @Public\n    void unlock(Bigint x) {\n        assertThat(f(x));\n    }\n}\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f4-declared-return-bytestring-as-boolean",
+      "file": "RetBytesBool.runar.ts",
+      "src": "import { SmartContract, assert, ByteString } from 'runar-lang';\nclass RetBytesBool extends SmartContract {\n  constructor() { super(); }\n  private f(b: ByteString): boolean { return b; }\n  public unlock(b: ByteString) { assert(this.f(b)); }\n}\n",
+      "error": "returns 'ByteString', which is not assignable to its declared return type 'boolean'"
+    },
+    {
+      "name": "f1-unresolved-operand-equality",
+      "file": "UnresolvedEq.runar.ts",
+      "src": "import { SmartContract, assert, ByteString } from 'runar-lang';\nclass UnresolvedEq extends SmartContract {\n  constructor() { super(); }\n  public unlock(a: ByteString, b: ByteString) { assert(a[0n] === b); }\n}\n",
+      "error": "Cannot resolve the operand types of '==='"
+    },
+    {
+      "name": "f1-unresolved-operand-inequality",
+      "file": "UnresolvedNe.runar.ts",
+      "src": "import { SmartContract, assert, ByteString } from 'runar-lang';\nclass UnresolvedNe extends SmartContract {\n  constructor() { super(); }\n  public unlock(a: ByteString) { assert(a[0n] !== 5n); }\n}\n",
+      "error": "Cannot resolve the operand types of '!=='"
+    },
+    {
+      "name": "f4-declared-void-return-with-value",
+      "file": "VoidRet.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\nclass VoidRet extends SmartContract {\n  constructor() { super(); }\n  private f(x: bigint): void { return x; }\n  public unlock(x: bigint) { this.f(x); assert(x > 0n); }\n}\n",
+      "error": "returns 'bigint', which is not assignable to its declared return type 'void'"
+    },
+    {
+      "name": "f4-declared-fixedarray-return-with-scalar",
+      "file": "ArrRet.runar.ts",
+      "src": "import { SmartContract, assert, FixedArray } from 'runar-lang';\nclass ArrRet extends SmartContract {\n  constructor() { super(); }\n  private f(x: bigint): FixedArray<bigint, 2> { return x; }\n  public unlock(x: bigint) { this.f(x); assert(x > 0n); }\n}\n",
+      "error": "which is not assignable to its declared return type"
+    },
+    {
+      "name": "f4-undeclared-return-values-do-not-unify (ts)",
+      "file": "Mixed.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\nclass Mixed extends SmartContract {\n  constructor() { super(); }\n  private h(c: boolean) { if (c) { return 1n; } return true; }\n  public unlock(c: boolean) { assert(this.h(c)); }\n}\n",
+      "error": "returns values of incompatible types ('bigint', 'boolean'); declare its return type"
+    },
+    {
+      "name": "f4-undeclared-return-values-do-not-unify (rb)",
+      "file": "RbMixed.runar.rb",
+      "src": "require 'runar'\n\nclass RbMixed < Runar::SmartContract\n  def initialize\n    super()\n  end\n\n  runar_public c: Boolean\n  def unlock(c)\n    assert _h(c)\n  end\n\n  private\n\n  params c: Boolean\n  def _h(c)\n    if c\n      return 1\n    end\n    true\n  end\nend\n",
+      "error": "returns values of incompatible types ('bigint', 'boolean'); declare its return type"
+    }
+  ]
+}

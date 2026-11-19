@@ -109,7 +109,7 @@ class R069BuiltinParityTest {
         sb.append("00009d7c"); // prologue: seed slot, OP_NUMEQUALVERIFY, OP_SWAP
         sb.append("007c");     // OP_0 OP_SWAP — empty accumulator under the data
         sb.append(REVERSE_ITERATION_HEX.repeat(REVERSE_ITERATIONS));
-        sb.append("75");       // OP_DROP — drop the drained remainder
+        sb.append("0088");     // OP_0 OP_EQUALVERIFY — D12 BM-F3: the remainder must be empty
         sb.append("7c87");     // OP_SWAP OP_EQUAL — the probe's comparison
         return sb.toString();
     }
@@ -117,7 +117,7 @@ class R069BuiltinParityTest {
     @Test
     void reverseBytesLowersToThePeerTiersUnrolledReversal() throws Exception {
         String expected = expectedReverseBytesHex();
-        assertEquals(11458, expected.length(), "reference hex length drifted");
+        assertEquals(11460, expected.length(), "reference hex length drifted");
         assertEquals(expected, PipelineTestSupport.hex(SRC_REVERSE_BYTES, FILE));
     }
 
@@ -131,7 +131,7 @@ class R069BuiltinParityTest {
         String hex = PipelineTestSupport.hex(SRC_REVERSE_BYTES, FILE);
         int start = hex.indexOf("007c" + REVERSE_ITERATION_HEX);
         assertTrue(start >= 0, "reversal loop not found in emitted script");
-        int end = start + 4 + REVERSE_ITERATION_HEX.length() * REVERSE_ITERATIONS + 2; // + OP_DROP
+        int end = start + 4 + REVERSE_ITERATION_HEX.length() * REVERSE_ITERATIONS + 4; // + OP_0 OP_EQUALVERIFY
         String loop = hex.substring(start, end);
         assertEquals("0201", MiniVm.reverseWith(loop, "0102"));
         assertEquals("", MiniVm.reverseWith(loop, ""));
@@ -325,6 +325,11 @@ class R069BuiltinParityTest {
                          0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60 ->
                         stack.push(encodeNum(op - 0x50));
                     case 0x75 -> stack.pop();                             // OP_DROP
+                    case 0x88 -> {                                        // OP_EQUALVERIFY
+                        byte[] a = stack.pop();
+                        byte[] b = stack.pop();
+                        if (!java.util.Arrays.equals(a, b)) throw new IllegalStateException("OP_EQUALVERIFY failed");
+                    }
                     case 0x76 -> stack.push(stack.peek().clone());        // OP_DUP
                     case 0x77 -> {                                        // OP_NIP
                         byte[] top = stack.pop();
