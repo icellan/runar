@@ -181,9 +181,13 @@ public final class SighashValidate {
                         + " output or silently brick the spend. Use ALL."));
                 }
 
-                // A stateful mutate-only (or data-only) method auto-injects a
-                // single state-continuation output whose value is the caller-chosen
-                // `_newAmount`; under SINGLE that continuation is value-skimmable (F1).
+                // D25: a mutate-only (auto-continuation) method under SINGLE is
+                // SOUND and is the DEFAULT for a contract whose continuation
+                // methods are all mutate-only (ContinuationBinding). SINGLE hashes
+                // the whole same-index output, value included, and the F-024 floor
+                // (`_newAmount >= extractAmount`) stops a dust continuation; the
+                // change is not committed (N-038). The refusal that used to stand
+                // here (e88f202c8) predates both.
                 boolean isMutateOnlyAutoContinuation =
                     needsContinuation && scan.stateOutputCount == 0 && scan.dataOutputCount == 0;
 
@@ -193,14 +197,7 @@ public final class SighashValidate {
                 int committed = stateOutputs + scan.dataOutputCount;
 
                 if (isMutateOnlyAutoContinuation) {
-                    out.add(err(loc, "@sighash " + label + ": this stateful method's state continuation is"
-                        + " sized by the caller-chosen _newAmount, but SINGLE commits ONLY to the same-index"
-                        + " output WITHOUT pinning its value — a spender can set _newAmount to dust, drive the"
-                        + " change output to zero, and append a draining output while the covenant + OP_PUSH_TX"
-                        + " binding still validate (value skim); an honest change>0 leaves the UTXO"
-                        + " unspendable. A mutate-only SINGLE continuation is unsound. Use ALL, or emit an"
-                        + " explicit addOutput/addRawOutput that carries the full protected value at this"
-                        + " input's index."));
+                    // Sound (see above): nothing to report.
                 } else if (committed > 1) {
                     out.add(err(loc, "@sighash " + label + ": SINGLE commits ONLY to the output at this"
                         + " input's index, but this method binds " + committed + " outputs ("

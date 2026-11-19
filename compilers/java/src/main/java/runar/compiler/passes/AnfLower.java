@@ -117,6 +117,12 @@ public final class AnfLower {
 
     /** Lower a (validated, type-checked) contract AST to ANF IR. */
     public static AnfProgram run(ContractNode contract) {
+        // D25: lower the contract with its continuation binding resolved
+        // (SINGLE sighash for a mutate-only contract) and, for a 'bind'
+        // contract, the hidden spent-outpoint field. The pipeline applies it
+        // before fixed-array expansion (as index.ts does); idempotent here so a
+        // caller that lowers a validated contract directly gets the same IR.
+        contract = ContinuationBinding.apply(contract);
         List<AnfProperty> properties = lowerProperties(contract);
         List<AnfMethod> methods = lowerMethods(contract);
 
@@ -510,6 +516,14 @@ public final class AnfLower {
                         String eqRef = ctx.emit(new BinOp("===", hashRef, outputHashRef, "bytes"));
                         ctx.emit(new Assert(eqRef, true));
                     } else {
+                        // D25: a 'bind' contract first records the spent
+                        // outpoint in its hidden last state field, so this
+                        // continuation differs from every other input's and no
+                        // two inputs can share one output list.
+                        if (ContinuationBinding.bindsOutpoint(contract)) {
+                            String bindingRef = emitOutpointBinding(ctx);
+                            ctx.emit(new UpdateProp(ContinuationBinding.TWIN_BINDING_FIELD, bindingRef));
+                        }
                         String stateScriptRef = ctx.emit(new GetStateScript());
                         String preimageRef2 = ctx.emit(new LoadParam("txPreimage"));
                         String newAmountRef = ctx.emit(new LoadParam("_newAmount"));
@@ -582,6 +596,18 @@ public final class AnfLower {
         }
 
         return out;
+    }
+
+    /**
+     * D25: {@code sha256(extractOutpoint(txPreimage))}, the value a 'bind'
+     * contract stores in its hidden last state field in every continuation it
+     * makes (stateful-scaffold.ts {@code emitOutpointBinding}). Returns the
+     * hash's binding name.
+     */
+    private static String emitOutpointBinding(LowerCtx ctx) {
+        String preimageRef = ctx.emit(new LoadParam("txPreimage"));
+        String outpointRef = ctx.emit(new Call("extractOutpoint", List.of(preimageRef)));
+        return ctx.emit(new Call("sha256", List.of(outpointRef)));
     }
 
     /** N-016: suffix of the binding name of a local that shadows a property. */
@@ -2378,8 +2404,10 @@ public final class AnfLower {
                 List<Expression> flatArgs = flattenAddOutputArgs(e.args());
                 List<String> argRefs = lowerArgs(flatArgs);
                 String satoshis = argRefs.get(0);
-                List<String> stateValues = argRefs.subList(1, argRefs.size());
-                String ref = emit(new AddOutput(satoshis, new ArrayList<>(stateValues), ""));
+                List<String> stateValues = new ArrayList<>(argRefs.subList(1, argRefs.size()));
+                // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+                if (ContinuationBinding.bindsOutpoint(contract)) stateValues.add(emitOutpointBinding(this));
+                String ref = emit(new AddOutput(satoshis, stateValues, ""));
                 addOutputRefs.add(ref);
                 return ref;
             }

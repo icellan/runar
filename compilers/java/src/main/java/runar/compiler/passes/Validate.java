@@ -120,7 +120,21 @@ public final class Validate {
         // unsound under a method's declared @sighash mode (security core). Emits
         // both errors (unsound usages) and warnings (e.g. an explicit single-output
         // SINGLE covenant whose same-index value cannot be pinned statically).
-        for (SighashValidate.Diag d : SighashValidate.validate(contract)) {
+        // D25: classify the contract's continuation binding and resolve the
+        // effective sighash of a mutate-only contract's continuation methods
+        // (SINGLE) BEFORE the field checks, so they see the effective mode.
+        // The AST is immutable: the pipeline lowers ContinuationBinding.apply's
+        // contract, which carries the same resolution. See ContinuationBinding.
+        ContinuationBinding.Resolution d25 = ContinuationBinding.resolve(contract);
+        for (SighashValidate.Diag d : d25.diagnostics()) {
+            if (d.isWarning()) {
+                ctx.warn(d.message(), d.loc());
+            } else {
+                ctx.error(d.message(), d.loc());
+            }
+        }
+
+        for (SighashValidate.Diag d : SighashValidate.validate(d25.contract())) {
             if (d.isWarning()) {
                 ctx.warn(d.message(), d.loc());
             } else {

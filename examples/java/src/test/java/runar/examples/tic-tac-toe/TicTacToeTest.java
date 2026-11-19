@@ -22,6 +22,13 @@ import static runar.lang.runtime.MockCrypto.num2bin;
 
 class TicTacToeTest {
 
+    /**
+     * D25: a contract whose continuation methods are all mutate-only commits
+     * them under SIGHASH_SINGLE|FORKID by default, and the stateful prologue
+     * pins the preimage's sighash type to it.
+     */
+    private static final long SIGHASH_SINGLE_FORKID = 0x43;
+
     private static final PubKey ALICE = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000001");
     private static final PubKey BOB   = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000002");
     private static final PubKey ZERO_PK = PubKey.fromHex("02" + "00".repeat(32));
@@ -55,7 +62,7 @@ class TicTacToeTest {
      * is one whose input (the preimage amount, player X's bet) is 10000 - bet.
      */
     private static Preimage inputOf(long sats) {
-        return Preimage.builder().amount(BigInteger.valueOf(sats)).build();
+        return Preimage.builder().sighashType(SIGHASH_SINGLE_FORKID).amount(BigInteger.valueOf(sats)).build();
     }
 
     private static void joinPaying(ContractSimulator sim) {

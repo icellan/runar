@@ -20,6 +20,18 @@ import runar.lang.sdk.RunarArtifact.StateField;
 public final class RunarContract {
 
     /**
+     * D25: the sighash type of every user {@code Sig} argument the SDK signs or
+     * publishes a digest for (TS {@code userSigDigest}): ALL|FORKID, the byte
+     * every signer appends. When a method's covenant preimage is built under
+     * another mode (SIGHASH_SINGLE is the default for a contract whose
+     * continuation methods are all mutate-only) the user digest is still the
+     * ALL|FORKID one over the same tx, subscript and code separator, so a user
+     * signature keeps committing to every input and output. The covenant's own
+     * preimage stays under the method's mode.
+     */
+    private static final int USER_SIG_HASH = RawTx.SIGHASH_ALL_FORKID;
+
+    /**
      * Producer-side marker (issue #106) for the deliberately-empty branch of an
      * OR-CHECKSIG method — {@code checkSig(sigA, pkA) || checkSig(sigB, pkB)},
      * where {@code ||} lowers to the non-lazy {@code OP_BOOLOR} so BOTH
@@ -1075,6 +1087,23 @@ public final class RunarContract {
                           + "covenant to bind it."));
         }
 
+        // D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+        // continuation methods are all mutate-only) commits ONE output per
+        // input, at that input's index. A call that spends extra contract
+        // inputs into the one continuation (a many-to-one merge) is exactly the
+        // twin-input shape SINGLE refuses: every extra input would need its own
+        // continuation at its own index, so the tx cannot verify. Fail closed
+        // before building it.
+        int planSigHash = m.sigHashType() != null ? m.sigHashType() : RawTx.SIGHASH_ALL_FORKID;
+        if (extraContractInputCount(options) > 0 && (planSigHash & 0x1f) == 0x03) {
+            throw new IllegalArgumentException(
+                "RunarContract.call(" + methodName + "): additionalContractInputs cannot be spent into one "
+                    + "continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation "
+                    + "methods are all mutate-only, D25): SINGLE commits each input to its own output at its own "
+                    + "index. Merge with an addOutput method instead (see FungibleToken.merge), or build each "
+                    + "input's continuation with assembleMultiContractCall");
+        }
+
         return new CallPlan(
             m, resolved, sigIndices, resolvedDataOutputs, orderedOutputs,
             methodNeedsChange, methodNeedsNewAmount, needsOpPushTx, isStateful, parentStateful
@@ -1163,13 +1192,12 @@ public final class RunarContract {
         RawTx tx = layoutStateless(unlockHex, provider, signer, options);
 
         if (!sigIndices.isEmpty()) {
-            // Issue #123: sign under the method's declared @sighash mode (default 0x41).
-            int methodSigHash = m.sigHashType() != null ? m.sigHashType() : RawTx.SIGHASH_ALL_FORKID;
-            byte[] sighash = computeContractSighash(tx.toHex(), 0, methodSigHash);
+            // D25: user Sigs sign the ALL|FORKID digest (USER_SIG_HASH).
+            byte[] sighash = computeContractSighash(tx.toHex(), 0, USER_SIG_HASH);
             for (int idx : sigIndices) {
                 byte[] der = signer.sign(sighash, null);
                 String sigHex = ScriptUtils.bytesToHex(der)
-                    + String.format("%02x", methodSigHash & 0xff);
+                    + String.format("%02x", USER_SIG_HASH);
                 resolved.set(idx, sigHex);
             }
             unlockHex = buildUnlockingScript(m, resolved, intentWitnessHex);
@@ -1219,12 +1247,12 @@ public final class RunarContract {
             options
         );
         // Sign Sig placeholders against the same code-separator-aware
-        // sighash the contract input enforces (issue #123: under the method's mode).
+        // sighash the contract input enforces (D25: user Sigs are ALL|FORKID, USER_SIG_HASH).
         List<Object> signedArgs = new ArrayList<>(lay.resolved());
         for (int idx : sigIndices) {
             byte[] der = signer.sign(lay.userSighash(), null);
             signedArgs.set(idx, ScriptUtils.bytesToHex(der)
-                + String.format("%02x", lay.methodSigHash() & 0xff));
+                + String.format("%02x", USER_SIG_HASH));
         }
         return finishPushTx(m, methodName, lay.tx(), lay, signedArgs, provider);
     }
@@ -1754,7 +1782,7 @@ public final class RunarContract {
         // caller: call() signs it in-process, prepareCall publishes it).
         byte[] userSighash = sigIndices.isEmpty()
             ? new byte[0]
-            : tx.sighashBIP143(0, sighashSubscript, currentUtxo.satoshis(), methodSigHash);
+            : tx.sighashBIP143(0, sighashSubscript, currentUtxo.satoshis(), USER_SIG_HASH);
 
         // Placeholder-Sig unlock; the final one is spliced in by finishPushTx.
         String finalUnlock = buildPushTxUnlock(
@@ -1782,11 +1810,11 @@ public final class RunarContract {
             List<Integer> sigs = extraSigIndices.get(i);
             if (!sigs.isEmpty()) {
                 byte[] extraSighash = tx.sighashBIP143(
-                    inputIdx, subscript, u.satoshis(), methodSigHash);
+                    inputIdx, subscript, u.satoshis(), USER_SIG_HASH);
                 for (int idx : sigs) {
                     byte[] der = signer.sign(extraSighash, null);
                     r.set(idx, ScriptUtils.bytesToHex(der)
-                        + String.format("%02x", methodSigHash & 0xff));
+                        + String.format("%02x", USER_SIG_HASH));
                 }
             }
             tx.setUnlockingScript(inputIdx, buildPushTxUnlock(
@@ -1974,15 +2002,15 @@ public final class RunarContract {
             preimageHex = ScriptUtils.bytesToHex(preimage);
 
             // Sign Sig placeholders against the same code-separator-aware
-            // sighash the contract input enforces (issue #123: under the method's mode).
+            // sighash the contract input enforces (D25: user Sigs are ALL|FORKID, USER_SIG_HASH).
             if (!sigIndices.isEmpty()) {
                 byte[] userSighash = tx.sighashBIP143(
-                    0, sighashSubscript, contractSats, methodSigHash
+                    0, sighashSubscript, contractSats, USER_SIG_HASH
                 );
                 for (int idx : sigIndices) {
                     byte[] der = signer.sign(userSighash, null);
                     String sigHex = ScriptUtils.bytesToHex(der)
-                        + String.format("%02x", methodSigHash & 0xff);
+                        + String.format("%02x", USER_SIG_HASH);
                     resolved.set(idx, sigHex);
                 }
             }
@@ -2002,12 +2030,12 @@ public final class RunarContract {
             tx.setUnlockingScript(0, placeholderUnlock);
             if (!sigIndices.isEmpty()) {
                 byte[] sighash = tx.sighashBIP143(
-                    0, currentUtxo.scriptHex(), contractSats, methodSigHash
+                    0, currentUtxo.scriptHex(), contractSats, USER_SIG_HASH
                 );
                 for (int idx : sigIndices) {
                     byte[] der = signer.sign(sighash, null);
                     String sigHex = ScriptUtils.bytesToHex(der)
-                        + String.format("%02x", methodSigHash & 0xff);
+                        + String.format("%02x", USER_SIG_HASH);
                     resolved.set(idx, sigHex);
                 }
             }
@@ -2692,9 +2720,8 @@ public final class RunarContract {
         // SDKs.
         byte[] sighash = new byte[0];
         if (!sigIndices.isEmpty()) {
-            // Issue #123: digest under the method's declared @sighash mode (default 0x41).
-            int methodSigHash = m.sigHashType() != null ? m.sigHashType() : RawTx.SIGHASH_ALL_FORKID;
-            sighash = computeContractSighash(txHex, 0, methodSigHash);
+            // D25: user Sigs sign the ALL|FORKID digest (USER_SIG_HASH).
+            sighash = computeContractSighash(txHex, 0, USER_SIG_HASH);
         }
         List<byte[]> sighashes = new ArrayList<>(sigIndices.size());
         for (int i = 0; i < sigIndices.size(); i++) sighashes.add(sighash);
@@ -2958,7 +2985,7 @@ public final class RunarContract {
             byte[] userSighash = sigIndices.isEmpty()
                 ? new byte[0]
                 : tx.sighashBIP143(
-                    0, sighashSubscript, contractSats, methodSigHash
+                    0, sighashSubscript, contractSats, USER_SIG_HASH
                 );
             sighashes = new ArrayList<>(sigIndices.size());
             for (int i = 0; i < sigIndices.size(); i++) sighashes.add(userSighash.clone());
@@ -2978,7 +3005,7 @@ public final class RunarContract {
             byte[] sh = sigIndices.isEmpty()
                 ? new byte[0]
                 : tx.sighashBIP143(
-                    0, currentUtxo.scriptHex(), contractSats, methodSigHash
+                    0, currentUtxo.scriptHex(), contractSats, USER_SIG_HASH
                 );
             sighashes = new ArrayList<>(sigIndices.size());
             for (int i = 0; i < sigIndices.size(); i++) sighashes.add(sh.clone());
@@ -3090,17 +3117,15 @@ public final class RunarContract {
                     + "' not found in " + artifact.contractName()
             );
         }
-
-        // Splice real signatures into the resolved-args list. Issue #123: the
-        // appended flag byte must match the mode the prepared sighash digest was
-        // built under (see prepareTerminalCall), so external signers verify.
-        int methodSigHash = m.sigHashType() != null ? m.sigHashType() : RawTx.SIGHASH_ALL_FORKID;
+        // Splice real signatures into the resolved-args list. D25: user Sigs
+        // are ALL|FORKID (USER_SIG_HASH), the mode every prepared digest is
+        // built under, so external signers verify.
         List<Object> resolved = new ArrayList<>(prepared.resolvedArgs);
         for (int i = 0; i < prepared.sigIndices().size(); i++) {
             int argIdx = prepared.sigIndices().get(i);
             byte[] der = signatures.get(i);
             String sigHex = ScriptUtils.bytesToHex(der)
-                + String.format("%02x", methodSigHash & 0xff);
+                + String.format("%02x", USER_SIG_HASH);
             resolved.set(argIdx, sigHex);
         }
         if (prepared.pushTx != null) {
