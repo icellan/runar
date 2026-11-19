@@ -327,7 +327,10 @@ module RunarCompiler
   # +expand_fixed_arrays.rb+ for semantics.
   def self._expand_fixed_arrays(contract)
     require_relative "frontend/expand_fixed_arrays"
-    Frontend.expand_fixed_arrays(contract)
+    require_relative "frontend/continuation_binding"
+    # D25: a "bind" contract gains its hidden spent-outpoint state field here
+    # (after typecheck, so user-facing arity rules never see it).
+    Frontend.expand_fixed_arrays(Frontend::ContinuationBinding.inject(contract))
   end
   private_class_method :_expand_fixed_arrays
 

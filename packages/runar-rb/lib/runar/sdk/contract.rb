@@ -710,6 +710,22 @@ module Runar
                 'resulting tx would be invalid'
         end
 
+        # D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+        # continuation methods are all mutate-only) commits ONE output per
+        # input, at that input's index. A call that spends extra contract
+        # inputs into the one continuation (a many-to-one merge) is exactly the
+        # twin-input shape SINGLE refuses: every extra input would need its own
+        # continuation at its own index, so the tx cannot verify. Fail closed
+        # before building it.
+        if !extra_contract_utxos.empty? && (resolve_sighash_type(method_name) & 0x1F) == 0x03
+          raise ArgumentError,
+                "RunarContract.call(#{method_name}): additionalContractInputs cannot be spent into one " \
+                'continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation ' \
+                'methods are all mutate-only, D25): SINGLE commits each input to its own output at its own ' \
+                'index. Merge with an addOutput method instead (see FungibleToken.merge), or build each ' \
+                "input's continuation with assembleMultiContractCall"
+        end
+
         # Resolve per-input args for additional contract inputs.
         raw_per_input_args = Array(opts.additional_contract_input_args)
         resolved_per_input_args = extra_contract_utxos.each_with_index.map do |_, i|
@@ -900,7 +916,8 @@ module Runar
             method_uses_code_part: method_uses_code_part
           )
 
-        sighash = compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = user_sig_digest(final_preimage, signed_tx, contract_utxo, code_sep_idx, method_name)
 
         prepared = build_prepared_call(
           sighash, final_preimage, signed_tx,
@@ -1352,6 +1369,23 @@ module Runar
         Digest::SHA256.hexdigest(Digest::SHA256.digest(bytes))
       end
 
+      # D25: the digest an external signer signs for a user +Sig+ argument
+      # (TS +userSigDigest+). User signatures are ALL|FORKID (the byte every
+      # signer appends), so when the method's covenant preimage is built under
+      # another mode (SIGHASH_SINGLE is the default for a mutate-only contract)
+      # the digest is recomputed over the same tx, subscript and code separator
+      # under ALL|FORKID. The covenant's own preimage (+PreparedCall#preimage+)
+      # is unchanged.
+      def user_sig_digest(covenant_preimage, tx_hex, utxo, code_sep_idx, method_name)
+        return '' if covenant_preimage.nil? || covenant_preimage.empty?
+        return compute_bip143_sighash(covenant_preimage) if resolve_sighash_type(method_name) == SDK::SIGHASH_ALL_FORKID
+
+        compute_bip143_sighash(
+          SDK.compute_op_push_tx_preimage(tx_hex, 0, utxo.script, utxo.satoshis, code_sep_idx,
+                                          SDK::SIGHASH_ALL_FORKID)
+        )
+      end
+
       # ---------------------------------------------------------------------------
       # Initialisation helpers
       # ---------------------------------------------------------------------------
@@ -1560,7 +1594,8 @@ module Runar
           term_tx    = SDK.insert_unlocking_script(term_tx, 1, fee_unlock)
         end
 
-        sighash = compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = user_sig_digest(final_preimage, term_tx, contract_utxo, code_sep_idx, method_name)
 
         PreparedCall.new(
           sighash: sighash,
