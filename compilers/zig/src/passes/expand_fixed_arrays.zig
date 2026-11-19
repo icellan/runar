@@ -586,7 +586,12 @@ const Ctx = struct {
                 // `rewriteIndexAssign`. Statement position discards the
                 // expression's value, so prefix and postfix are equivalent here.
                 if (incrementOnIndexAccess(e.expr)) |inc| {
-                    if (self.tryResolveArrayBase(inc.ia.object) != null) {
+                    // Resolve the ROOT of the chain, so a nested element
+                    // (`this.grid[0][1]++`) desugars too; its immediate object
+                    // `this.grid[0]` is not itself an array property.
+                    var root = inc.ia.object;
+                    while (root == .index_access) root = root.index_access.object;
+                    if (self.tryResolveArrayBase(root) != null) {
                         try self.desugarIndexIncrement(out, inc.ia, inc.op, e.source_loc);
                         return;
                     }
