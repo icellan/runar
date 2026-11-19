@@ -757,24 +757,28 @@ the constants had been honest all along.
 -- anchors `[fresh]` and byte-equal to their expected-script.hex (none calls
 -- reverseBytes), so only their fingerprints move. The same run live-compiled
 -- the moved byte-builtins golden byte-exact (80/100).
--- 2026-11-19 (D25 twin-input binding): no model change (fingerprint stays
--- v1:65f:7263601b:ba4bd7e1f4d01a93). state-covenant's golden moved 1017 -> 975
+-- 2026-11-19 (D25 twin-input binding): the model fingerprint moved to
+-- v1:65f:7264444b:b0fad7397e444530 (ANF/WF.lean: a private helper of a
+-- stateful program may reference the caller's implicit `txPreimage`, which
+-- `this.txPreimage` and D25's addOutput outpoint binding lower to; the
+-- private-helper-outputs golden is the first to carry it). state-covenant's golden moved 1017 -> 975
 -- bytes: its only continuation method is mutate-only, so it now commits under
 -- SIGHASH_SINGLE|FORKID (no change output, no `_changePKH` gate). A full live
 -- regen (`RUNAR_VERIFICATION_REGEN=1`) returned babybear and merkle-proof
 -- `[fresh]`; state-covenant came back `[stale]` and its constant was replaced
--- by the live hex, which byte-equals the new expected-script.hex. All three
+-- by the live hex, which byte-equals the new expected-script.hex. A second
+-- full live regen under the WF change returned all three `[fresh]`. All three
 -- stay `.regenLive`. Every moved baseline golden live-compiles byte-exact
 -- (80/100, the baseline).
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:65f:7263601b:ba4bd7e1f4d01a93"⟩,
+  ⟨"babybear", .regenLive, "v1:65f:7264444b:b0fad7397e444530"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:65f:7263601b:ba4bd7e1f4d01a93"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:65f:7264444b:b0fad7397e444530"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -797,7 +801,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:65f:7263601b:ba4bd7e1f4d01a93"⟩,
+  ⟨"state-covenant", .regenLive, "v1:65f:7264444b:b0fad7397e444530"⟩,
 ]
 
 /--
