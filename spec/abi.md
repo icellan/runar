@@ -419,6 +419,8 @@ Stateful contract public methods have **one implicit parameter** injected by the
 
 The `txPreimage` parameter is appended to the ABI method params (as shown in section 7.3) and is the top-most stack item.
 
+**D25 (one continuation per input):** in a contract whose continuation methods are all mutate-only, those methods commit under `SIGHASH_SINGLE|FORKID` by default: their ABI entry carries `"sigHashType": 67` (`195` for `SINGLE|ANYONECANPAY|FORKID`), they declare `_newAmount` but no `_changePKH` / `_changeAmount`, the SDK builds the preimage under that mode, and the continuation must sit at the output index equal to the contract's input index. A contract that mixes a default continuation with `addOutput` methods or data outputs keeps `ALL|FORKID` and gains a trailing state field `_spentOutpointHash` (`Sha256`, 32 zero bytes at deploy, not a constructor parameter) that every continuation sets to `sha256(spent outpoint)`. See `docs/language-reference.md`, "One continuation per input (D25)".
+
 **Note:** The `txPreimage` parameter name uses the compiler-internal name `txPreimage` (not `preimage`). This matches the implicit parameter registered during ANF lowering.
 
 **History:** an earlier revision of this section (pre-BUG-100) described a second implicit parameter, `_opPushTxSig`, pushed as the bottom-most stack item. BUG-100's fix moved signature derivation on-chain, removing that stack slot; an SDK that still pushes a spender-supplied `_opPushTxSig` value produces an unlocking script with one extra item and fails.
