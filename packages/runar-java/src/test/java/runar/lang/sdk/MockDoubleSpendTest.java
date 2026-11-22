@@ -66,6 +66,20 @@ class MockDoubleSpendTest {
     }
 
     @Test
+    void listUtxosListsANewP2pkhOutputUnderTheAddressItPays() {
+        MockProvider p = new MockProvider();
+        String pkh = "1111111111111111111111111111111111111111";
+        p.addUtxo(pkh, new UTXO("cd".repeat(32), 0, 1L, OP_TRUE));
+        p.addKnownOutpoint(FUND, 0, OP_TRUE, 10_000L);
+        RawTx t = new RawTx();
+        t.addInput(FUND, 0, "");
+        t.addOutput(9_000L, "76a914111111111111111111111111111111111111111188ac");
+        String txid = p.broadcastRaw(t.toHex());
+        assertEquals(java.util.List.of(new UTXO(txid, 0, 9_000L, "76a914111111111111111111111111111111111111111188ac")),
+            p.listUtxos(pkh).stream().filter(u -> u.txid().equals(txid)).toList());
+    }
+
+    @Test
     void aRefusedBroadcastDoesNotSpendItsInputs() {
         MockProvider p = new MockProvider();
         String d = deploy(p);

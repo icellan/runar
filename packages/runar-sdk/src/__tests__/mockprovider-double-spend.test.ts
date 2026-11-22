@@ -56,6 +56,18 @@ describe('MockProvider refuses a double spend', () => {
     expect((await provider.getUtxos('funder')).map((u) => u.outputIndex)).toEqual([1]);
   });
 
+  it('getUtxos lists a new P2PKH output under the address it pays', async () => {
+    const provider = new MockProvider();
+    const pkh = '1111111111111111111111111111111111111111';
+    provider.addUtxo(pkh, { txid: 'cd'.repeat(32), outputIndex: 0, satoshis: 1, script: '51' });
+    provider.addUtxo('funder', { txid: FUNDING_TXID, outputIndex: 0, satoshis: 10_000, script: '51' });
+    const tx = spend(FUNDING_TXID, 0, 9_000);
+    tx.outputs[0]!.lockingScript = LockingScript.fromHex('76a914111111111111111111111111111111111111111188ac');
+    const txid = await provider.broadcast(tx);
+    const listed = (await provider.getUtxos(pkh)).filter((u) => u.txid === txid);
+    expect(listed).toEqual([{ txid, outputIndex: 0, satoshis: 9_000, script: '76a914111111111111111111111111111111111111111188ac' }]);
+  });
+
   it('a refused broadcast does not mark its inputs spent', async () => {
     const provider = new MockProvider();
     const deployTxid = await deploy(provider);

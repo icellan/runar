@@ -275,3 +275,36 @@ test "getUtxos no longer lists an outpoint an accepted broadcast spent" {
     try std.testing.expectEqual(@as(usize, 1), utxos.len);
     try std.testing.expectEqual(@as(i32, 1), utxos[0].output_index);
 }
+
+test "getUtxos lists a new P2PKH output under the address it pays" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, "testnet");
+    defer mock.deinit();
+    const pkh = "1111111111111111111111111111111111111111";
+    try mock.addUtxo(pkh, .{ .txid = "cd" ** 32, .output_index = 0, .satoshis = 1, .script = "51" });
+    try mock.addKnownOutpoint(PREV_A, 0, "51", 10_000);
+    const raw = "01000000" ++ "01" ++ PREV_A ++ "00000000" ++ "00" ++ "ffffffff" ++
+        "01" ++ "2823000000000000" ++ "19" ++ "76a914111111111111111111111111111111111111111188ac" ++ "00000000";
+    var prov = mock.provider();
+    const txid = try prov.broadcast(allocator, raw);
+    defer allocator.free(txid);
+
+    const utxos = try prov.getUtxos(allocator, pkh);
+    defer {
+        for (utxos) |*u| {
+            var mu = u.*;
+            mu.deinit(allocator);
+        }
+        allocator.free(utxos);
+    }
+    var found = false;
+    for (utxos) |u| {
+        if (std.mem.eql(u8, u.txid, txid)) {
+            try std.testing.expectEqual(@as(i32, 0), u.output_index);
+            try std.testing.expectEqual(@as(i64, 9_000), u.satoshis);
+            try std.testing.expectEqualStrings("76a914111111111111111111111111111111111111111188ac", u.script);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}

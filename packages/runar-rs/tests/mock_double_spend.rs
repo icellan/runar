@@ -71,6 +71,21 @@ fn get_utxos_omits_an_outpoint_an_accepted_broadcast_spent() {
 }
 
 #[test]
+fn get_utxos_lists_a_new_p2pkh_output_under_the_address_it_pays() {
+    let mut p = MockProvider::testnet();
+    let pkh = "1111111111111111111111111111111111111111";
+    p.add_utxo(pkh, Utxo { txid: "cd".repeat(32), output_index: 0, satoshis: 1, script: "51".into() });
+    let fund = "ab".repeat(32);
+    p.add_utxo("funder", Utxo { txid: fund.clone(), output_index: 0, satoshis: 10_000, script: "51".into() });
+    let mut tx = spend(&fund, 9_000);
+    tx.outputs[0].locking_script = LockingScript::from_hex("76a914111111111111111111111111111111111111111188ac").unwrap();
+    let txid = p.broadcast(&tx).expect("broadcast");
+    let listed: Vec<Utxo> = p.get_utxos(pkh).unwrap().into_iter().filter(|u| u.txid == txid).collect();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].output_index, listed[0].satoshis, listed[0].script.as_str()), (0, 9_000, "76a914111111111111111111111111111111111111111188ac"));
+}
+
+#[test]
 fn a_refused_broadcast_does_not_spend_its_inputs() {
     let mut p = MockProvider::testnet();
     let d = deploy(&mut p);

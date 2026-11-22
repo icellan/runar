@@ -51,6 +51,16 @@ def test_get_utxos_omits_an_outpoint_an_accepted_broadcast_spent():
     assert [u.output_index for u in p.get_utxos('funder')] == [1]
 
 
+def test_get_utxos_lists_a_new_p2pkh_output_under_the_address_it_pays():
+    p = MockProvider()
+    pkh = '1111111111111111111111111111111111111111'
+    p.add_utxo(pkh, Utxo(txid='cd' * 32, output_index=0, satoshis=1, script=ANYONE_CAN_SPEND))
+    p.add_utxo('funder', Utxo(txid=FUND, output_index=0, satoshis=10_000, script=ANYONE_CAN_SPEND))
+    txid = p.broadcast(build_tx(FUND, [(9_000, '76a914111111111111111111111111111111111111111188ac')]))
+    listed = [u for u in p.get_utxos(pkh) if u.txid == txid]
+    assert [(u.output_index, u.satoshis, u.script) for u in listed] == [(0, 9_000, '76a914111111111111111111111111111111111111111188ac')]
+
+
 def test_a_refused_broadcast_does_not_spend_its_inputs():
     p = MockProvider()
     d = deploy(p)

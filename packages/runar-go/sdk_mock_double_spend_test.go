@@ -59,6 +59,28 @@ func TestMockProvider_GetUtxos_OmitsSpentOutpoints(t *testing.T) {
 	}
 }
 
+func TestMockProvider_GetUtxos_ListsNewP2PKHOutput(t *testing.T) {
+	p := NewMockProvider("testnet")
+	pkh := "1111111111111111111111111111111111111111"
+	p.AddUtxo(pkh, UTXO{Txid: strings.Repeat("cd", 32), OutputIndex: 0, Satoshis: 1, Script: mockValidationAnyoneCanSpendHex})
+	fund := strings.Repeat("ab", 32)
+	p.AddUtxo("funder", UTXO{Txid: fund, OutputIndex: 0, Satoshis: 10_000, Script: mockValidationAnyoneCanSpendHex})
+	txid, err := p.Broadcast(buildOneInputTx(t, fund, 0, mockValidationAnyoneCanSpendHex, 10_000, "", 9_000, "76a914111111111111111111111111111111111111111188ac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	utxos, _ := p.GetUtxos(pkh)
+	found := false
+	for _, u := range utxos {
+		if u.Txid == txid {
+			found = u.OutputIndex == 0 && u.Satoshis == 9_000 && u.Script == "76a914111111111111111111111111111111111111111188ac"
+		}
+	}
+	if !found {
+		t.Fatalf("the new P2PKH output must be listed under %s, got %+v", pkh, utxos)
+	}
+}
+
 func TestMockProvider_Broadcast_RefusesDuplicateInput(t *testing.T) {
 	p := NewMockProvider("testnet")
 	d := doubleSpendDeploy(t, p)

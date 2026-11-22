@@ -54,6 +54,17 @@ RSpec.describe 'Runar::SDK::MockProvider double spend' do
     expect(p.get_utxos('funder').map(&:output_index)).to eq([1])
   end
 
+  it 'lists a new P2PKH output under the address it pays' do
+    p = Runar::SDK::MockProvider.new
+    pkh = '1111111111111111111111111111111111111111'
+    p.add_utxo(pkh, Runar::SDK::Utxo.new(txid: 'cd' * 32, output_index: 0, satoshis: 1, script: OP_TRUE_SCRIPT))
+    p.add_utxo('funder', Runar::SDK::Utxo.new(txid: FUND_TXID, output_index: 0, satoshis: 10_000, script: OP_TRUE_SCRIPT))
+    raw = tx_hex([FUND_TXID], 9_000).sub(/0151(00000000)\z/, '1976a914111111111111111111111111111111111111111188ac\\1')
+    txid = p.broadcast(raw)
+    listed = p.get_utxos(pkh).select { |u| u.txid == txid }
+    expect(listed.map { |u| [u.output_index, u.satoshis, u.script] }).to eq([[0, 9_000, '76a914111111111111111111111111111111111111111188ac']])
+  end
+
   it 'does not mark the inputs of a refused broadcast spent' do
     p = Runar::SDK::MockProvider.new
     d = deploy(p)
