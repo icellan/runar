@@ -27,6 +27,12 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	if hasUntypedOperator(contract) {
 		TypeCheck(contract)
 	}
+	// D25: the same for the twin-input binding. A caller that assembles its
+	// own pipeline and skips InjectContinuationBinding would otherwise lower a
+	// mixed contract with no _spentOutpointHash, leaving its continuations
+	// unbound. Idempotent: a contract that already carries the field is
+	// returned unchanged, so the compiler's own path is unaffected.
+	contract = InjectContinuationBinding(contract)
 	properties := lowerProperties(contract)
 	methods := lowerMethods(contract)
 
