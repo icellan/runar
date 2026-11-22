@@ -233,11 +233,6 @@ func (t *BN254Tracker) findDepth(name string) int {
 	panic(fmt.Sprintf("BN254Tracker: '%s' not on stack %v", name, t.nm))
 }
 
-func (t *BN254Tracker) pushBytes(n string, v []byte) {
-	t.e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: v}})
-	t.nm = append(t.nm, n)
-}
-
 func (t *BN254Tracker) pushBigInt(n string, v *big.Int) {
 	t.e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(v)}})
 	t.nm = append(t.nm, n)
@@ -257,14 +252,6 @@ func (t *BN254Tracker) drop() {
 	t.e(StackOp{Op: "drop"})
 	if len(t.nm) > 0 {
 		t.nm = t.nm[:len(t.nm)-1]
-	}
-}
-
-func (t *BN254Tracker) nip() {
-	t.e(StackOp{Op: "nip"})
-	L := len(t.nm)
-	if L >= 2 {
-		t.nm = append(t.nm[:L-2], t.nm[L-1])
 	}
 }
 
@@ -370,24 +357,6 @@ func (t *BN254Tracker) rawBlock(consume []string, produce string, fn func(emit f
 	fn(t.e)
 	if produce != "" {
 		t.nm = append(t.nm, produce)
-	}
-}
-
-// emitIf emits if/else with tracked stack effect.
-// resultName="" means no result pushed.
-func (t *BN254Tracker) emitIf(condName string, thenFn func(func(StackOp)), elseFn func(func(StackOp)), resultName string) {
-	t.toTop(condName)
-	// condition consumed
-	if len(t.nm) > 0 {
-		t.nm = t.nm[:len(t.nm)-1]
-	}
-	var thenOps []StackOp
-	var elseOps []StackOp
-	thenFn(func(op StackOp) { thenOps = append(thenOps, op) })
-	elseFn(func(op StackOp) { elseOps = append(elseOps, op) })
-	t.e(StackOp{Op: "if", Then: thenOps, Else: elseOps})
-	if resultName != "" {
-		t.nm = append(t.nm, resultName)
 	}
 }
 

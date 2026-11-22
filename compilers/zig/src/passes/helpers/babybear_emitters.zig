@@ -211,14 +211,6 @@ const BBTracker = struct {
         }
     }
 
-    fn nip(self: *BBTracker) !void {
-        try self.emitRaw(.{ .nip = {} });
-        const len = self.names.items.len;
-        if (len >= 2) {
-            _ = self.names.orderedRemove(len - 2);
-        }
-    }
-
     fn over(self: *BBTracker, name: ?[]const u8) !void {
         try self.emitRaw(.{ .over = {} });
         try self.names.append(self.allocator, name);
