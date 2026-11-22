@@ -695,6 +695,63 @@ func IncompatibleReturnTypesMsg(method string, types []string) string {
 		method, strings.Join(quoted, ", "))
 }
 
+// MissingReturnMsg is N-511's refusal; one wording in every tier.
+func MissingReturnMsg(method, declared string) string {
+	return fmt.Sprintf("Method '%s' declares return type '%s' but does not return a value on every path",
+		method, declared)
+}
+
+// returnsOnEveryPath is N-511's rule: a statement list returns a value on
+// every path when one of its statements does; `return <value>` returns; an
+// `if` returns only when it has an else and both arms return; a loop never
+// counts. Tail value: an expression statement counts when it is the last
+// statement of an arm of an if/else that is itself last in its list,
+// recursively up to the method body (the .runar.rs / .runar.move tail
+// if-expression). A top-level trailing expression is not credited.
+func returnsOnEveryPath(stmts []Statement, tail, inArm bool) bool {
+	for i, s := range stmts {
+		last := i == len(stmts)-1
+		switch st := s.(type) {
+		case ReturnStmt:
+			if st.Value != nil {
+				return true
+			}
+		case IfStmt:
+			if st.Else != nil && returnsOnEveryPath(st.Then, tail && last, true) &&
+				returnsOnEveryPath(st.Else, tail && last, true) {
+				return true
+			}
+		case ExpressionStmt:
+			if tail && last && inArm {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasBareReturn reports whether a value-less `return` appears anywhere in the
+// list (N-511).
+func hasBareReturn(stmts []Statement) bool {
+	for _, s := range stmts {
+		switch st := s.(type) {
+		case ReturnStmt:
+			if st.Value == nil {
+				return true
+			}
+		case IfStmt:
+			if hasBareReturn(st.Then) || hasBareReturn(st.Else) {
+				return true
+			}
+		case ForStmt:
+			if hasBareReturn(st.Body) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // DeclaredReturnMismatchMsg is D12 FE-F4's refusal; one wording in every tier.
 func DeclaredReturnMismatchMsg(method, actual, declared string) string {
 	return fmt.Sprintf("Method '%s' returns '%s', which is not assignable to its declared return type '%s'",
@@ -892,6 +949,15 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 		}
 		if len(seen) > 0 && !hasUnknown && unifyReturnTypes(seen) == "<unknown>" {
 			tc.addErrorWithLoc(IncompatibleReturnTypesMsg(method.Name, seen), &method.SourceLocation)
+		}
+	}
+
+	// N-511: a private method that declares a non-void return type must
+	// return a value on every path (rule: returnsOnEveryPath).
+	if method.Visibility != "public" && method.ReturnType != nil {
+		declared := typeNodeToString(method.ReturnType)
+		if declared != "void" && (hasBareReturn(method.Body) || !returnsOnEveryPath(method.Body, true, false)) {
+			tc.addErrorWithLoc(MissingReturnMsg(method.Name, declared), &method.SourceLocation)
 		}
 	}
 

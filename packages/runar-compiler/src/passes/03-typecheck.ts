@@ -1094,6 +1094,19 @@ class TypeChecker {
       }
     }
 
+    // N-511: a private method that declares a non-void return type must
+    // return a value on every path (rule: `returnsOnEveryPath`).
+    if (method.visibility === 'private' && method.returnType) {
+      const declared = typeNodeToTType(method.returnType);
+      if (declared !== 'void' && (hasBareReturn(method.body) || !returnsOnEveryPath(method.body))) {
+        this.errors.push(makeDiagnostic(
+          missingReturnMessage(method.name, declared),
+          'error',
+          method.sourceLocation,
+        ));
+      }
+    }
+
     // F-075: every guard below reads the method's effects from the shared
     // side-effect summary, which follows the private-helper call graph. That is
     // the same analysis ANF lowering uses to inject the continuation, and ANF
@@ -2895,6 +2908,44 @@ export function unresolvedOperandTypesMessage(op: string, left: string, right: s
 /** D12 FE-F4: the one wording every tier emits (types in first-seen order). */
 export function incompatibleReturnTypesMessage(method: string, types: string[]): string {
   return `Method '${method}' returns values of incompatible types (${types.map((t) => `'${t}'`).join(', ')}); declare its return type`;
+}
+
+/** N-511: the one wording every tier emits. */
+export function missingReturnMessage(method: string, declared: string): string {
+  return `Method '${method}' declares return type '${declared}' but does not return a value on every path`;
+}
+
+/**
+ * N-511: whether a statement list returns a value on every path. A list
+ * returns when one of its statements does; `return <value>` returns; an `if`
+ * returns only when it has an else and both arms return; a loop never counts.
+ * Tail value: an expression statement counts when it is the last statement of
+ * an arm of an if/else that is itself last in its list, recursively up to the
+ * method body (the .runar.rs / .runar.move tail if-expression). A top-level
+ * trailing expression is not credited.
+ */
+function returnsOnEveryPath(stmts: Statement[], tail = true, inArm = false): boolean {
+  return stmts.some((s, i) => {
+    const last = i === stmts.length - 1;
+    if (s.kind === 'return_statement') return s.value !== undefined && s.value !== null;
+    if (s.kind === 'if_statement') {
+      return s.else !== undefined
+        && returnsOnEveryPath(s.then, tail && last, true)
+        && returnsOnEveryPath(s.else, tail && last, true);
+    }
+    if (s.kind === 'expression_statement') return tail && last && inArm;
+    return false;
+  });
+}
+
+/** N-511: whether a value-less `return` appears anywhere in the list. */
+function hasBareReturn(stmts: Statement[]): boolean {
+  return stmts.some((s) => {
+    if (s.kind === 'return_statement') return s.value === undefined || s.value === null;
+    if (s.kind === 'if_statement') return hasBareReturn(s.then) || (s.else !== undefined && hasBareReturn(s.else));
+    if (s.kind === 'for_statement') return hasBareReturn(s.body);
+    return false;
+  });
 }
 
 /** D12 FE-F4: the one wording every tier emits. */

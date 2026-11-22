@@ -908,6 +908,21 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
+        // N-511: a private method that declares a non-void return type must
+        // return a value on every path (rule: `returns_on_every_path`).
+        if method.visibility != Visibility::Public {
+            if let Some(rt) = method.return_type.as_ref() {
+                let declared = type_node_to_ttype(rt);
+                if declared != "void"
+                    && (has_bare_return(&method.body)
+                        || !returns_on_every_path(&method.body, true, false))
+                {
+                    let msg = missing_return_message(&method.name, &declared);
+                    self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone())));
+                }
+            }
+        }
+
         // Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in
         // the same method body. The intrinsic's compile-time output-offset
         // computation assumes a fixed 34-byte stride per output, which is
@@ -2545,6 +2560,48 @@ pub fn incompatible_return_types_message(method: &str, types: &[TType]) -> Strin
         method,
         quoted.join(", ")
     )
+}
+
+/// N-511: the one wording every tier emits.
+pub fn missing_return_message(method: &str, declared: &str) -> String {
+    format!(
+        "Method '{}' declares return type '{}' but does not return a value on every path",
+        method, declared
+    )
+}
+
+/// N-511: whether a statement list returns a value on every path. A list
+/// returns when one of its statements does; `return <value>` returns; an `if`
+/// returns only when it has an else and both arms return; a loop never
+/// counts. Tail value: an expression statement counts when it is the last
+/// statement of an arm of an if/else that is itself last in its list,
+/// recursively up to the method body (the .runar.rs / .runar.move tail
+/// if-expression). A top-level trailing expression is not credited.
+fn returns_on_every_path(stmts: &[Statement], tail: bool, in_arm: bool) -> bool {
+    stmts.iter().enumerate().any(|(i, s)| {
+        let last = i + 1 == stmts.len();
+        match s {
+            Statement::ReturnStatement { value, .. } => value.is_some(),
+            Statement::IfStatement { then_branch, else_branch: Some(else_branch), .. } => {
+                returns_on_every_path(then_branch, tail && last, true)
+                    && returns_on_every_path(else_branch, tail && last, true)
+            }
+            Statement::ExpressionStatement { .. } => tail && last && in_arm,
+            _ => false,
+        }
+    })
+}
+
+/// N-511: whether a value-less `return` appears anywhere in the list.
+fn has_bare_return(stmts: &[Statement]) -> bool {
+    stmts.iter().any(|s| match s {
+        Statement::ReturnStatement { value, .. } => value.is_none(),
+        Statement::IfStatement { then_branch, else_branch, .. } => {
+            has_bare_return(then_branch) || else_branch.as_deref().is_some_and(has_bare_return)
+        }
+        Statement::ForStatement { body, .. } => has_bare_return(body),
+        _ => false,
+    })
 }
 
 /// D12 FE-F4: the one wording every tier emits.

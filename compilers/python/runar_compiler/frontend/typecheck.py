@@ -1091,6 +1091,19 @@ class _TypeChecker:
                     loc=method.source_location,
                 ))
 
+        # N-511: a private method that declares a non-void return type must
+        # return a value on every path (rule: _returns_on_every_path).
+        if method.visibility == "private" and method.return_type is not None:
+            declared = _type_node_to_string(method.return_type)
+            if declared != "void" and (
+                _has_bare_return(method.body) or not _returns_on_every_path(method.body, True, False)
+            ):
+                self.errors.append(Diagnostic(
+                    message=missing_return_message(method.name, declared),
+                    severity=Severity.ERROR,
+                    loc=method.source_location,
+                ))
+
         # Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in the
         # same method body. The intrinsic's compile-time output-offset
         # computation assumes a fixed 34-byte stride per output, which is
@@ -2269,6 +2282,57 @@ def incompatible_return_types_message(method: str, types: list[str]) -> str:
     """D12 FE-F4: the one wording every tier emits (types in first-seen order)."""
     listed = ", ".join(f"'{t}'" for t in types)
     return f"Method '{method}' returns values of incompatible types ({listed}); declare its return type"
+
+
+def missing_return_message(method: str, declared: str) -> str:
+    """N-511: the one wording every tier emits."""
+    return (
+        f"Method '{method}' declares return type '{declared}' but does not return "
+        f"a value on every path"
+    )
+
+
+def _returns_on_every_path(stmts: list, tail: bool, in_arm: bool) -> bool:
+    """N-511: whether a statement list returns a value on every path.
+
+    A list returns when one of its statements does; ``return <value>``
+    returns; an ``if`` returns only when it has an else and both arms return;
+    a loop never counts. Tail value: an expression statement counts when it is
+    the last statement of an arm of an if/else that is itself last in its
+    list, recursively up to the method body (the .runar.rs / .runar.move tail
+    if-expression). A top-level trailing expression is not credited.
+    """
+    for i, s in enumerate(stmts):
+        last = i == len(stmts) - 1
+        if isinstance(s, ReturnStmt):
+            if s.value is not None:
+                return True
+        elif isinstance(s, IfStmt):
+            if (
+                s.else_
+                and _returns_on_every_path(s.then, tail and last, True)
+                and _returns_on_every_path(s.else_, tail and last, True)
+            ):
+                return True
+        elif isinstance(s, ExpressionStmt):
+            if tail and last and in_arm:
+                return True
+    return False
+
+
+def _has_bare_return(stmts: list) -> bool:
+    """N-511: whether a value-less ``return`` appears anywhere in the list."""
+    for s in stmts:
+        if isinstance(s, ReturnStmt):
+            if s.value is None:
+                return True
+        elif isinstance(s, IfStmt):
+            if _has_bare_return(s.then) or _has_bare_return(s.else_ or []):
+                return True
+        elif isinstance(s, ForStmt):
+            if _has_bare_return(s.body):
+                return True
+    return False
 
 
 def declared_return_mismatch_message(method: str, actual: str, declared: str) -> str:

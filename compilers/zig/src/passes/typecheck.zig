@@ -1478,6 +1478,17 @@ const TypeChecker = struct {
             }
         }
 
+        // N-511: a private method that declares a non-void return type must
+        // return a value on every path (rule: `returnsOnEveryPath`).
+        if (!method.is_public) if (method.return_type) |declared| {
+            if (declared != .void and (hasBareReturn(method.body) or !returnsOnEveryPath(method.body, true, false))) {
+                self.addErrorAt(method.source_loc, MISSING_RETURN_FMT, .{
+                    method.name,
+                    if (method.return_type_name.len > 0) method.return_type_name else tsTypeName(declared),
+                });
+            }
+        };
+
         // Crit-3 (BSVM Phase 13) — reject mixing requireOutputP2PKH with
         // addDataOutput in the same method body. v1 of the intrinsic assumes
         // a fixed 34-byte per-output stride; a variable-length OP_RETURN
@@ -2926,6 +2937,50 @@ pub const UNRESOLVED_OPERAND_TYPES_FMT = "Cannot resolve the operand types of '{
 pub const INCOMPATIBLE_RETURN_TYPES_FMT = "Method '{s}' returns values of incompatible types ({s}); declare its return type";
 
 /// D12 FE-F4: the one wording every tier emits.
+/// N-511: the one wording every tier emits.
+pub const MISSING_RETURN_FMT = "Method '{s}' declares return type '{s}' but does not return a value on every path";
+
+/// N-511: whether a statement list returns a value on every path. A list
+/// returns when one of its statements does; `return <value>` returns; an `if`
+/// returns only when it has an else and both arms return; a loop never
+/// counts. Tail value: an expression statement counts when it is the last
+/// statement of an arm of an if/else that is itself last in its list,
+/// recursively up to the method body (the .runar.rs / .runar.move tail
+/// if-expression). A top-level trailing expression is not credited.
+fn returnsOnEveryPath(stmts: []const types.Statement, tail: bool, in_arm: bool) bool {
+    for (stmts, 0..) |st, i| {
+        const last = i + 1 == stmts.len;
+        switch (st) {
+            .return_stmt => |r| if (r.value != null) return true,
+            .if_stmt => |f| if (f.else_body) |else_body| {
+                if (returnsOnEveryPath(f.then_body, tail and last, true) and
+                    returnsOnEveryPath(else_body, tail and last, true)) return true;
+            },
+            // `assert_stmt` is this tier's spelling of an assert expression
+            // statement (an `expression_statement` in the TS AST).
+            .expr_stmt, .assert_stmt => if (tail and last and in_arm) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// N-511: whether a value-less `return` appears anywhere in the list.
+fn hasBareReturn(stmts: []const types.Statement) bool {
+    for (stmts) |st| {
+        switch (st) {
+            .return_stmt => |r| if (r.value == null) return true,
+            .if_stmt => |f| {
+                if (hasBareReturn(f.then_body)) return true;
+                if (f.else_body) |else_body| if (hasBareReturn(else_body)) return true;
+            },
+            .for_stmt => |f| if (hasBareReturn(f.body)) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 pub const DECLARED_RETURN_MISMATCH_FMT = "Method '{s}' returns '{s}', which is not assignable to its declared return type '{s}'";
 
 /// Lightweight expression type inference without a type environment.
