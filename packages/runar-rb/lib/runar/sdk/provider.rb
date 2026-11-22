@@ -5,6 +5,7 @@
 # A Provider abstracts blockchain access: fetching UTXOs, looking up
 # transactions, and broadcasting signed transactions to the network.
 
+require 'digest'
 require_relative 'types'
 require_relative 'errors'
 require_relative 'bip143'
@@ -85,6 +86,13 @@ module Runar
         @validate_broadcasts = validate_broadcasts
         @known_outpoints     = {}
         @last_report         = EMPTY_VALIDATION_REPORT
+        # "txid:vout" -> txid of the accepted broadcast that spent it. Checked
+        # on EVERY broadcast, whatever validate_broadcasts says: a node refuses
+        # a second transaction spending an outpoint already spent.
+        @spent_outpoints     = {}
+        # Real txid of every accepted broadcast -> the txid this provider
+        # returned for it: re-broadcasting the identical tx is idempotent.
+        @accepted_txids      = {}
       end
 
       # A MockProvider whose +broadcast+ never validates — the pre-Phase-A5
@@ -187,6 +195,16 @@ module Runar
       # +validate_broadcast!+ for exactly what it does and does not check.
       def broadcast(raw_tx)
         parsed = validate_broadcast!(raw_tx) if @validate_broadcasts
+        spending_txid, input_outpoints, structural = check_double_spend!(raw_tx)
+
+        # Re-broadcasting a tx already accepted is idempotent, as on a node:
+        # same txid, nothing registered twice. It is still validated above, so
+        # a tx an always-ack provider acked is not waved through once
+        # validation is on.
+        return @accepted_txids[spending_txid] if spending_txid && @accepted_txids.key?(spending_txid)
+
+        # Accepted: its inputs are now spent.
+        input_outpoints.each { |key| @spent_outpoints[key] = spending_txid }
 
         @broadcasted_txs << raw_tx
         @broadcast_count += 1
@@ -198,11 +216,15 @@ module Runar
         parsed&.fetch(:outputs)&.each_with_index do |out, i|
           remember_outpoint(fake_txid, i, out[:script].unpack1('H*'), out[:satoshis])
         end
+        @accepted_txids[spending_txid] = fake_txid if spending_txid
+        list_new_p2pkh_outputs(fake_txid, structural) if structural
         fake_txid
       end
 
       def get_utxos(address)
-        utxos = Array(@utxos[address]).dup
+        # An outpoint an accepted broadcast spent is no longer a UTXO (a node's
+        # listing would not return it either).
+        utxos = Array(@utxos[address]).reject { |u| @spent_outpoints.key?("#{u.txid}:#{u.output_index}") }
         # DoS-bound: reject pathological scripts at the provider boundary.
         utxos.each do |u|
           next if u.script.nil? || u.script.empty?
@@ -316,6 +338,58 @@ module Runar
         end
 
         parsed
+      end
+
+      # Double-spend gate, independent of validate_broadcasts. Refuses a
+      # transaction that spends one outpoint twice, or an outpoint an earlier
+      # accepted broadcast spent. Re-broadcasting the identical transaction is
+      # not a conflict (a node treats it as already known).
+      #
+      # @raise [BroadcastRejected]
+      # @return [Array] the real txid, input outpoints and structural parse
+      def check_double_spend!(raw_tx)
+        parsed = begin
+          parse_broadcast_tx(raw_tx)
+        rescue BroadcastRejected
+          # A payload that does not parse spends no outpoint, so there is
+          # nothing to check here; validation (when on) refuses it as not a
+          # transaction, and the always-ack opt-out keeps acking it.
+          return [nil, [], nil]
+        end
+        txid = Digest::SHA256.digest(Digest::SHA256.digest([raw_tx.to_s].pack('H*'))).reverse.unpack1('H*')
+        outpoints = []
+        parsed[:inputs].each do |input|
+          key = "#{input[:prev_txid].bytes.reverse.pack('C*').unpack1('H*')}:#{input[:prev_output_index]}"
+          if outpoints.include?(key)
+            raise BroadcastRejected,
+                  "MockProvider: refusing to broadcast a transaction that spends #{key} more than once"
+          end
+          outpoints << key
+          spender = @spent_outpoints[key]
+          if spender && !@accepted_txids.key?(txid)
+            raise BroadcastRejected,
+                  "MockProvider: refusing to broadcast a double spend: #{key} is already spent by #{spender}"
+          end
+        end
+        [txid, outpoints, parsed]
+      end
+
+      # A P2PKH output paying an address this provider lists (e.g. the change
+      # of a deploy) is a new UTXO of that address, as a node's listing would
+      # show it, so a later call can be funded from it.
+      def list_new_p2pkh_outputs(txid, parsed)
+        @utxos.each do |address, listed|
+          p2pkh = begin
+            SDK.build_p2pkh_script(address).downcase
+          rescue StandardError
+            next # not a real address (a test label)
+          end
+          parsed[:outputs].each_with_index do |out, i|
+            next unless out[:script].unpack1('H*') == p2pkh
+
+            listed << Utxo.new(txid: txid, output_index: i, satoshis: out[:satoshis], script: p2pkh)
+          end
+        end
       end
 
       def parse_broadcast_tx(raw_tx)

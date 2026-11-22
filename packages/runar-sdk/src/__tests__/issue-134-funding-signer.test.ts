@@ -136,6 +136,9 @@ describe('#134 — call() funding inputs honor fundingSigner', () => {
     await fundingCoinUnderMethodAddress(provA, methodSigner, fundingScript, 100_000, 'b2');
     const contractA = new RunarContract(artifact, [0n]);
     await contractA.deploy(provA, methodSigner, { satoshis: 1_000 });
+    // The deploy spent coin b2; the call needs a coin of its own (it used to
+    // re-spend b2, a double spend). 100_000 sats outranks the deploy's change.
+    await fundingCoinUnderMethodAddress(provA, methodSigner, fundingScript, 100_000, 'c3');
     await contractA.call('increment', [], provA, methodSigner);
     const callTxA = Transaction.fromHex(provA.getBroadcastedTxs()[1]!);
     expect(callTxA.inputs.length).toBe(2); // 1 contract + 1 funding
@@ -146,6 +149,7 @@ describe('#134 — call() funding inputs honor fundingSigner', () => {
     await fundingCoinUnderMethodAddress(provB, methodSigner, fundingScript, 100_000, 'b2');
     const contractB = new RunarContract(artifact, [0n]);
     await contractB.deploy(provB, methodSigner, { satoshis: 1_000 });
+    await fundingCoinUnderMethodAddress(provB, methodSigner, fundingScript, 100_000, 'c3');
     await contractB.call('increment', [], provB, methodSigner, { fundingSigner });
     const callTxB = Transaction.fromHex(provB.getBroadcastedTxs()[1]!);
     expect(trySpend(callTxB, 1, fundingScript, 100_000)).toBe(true);

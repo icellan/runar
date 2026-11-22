@@ -2,6 +2,7 @@ const std = @import("std");
 const bsvz = @import("bsvz");
 const types = @import("sdk_types.zig");
 const errors_mod = @import("sdk_errors.zig");
+const deploy_mod = @import("sdk_deploy.zig");
 
 // ---------------------------------------------------------------------------
 // Provider interface
@@ -83,6 +84,9 @@ pub const RejectionReason = enum {
     underfunded,
     /// An output script is over MAX_SCRIPT_BYTES.
     script_too_large,
+    /// An input spends an outpoint an earlier accepted broadcast already
+    /// spent, or the transaction spends one outpoint twice.
+    double_spend,
 };
 
 /// What a validating broadcast actually checked.
@@ -262,6 +266,14 @@ pub const MockProvider = struct {
     known_outpoints: std.StringHashMap(KnownOutpoint),
     last_report: ValidationReport = .{},
     last_rejection: RejectionReason = .none,
+    /// "txid:vout" -> real txid (display hex) of the accepted broadcast that
+    /// spent it. Checked on EVERY broadcast, whatever `validate_broadcasts`
+    /// says: a node refuses a second transaction spending an outpoint already
+    /// spent.
+    spent_outpoints: std.StringHashMap([64]u8),
+    /// Real txid of every accepted broadcast -> the (owned) txid this provider
+    /// returned for it: re-broadcasting the identical tx is idempotent.
+    accepted_txids: std.AutoHashMap([64]u8, []u8),
 
     pub fn init(allocator: std.mem.Allocator, network: []const u8) MockProvider {
         return .{
@@ -271,6 +283,8 @@ pub const MockProvider = struct {
             .broadcasted_txs = .empty,
             .network = if (network.len > 0) network else "testnet",
             .known_outpoints = std.StringHashMap(KnownOutpoint).init(allocator),
+            .spent_outpoints = std.StringHashMap([64]u8).init(allocator),
+            .accepted_txids = std.AutoHashMap([64]u8, []u8).init(allocator),
         };
     }
 
@@ -338,6 +352,14 @@ pub const MockProvider = struct {
             self.allocator.free(entry.value_ptr.script);
         }
         self.known_outpoints.deinit();
+
+        var spent_it = self.spent_outpoints.iterator();
+        while (spent_it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+        self.spent_outpoints.deinit();
+
+        var acc_it = self.accepted_txids.valueIterator();
+        while (acc_it.next()) |v| self.allocator.free(v.*);
+        self.accepted_txids.deinit();
 
         for (self.broadcasted_txs.items) |tx| {
             self.allocator.free(tx);
@@ -497,10 +519,74 @@ pub const MockProvider = struct {
         }
     }
 
+    /// Double-spend gate, independent of `validate_broadcasts`. Refuses a
+    /// transaction that spends one outpoint twice, or an outpoint an earlier
+    /// accepted broadcast spent. Re-broadcasting the identical transaction is
+    /// not a conflict (a node treats it as already known). Returns the real
+    /// txid; `parsed` carries the input outpoints.
+    fn checkDoubleSpend(self: *MockProvider, allocator: std.mem.Allocator, tx_hex: []const u8, parsed: *const ParsedTx) ProviderError![64]u8 {
+        const spending_txid = realTxid(allocator, tx_hex) catch |err| switch (err) {
+            error.OutOfMemory => return ProviderError.OutOfMemory,
+            else => {
+                self.last_rejection = .not_a_transaction;
+                return ProviderError.BroadcastRejected;
+            },
+        };
+        for (parsed.inputs, 0..) |in, i| {
+            for (parsed.inputs[0..i]) |prev| {
+                if (std.mem.eql(u8, &prev.prev_txid, &in.prev_txid) and prev.prev_vout == in.prev_vout) {
+                    self.last_rejection = .double_spend;
+                    return ProviderError.BroadcastRejected;
+                }
+            }
+            var key_buf: [96]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{s}:{d}", .{ in.prev_txid, in.prev_vout }) catch unreachable;
+            if (self.spent_outpoints.get(key)) |_| {
+                if (!self.accepted_txids.contains(spending_txid)) {
+                    self.last_rejection = .double_spend;
+                    return ProviderError.BroadcastRejected;
+                }
+            }
+        }
+        return spending_txid;
+    }
+
     fn broadcastImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) ProviderError![]u8 {
         const self: *MockProvider = @ptrCast(@alignCast(ctx));
+        self.last_rejection = .none;
+        // A payload that does not parse spends no outpoint, so the gate has
+        // nothing to check; validation (when on) refuses it as not a
+        // transaction, and the always-ack opt-out keeps acking it.
+        var gate_parsed: ?ParsedTx = parseTx(allocator, tx_hex) catch |err| switch (err) {
+            ParseError.OutOfMemory => return ProviderError.OutOfMemory,
+            ParseError.NotATransaction => null,
+        };
+        defer if (gate_parsed) |*gp| gp.deinit(allocator);
         if (self.validate_broadcasts) {
             try self.validateBroadcast(allocator, tx_hex);
+        }
+        var spending_txid: [64]u8 = undefined;
+        if (gate_parsed) |*gp| spending_txid = try self.checkDoubleSpend(allocator, tx_hex, gp);
+        // Re-broadcasting a tx already accepted is idempotent, as on a node:
+        // same txid, nothing registered twice. It is still validated above, so
+        // a tx an always-ack provider acked is not waved through once
+        // validation is on.
+        if (gate_parsed != null) {
+            if (self.accepted_txids.get(spending_txid)) |prior| {
+                return allocator.dupe(u8, prior) catch return ProviderError.OutOfMemory;
+            }
+        }
+        // Accepted: its inputs are now spent.
+        const spent_inputs: []const ParsedInput = if (gate_parsed) |gp| gp.inputs else &.{};
+        for (spent_inputs) |in| {
+            const key = std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ in.prev_txid, in.prev_vout }) catch
+                return ProviderError.OutOfMemory;
+            const gop = self.spent_outpoints.getOrPut(key) catch {
+                self.allocator.free(key);
+                return ProviderError.OutOfMemory;
+            };
+            if (gop.found_existing) self.allocator.free(key);
+            gop.value_ptr.* = spending_txid;
         }
         const stored_hex = allocator.dupe(u8, tx_hex) catch return ProviderError.OutOfMemory;
         self.broadcasted_txs.append(self.allocator, stored_hex) catch {
@@ -540,7 +626,40 @@ pub const MockProvider = struct {
             }
         }
 
+        if (gate_parsed) |*gp| {
+            const owned = self.allocator.dupe(u8, fake_txid) catch return ProviderError.OutOfMemory;
+            self.accepted_txids.put(spending_txid, owned) catch {
+                self.allocator.free(owned);
+                return ProviderError.OutOfMemory;
+            };
+            try self.listNewP2pkhOutputs(fake_txid, gp);
+        }
+
         return fake_txid;
+    }
+
+    /// A P2PKH output paying an address this provider lists (e.g. the change
+    /// of a deploy) is a new UTXO of that address, as a node's listing would
+    /// show it, so a later call can be funded from it.
+    fn listNewP2pkhOutputs(self: *MockProvider, txid: []const u8, parsed: *const ParsedTx) ProviderError!void {
+        var it = self.utxos.iterator();
+        while (it.next()) |entry| {
+            const p2pkh = deploy_mod.buildP2PKHScript(self.allocator, entry.key_ptr.*) catch |err| switch (err) {
+                error.OutOfMemory => return ProviderError.OutOfMemory,
+                else => continue, // a test label, not a real address
+            };
+            defer self.allocator.free(p2pkh);
+            for (parsed.outputs, 0..) |out, i| {
+                if (!std.ascii.eqlIgnoreCase(out.script_hex, p2pkh)) continue;
+                const u = types.UTXO{
+                    .txid = self.allocator.dupe(u8, txid) catch return ProviderError.OutOfMemory,
+                    .output_index = @intCast(i),
+                    .satoshis = out.satoshis,
+                    .script = self.allocator.dupe(u8, out.script_hex) catch return ProviderError.OutOfMemory,
+                };
+                entry.value_ptr.append(self.allocator, u) catch return ProviderError.OutOfMemory;
+            }
+        }
     }
 
     fn getUtxosImpl(ctx: *anyopaque, allocator: std.mem.Allocator, address: []const u8) ProviderError![]types.UTXO {
@@ -553,11 +672,25 @@ pub const MockProvider = struct {
             const c = std.fmt.bufPrint(&ctx_buf, "MockProvider.getUtxos({s})", .{address}) catch "MockProvider.getUtxos";
             errors_mod.assertScriptHexUnderLimit(u.script, errors_mod.MAX_SCRIPT_BYTES, c) catch return ProviderError.ScriptSizeExceeded;
         }
-        var result = allocator.alloc(types.UTXO, list.items.len) catch return ProviderError.OutOfMemory;
-        for (list.items, 0..) |u, i| {
-            result[i] = u.clone(allocator) catch return ProviderError.OutOfMemory;
+        // An outpoint an accepted broadcast spent is no longer a UTXO (a node's
+        // listing would not return it either).
+        var result = std.ArrayListUnmanaged(types.UTXO).empty;
+        errdefer {
+            for (result.items) |*u| u.deinit(allocator);
+            result.deinit(allocator);
         }
-        return result;
+        for (list.items) |u| {
+            var key_buf: [160]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{s}:{d}", .{ u.txid, u.output_index }) catch "";
+            if (self.spent_outpoints.contains(key)) continue;
+            const c = u.clone(allocator) catch return ProviderError.OutOfMemory;
+            result.append(allocator, c) catch {
+                var cc = c;
+                cc.deinit(allocator);
+                return ProviderError.OutOfMemory;
+            };
+        }
+        return result.toOwnedSlice(allocator) catch return ProviderError.OutOfMemory;
     }
 
     fn getContractUtxoImpl(_: *anyopaque, _: std.mem.Allocator, _: []const u8) ProviderError!?types.UTXO {
@@ -581,6 +714,27 @@ pub const MockProvider = struct {
         return allocator.dupe(u8, raw) catch return ProviderError.OutOfMemory;
     }
 };
+
+/// The real txid of a raw transaction: double SHA-256, display (reversed) hex.
+fn realTxid(allocator: std.mem.Allocator, tx_hex: []const u8) ![64]u8 {
+    if (tx_hex.len % 2 != 0) return error.InvalidLength;
+    const bytes = try allocator.alloc(u8, tx_hex.len / 2);
+    defer allocator.free(bytes);
+    _ = try std.fmt.hexToBytes(bytes, tx_hex);
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var h1: [32]u8 = undefined;
+    Sha256.hash(bytes, &h1, .{});
+    var h2: [32]u8 = undefined;
+    Sha256.hash(&h1, &h2, .{});
+    const digits = "0123456789abcdef";
+    var out: [64]u8 = undefined;
+    for (0..32) |i| {
+        const b = h2[31 - i];
+        out[i * 2] = digits[b >> 4];
+        out[i * 2 + 1] = digits[b & 0x0f];
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // Deterministic mock hash (produces a 64-char hex string like a txid)

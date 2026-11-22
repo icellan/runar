@@ -96,6 +96,13 @@ pub struct MockProvider {
     known_outpoints: HashMap<String, KnownOutpoint>,
     /// Non-vacuity witness of the most recent validating `broadcast`.
     last_report: BroadcastValidationReport,
+    /// "txid:vout" -> txid of the accepted broadcast that spent it. Checked on
+    /// EVERY `broadcast`, whatever `validate_broadcasts` says: a node refuses a
+    /// second transaction spending an outpoint already spent.
+    spent_outpoints: HashMap<String, String>,
+    /// Real txid of every accepted broadcast -> the txid this provider
+    /// returned for it: re-broadcasting the identical tx is idempotent.
+    accepted_txids: HashMap<String, String>,
 }
 
 impl MockProvider {
@@ -114,6 +121,8 @@ impl MockProvider {
             validate_broadcasts: true,
             known_outpoints: HashMap::new(),
             last_report: BroadcastValidationReport::default(),
+            spent_outpoints: HashMap::new(),
+            accepted_txids: HashMap::new(),
         }
     }
 
@@ -390,7 +399,46 @@ impl Provider for MockProvider {
             }
         }
 
+        // Double-spend gate, independent of `validate_broadcasts`.
+        // Re-broadcasting the identical tx is not a conflict (a node treats it
+        // as already known).
+        let spending_txid = tx.id().map_err(|e| format!("broadcast: txid failed: {}", e))?;
+        let prior = self.accepted_txids.get(&spending_txid).cloned();
+        let mut input_outpoints: Vec<String> = Vec::with_capacity(tx.inputs.len());
+        for input in tx.inputs.iter() {
+            // An input naming no outpoint has nothing to check here;
+            // validation (when on) counts it as unknown.
+            let key = match &input.source_txid {
+                Some(txid) => format!("{}:{}", txid, input.source_output_index),
+                None => continue,
+            };
+            if input_outpoints.contains(&key) {
+                return Err(format!(
+                    "MockProvider: refusing to broadcast a transaction that spends {} more than once",
+                    key
+                ));
+            }
+            if let (Some(spender), None) = (self.spent_outpoints.get(&key), &prior) {
+                return Err(format!(
+                    "MockProvider: refusing to broadcast a double spend: {} is already spent by {}",
+                    key, spender
+                ));
+            }
+            input_outpoints.push(key);
+        }
+
+        // Re-broadcasting a tx already accepted is idempotent, as on a node:
+        // same txid, nothing registered twice. It is still validated above, so
+        // a tx an always-ack provider acked is not waved through once
+        // validation is on.
+        if let Some(prior) = prior {
+            return Ok(prior);
+        }
         let raw_tx = tx.to_hex().map_err(|e| format!("broadcast: to_hex failed: {}", e))?;
+        // Accepted: its inputs are now spent.
+        for key in input_outpoints {
+            self.spent_outpoints.insert(key, spending_txid.clone());
+        }
         self.broadcasted_txs.push(raw_tx.clone());
         self.broadcast_count += 1;
         // Generate a deterministic fake txid from the broadcast count
@@ -408,11 +456,39 @@ impl Provider for MockProvider {
             let sats = out.satoshis.unwrap_or(0) as i64;
             self.remember_outpoint(&fake_txid, i as u32, &script, sats);
         }
+        self.accepted_txids.insert(spending_txid, fake_txid.clone());
+        // A P2PKH output paying an address this provider lists (e.g. the
+        // change of a deploy) is a new UTXO of that address, as a node's
+        // listing would show it, so a later call can be funded from it.
+        let addresses: Vec<String> = self.utxos.keys().cloned().collect();
+        for address in addresses {
+            let Some(p2pkh) = super::script_utils::try_build_p2pkh_script(&address) else { continue };
+            for (i, out) in tx.outputs.iter().enumerate() {
+                let script = out.locking_script.to_hex();
+                if script.eq_ignore_ascii_case(&p2pkh) {
+                    self.utxos.get_mut(&address).unwrap().push(Utxo {
+                        txid: fake_txid.clone(),
+                        output_index: i as u32,
+                        satoshis: out.satoshis.unwrap_or(0) as i64,
+                        script,
+                    });
+                }
+            }
+        }
         Ok(fake_txid)
     }
 
     fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String> {
-        let utxos = self.utxos.get(address).cloned().unwrap_or_default();
+        // An outpoint an accepted broadcast spent is no longer a UTXO (a node's
+        // listing would not return it either).
+        let utxos: Vec<Utxo> = self
+            .utxos
+            .get(address)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|u| !self.spent_outpoints.contains_key(&format!("{}:{}", u.txid, u.output_index)))
+            .collect();
         // DoS-bound: reject pathological scripts at the provider boundary.
         for u in &utxos {
             if u.script.is_empty() { continue; }

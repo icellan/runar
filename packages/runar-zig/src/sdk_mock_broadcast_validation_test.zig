@@ -169,3 +169,109 @@ test "disable/enableBroadcastValidation toggles the gate" {
     mock.enableBroadcastValidation(true);
     try std.testing.expectError(ProviderError.BroadcastRejected, prov.broadcast(allocator, "0100000000"));
 }
+
+// ---------------------------------------------------------------------------
+// Double spends. A second, DIFFERENT transaction spending an outpoint an
+// earlier accepted broadcast already spent was acked; a node refuses it, so
+// acking it lets a test "succeed" at a spend the network rejects.
+// ---------------------------------------------------------------------------
+
+/// Deploy: broadcast a tx creating an OP_TRUE output; returns its txid.
+fn deployForDoubleSpend(allocator: std.mem.Allocator, mock: *MockProvider) ![]u8 {
+    try mock.addKnownOutpoint(PREV_A, 0, "51", 10_000);
+    const raw = try oneInputTx(allocator, PREV_A, 9_000);
+    defer allocator.free(raw);
+    var prov = mock.provider();
+    return prov.broadcast(allocator, raw);
+}
+
+test "MockProvider REFUSES a different transaction spending an already-spent outpoint" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, "testnet");
+    defer mock.deinit();
+    const d = try deployForDoubleSpend(allocator, &mock);
+    defer allocator.free(d);
+    var prov = mock.provider();
+
+    const first = try oneInputTx(allocator, d, 8_000);
+    defer allocator.free(first);
+    const t1 = try prov.broadcast(allocator, first);
+    defer allocator.free(t1);
+
+    const conflicting = try oneInputTx(allocator, d, 7_000);
+    defer allocator.free(conflicting);
+    const before = mock.broadcasted_txs.items.len;
+    try std.testing.expectError(ProviderError.BroadcastRejected, prov.broadcast(allocator, conflicting));
+    try std.testing.expectEqual(provider_mod.RejectionReason.double_spend, mock.lastRejection());
+    try std.testing.expectEqual(before, mock.broadcasted_txs.items.len);
+}
+
+test "MockProvider REFUSES a transaction spending one outpoint twice" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, "testnet");
+    defer mock.deinit();
+    try mock.addKnownOutpoint(PREV_A, 0, "51", 10_000);
+    const in = PREV_A ++ "00000000" ++ "00" ++ "ffffffff";
+    const raw = "01000000" ++ "02" ++ in ++ in ++ "01" ++ "2823000000000000" ++ "0151" ++ "00000000";
+    var prov = mock.provider();
+    try std.testing.expectError(ProviderError.BroadcastRejected, prov.broadcast(allocator, raw));
+    try std.testing.expectEqual(provider_mod.RejectionReason.double_spend, mock.lastRejection());
+}
+
+test "a refused broadcast does not mark its inputs spent" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, "testnet");
+    defer mock.deinit();
+    const d = try deployForDoubleSpend(allocator, &mock);
+    defer allocator.free(d);
+    var prov = mock.provider();
+
+    const over = try oneInputTx(allocator, d, 50_000);
+    defer allocator.free(over);
+    try std.testing.expectError(ProviderError.BroadcastRejected, prov.broadcast(allocator, over));
+    const ok = try oneInputTx(allocator, d, 8_000);
+    defer allocator.free(ok);
+    const t = try prov.broadcast(allocator, ok);
+    allocator.free(t);
+}
+
+test "re-broadcasting the identical transaction is not a double spend" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, "testnet");
+    defer mock.deinit();
+    const d = try deployForDoubleSpend(allocator, &mock);
+    defer allocator.free(d);
+    var prov = mock.provider();
+
+    const tx = try oneInputTx(allocator, d, 8_000);
+    defer allocator.free(tx);
+    const a = try prov.broadcast(allocator, tx);
+    defer allocator.free(a);
+    const before = mock.broadcasted_txs.items.len;
+    const b = try prov.broadcast(allocator, tx);
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expectEqual(before, mock.broadcasted_txs.items.len);
+}
+
+test "getUtxos no longer lists an outpoint an accepted broadcast spent" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, "testnet");
+    defer mock.deinit();
+    try mock.addUtxo("funder", .{ .txid = PREV_A, .output_index = 0, .satoshis = 10_000, .script = "51" });
+    try mock.addUtxo("funder", .{ .txid = PREV_A, .output_index = 1, .satoshis = 5_000, .script = "51" });
+    const d = try deployForDoubleSpend(allocator, &mock);
+    allocator.free(d);
+
+    var prov = mock.provider();
+    const utxos = try prov.getUtxos(allocator, "funder");
+    defer {
+        for (utxos) |*u| {
+            var mu = u.*;
+            mu.deinit(allocator);
+        }
+        allocator.free(utxos);
+    }
+    try std.testing.expectEqual(@as(usize, 1), utxos.len);
+    try std.testing.expectEqual(@as(i32, 1), utxos[0].output_index);
+}
