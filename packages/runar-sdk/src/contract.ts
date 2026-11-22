@@ -1434,7 +1434,7 @@ export class RunarContract {
 
       // Compute sighash from preimage (C19: the true BIP-143 digest external
       // signers must ECDSA-sign — hash256(preimage), not sha256(preimage)).
-      const sighash = finalPreimage ? computeBip143Sighash(finalPreimage) : '';
+      const sighash = this.userSigDigest(finalPreimage, termTx, contractUtxo, methodIndex);
 
       return {
         sighash,
@@ -1505,6 +1505,25 @@ export class RunarContract {
           'call — only a StatefulSmartContract (with an SDK-derived preimage) builds a real ' +
           'unlock for each extra contract input; any other path would ship a placeholder ' +
           'unlock and the resulting tx would be invalid',
+      );
+    }
+
+    // D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+    // continuation methods are all mutate-only) commits ONE output per input,
+    // at that input's index. A call that spends extra contract inputs into the
+    // one continuation (a many-to-one merge) is exactly the twin-input shape
+    // SINGLE refuses: every extra input would need its own continuation at its
+    // own index, so the tx cannot verify. Fail closed before building it.
+    if (
+      extraContractUtxos.length > 0 &&
+      ((this.artifact.abi.methods.find((m) => m.name === methodName)?.sigHashType ?? 0x41) & 0x1f) === 0x03
+    ) {
+      throw new Error(
+        `RunarContract.call(${methodName}): additionalContractInputs cannot be spent into one ` +
+          'continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation ' +
+          'methods are all mutate-only, D25): SINGLE commits each input to its own output at its own ' +
+          'index. Merge with an addOutput method instead (see FungibleToken.merge), or build each ' +
+          "input's continuation with assembleMultiContractCall",
       );
     }
 
@@ -1596,12 +1615,27 @@ export class RunarContract {
       }
     }
 
+    // D25: a bind-class contract's every continuation carries the hidden
+    // `_spentOutpointHash` = sha256(outpoint this input spends), which the
+    // covenant writes itself. A caller-supplied state (CallOptions.outputs /
+    // newState) cannot be expected to know it — left out, serializeState
+    // refuses; copied from `contract.state`, it is the PREVIOUS outpoint's
+    // hash and the covenant rejects the spend. The value is fully determined
+    // by the outpoint this call spends and no other value can ever validate,
+    // so it is ALWAYS overwritten here, whatever the caller passed.
+    const bindsOutpoint = !!this.artifact.stateFields?.some((f) => f.name === TWIN_BINDING_FIELD);
+    const outpointBinding = bindsOutpoint
+      ? Utils.toHex(Hash.sha256(Utils.toArray(wireOutpointHex(contractUtxo.txid, contractUtxo.outputIndex), 'hex')))
+      : undefined;
+    const withOutpointBinding = (state: Record<string, unknown>): Record<string, unknown> =>
+      outpointBinding !== undefined ? { ...state, [TWIN_BINDING_FIELD]: outpointBinding } : state;
+
     if (isStateful && hasMultiOutput) {
       // N-075: getCodePartHex() carries the inscription envelope (as the
       // single-output path's getLockingScript() does); buildCodeScript() alone dropped it.
       const codeScript = this.getCodePartHex();
       contractOutputs = options!.outputs!.map((out) => {
-        const stateHex = serializeState(this.artifact.stateFields!, out.state);
+        const stateHex = serializeState(this.artifact.stateFields!, withOutpointBinding(out.state));
         return { script: codeScript + '6a' + stateHex, satoshis: out.satoshis ?? 1 };
       });
     } else if (isStateful) {
@@ -1623,7 +1657,7 @@ export class RunarContract {
       newSatoshis = options?.satoshis ?? singleExplicitStateSats ?? this.currentUtxo.satoshis;
       if (options?.newState) {
         // Explicit newState takes priority (backward compat)
-        this._state = { ...this._state, ...options.newState };
+        this._state = { ...this._state, ...withOutpointBinding(options.newState) };
       } else if (methodHasContinuation && autoComputedState && autoFlatState) {
         const merged = { ...autoFlatState, ...autoComputedState };
         const regrouped = regroupFixedArrayState(merged, this.artifact.stateFields);
@@ -1732,7 +1766,7 @@ export class RunarContract {
     } else if (isStateful && hasMultiOutput && contractOutputs) {
       continuations = contractOutputs.map((o, idx) => ({
         outputIndex: idx, satoshis: o.satoshis, script: o.script,
-        state: { ...(options!.outputs![idx]!.state) },
+        state: withOutpointBinding({ ...(options!.outputs![idx]!.state) }),
       }));
     } else if (isStateful && newLockingScript) {
       continuations = [{
@@ -2211,7 +2245,7 @@ export class RunarContract {
 
     // Compute sighash from preimage (C19: the true BIP-143 digest external
     // signers must ECDSA-sign — hash256(preimage), not sha256(preimage)).
-    const sighash = finalPreimage ? computeBip143Sighash(finalPreimage) : '';
+    const sighash = this.userSigDigest(finalPreimage, tx, contractUtxo, methodIndex);
 
     return {
       sighash,
@@ -2892,6 +2926,27 @@ export class RunarContract {
     );
   }
 
+  /**
+   * D25: the digest an external signer signs for a user `Sig` argument. User
+   * signatures are ALL|FORKID (the byte every signer appends), so when the
+   * method's covenant preimage is built under another mode (SIGHASH_SINGLE is
+   * the default for a mutate-only contract) the digest is recomputed over the
+   * same tx, subscript and code separator under ALL|FORKID. The covenant's own
+   * preimage (`PreparedCall.preimage`) is unchanged.
+   */
+  private userSigDigest(
+    covenantPreimage: string,
+    tx: BsvTransaction,
+    utxo: UTXO,
+    methodIndex: number,
+  ): string {
+    if (!covenantPreimage) return '';
+    const { codeSepIdx, sigHashType } = this.resolveOpPushTxParams(methodIndex);
+    if (sigHashType === 0x41) return computeBip143Sighash(covenantPreimage);
+    const { preimageHex } = computeOpPushTxPreimage(tx, 0, utxo.script, utxo.satoshis, codeSepIdx, 0x41);
+    return computeBip143Sighash(preimageHex);
+  }
+
   private resolveOpPushTxParams(methodIndex?: number): { codeSepIdx: number | undefined; sigHashType: number } {
     let codeSepIdx: number | undefined;
 
@@ -3352,6 +3407,9 @@ function sumKnownInputSatoshis(
 }
 
 /** A spent outpoint as BIP-143 serializes it: txid in wire order || vout u32 LE. */
+/** D25 hidden state field (mirrors runar-compiler's TWIN_BINDING_FIELD). */
+const TWIN_BINDING_FIELD = '_spentOutpointHash';
+
 function wireOutpointHex(txid: string, vout: number): string {
   const txidLE = txid.match(/.{2}/g)!.reverse().join('');
   const voutLE = (vout >>> 0).toString(16).padStart(8, '0').match(/.{2}/g)!.reverse().join('');

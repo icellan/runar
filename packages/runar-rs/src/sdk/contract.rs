@@ -302,6 +302,32 @@ fn auto_non_sig_arg_error(where_: &str, param: &AbiParam, index: usize) -> Strin
 /// DIRECTLY with no further hashing. Handed the single-hashed value, such a
 /// signer signs the wrong message and the node's real `OP_CHECKSIG` rejects the
 /// spend. Mirrors `computeBip143Sighash` in `packages/runar-sdk/src/contract.ts`.
+/// D25: the digest an external signer signs for a user `Sig` argument
+/// (`PreparedCall::sighash`). User signatures are ALL|FORKID (the byte every
+/// signer appends), so when the method's covenant preimage is built under
+/// another mode (SIGHASH_SINGLE is the default for a mutate-only contract)
+/// the digest is recomputed over the same tx, subscript and code separator
+/// under ALL|FORKID. The covenant's own preimage (`PreparedCall::preimage`)
+/// is unchanged. Mirrors the TS reference `userSigDigest` (contract.ts).
+fn user_sig_digest(
+    covenant_preimage: &str,
+    tx_hex: &str,
+    subscript: &str,
+    satoshis: i64,
+    code_sep_idx: i64,
+    sig_hash_type: u32,
+) -> Result<String, String> {
+    if covenant_preimage.is_empty() {
+        return Ok(String::new());
+    }
+    if sig_hash_type == 0x41 {
+        return Ok(compute_bip143_sighash(covenant_preimage));
+    }
+    let all_preimage =
+        compute_op_push_tx_preimage_with_code_sep_sighash(tx_hex, 0, subscript, satoshis, code_sep_idx, 0x41)?;
+    Ok(compute_bip143_sighash(&all_preimage))
+}
+
 fn compute_bip143_sighash(preimage_hex: &str) -> String {
     if preimage_hex.is_empty() {
         return String::new();
@@ -1078,6 +1104,26 @@ impl RunarContract {
             ));
         }
 
+        // D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+        // continuation methods are all mutate-only) commits ONE output per
+        // input, at that input's index. A call that spends extra contract
+        // inputs into the one continuation (a many-to-one merge) is exactly the
+        // twin-input shape SINGLE refuses: every extra input would need its own
+        // continuation at its own index, so the tx cannot verify. Fail closed
+        // before building it. Text shared with the TS reference (contract.ts).
+        if !extra_contract_utxos.is_empty()
+            && (self.get_sig_hash_type(self.find_method_index(method_name)) & 0x1f) == 0x03
+        {
+            return Err(format!(
+                "RunarContract.call({}): additionalContractInputs cannot be spent into one \
+                 continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation \
+                 methods are all mutate-only, D25): SINGLE commits each input to its own output at its own \
+                 index. Merge with an addOutput method instead (see FungibleToken.merge), or build each \
+                 input's continuation with assembleMultiContractCall",
+                method_name,
+            ));
+        }
+
         let has_multi_output = options
             .and_then(|o| o.outputs.as_ref())
             .map_or(false, |v| !v.is_empty());
@@ -1218,6 +1264,38 @@ impl RunarContract {
             }).collect();
         }
 
+        // D25: a bind-class contract's every continuation carries the hidden
+        // `_spentOutpointHash` = sha256(outpoint this input spends), which the
+        // covenant writes itself. A caller-supplied state (CallOptions.outputs /
+        // new_state) cannot be expected to know it — left out, serialize_state
+        // refuses; copied from state(), it is the PREVIOUS outpoint's hash and
+        // the covenant rejects the spend. No other value can ever validate, so
+        // it is ALWAYS overwritten here, whatever the caller passed.
+        let outpoint_binding: Option<String> = if is_stateful
+            && self
+                .artifact
+                .state_fields
+                .as_ref()
+                .and_then(|f| f.iter().max_by_key(|f| f.index))
+                .map_or(false, |f| f.name == TWIN_BINDING_FIELD)
+        {
+            Some(spent_outpoint_hash(&current_utxo).ok_or_else(|| {
+                format!(
+                    "RunarContract.call({}): contract UTXO txid {:?} is not 32 bytes of hex",
+                    method_name, current_utxo.txid
+                )
+            })?)
+        } else {
+            None
+        };
+        let with_outpoint_binding = |st: &HashMap<String, SdkValue>| -> HashMap<String, SdkValue> {
+            let mut out = st.clone();
+            if let Some(ref b) = outpoint_binding {
+                out.insert(TWIN_BINDING_FIELD.to_string(), SdkValue::Bytes(b.clone()));
+            }
+            out
+        };
+
         if is_stateful && has_multi_output {
             // Multi-output: build a locking script for each output
             // N-075: get_code_part_hex() carries the inscription envelope, as the
@@ -1227,7 +1305,7 @@ impl RunarContract {
             let outputs = options.unwrap().outputs.as_ref().unwrap();
             contract_outputs = Some(
                 outputs.iter().map(|out| {
-                    let state_hex = serialize_state(state_fields, &out.state);
+                    let state_hex = serialize_state(state_fields, &with_outpoint_binding(&out.state));
                     ContractOutput {
                         script: format!("{}6a{}", code_script, state_hex),
                         satoshis: out.satoshis,
@@ -1273,8 +1351,8 @@ impl RunarContract {
             // Explicit newState takes priority (backward compat); otherwise
             // auto-compute from ANF IR if available.
             if let Some(new_state) = options.and_then(|o| o.new_state.as_ref()) {
-                for (k, v) in new_state {
-                    self.state.insert(k.clone(), v.clone());
+                for (k, v) in with_outpoint_binding(new_state) {
+                    self.state.insert(k, v);
                 }
             } else if method_has_continuation {
                 if let Some(computed) = auto_computed_state.take() {
@@ -1974,7 +2052,12 @@ impl RunarContract {
 
         // Compute sighash from preimage (C19: the true BIP-143 digest external
         // signers must sign — hash256(preimage), NOT sha256(preimage)).
-        let sighash = compute_bip143_sighash(&final_preimage);
+        // D25: user Sigs are ALL|FORKID, so under another covenant mode the
+        // digest is recomputed over the same tx under ALL|FORKID.
+        let sighash = user_sig_digest(
+            &final_preimage, &signed_tx, &current_utxo.script, current_utxo.satoshis,
+            code_sep_idx, sig_hash_type,
+        )?;
 
         // Convert contract_outputs to ContractOutputEntry for PreparedCall
         let prepared_contract_outputs: Vec<ContractOutputEntry> = contract_outputs
@@ -2400,7 +2483,11 @@ impl RunarContract {
 
         // Compute sighash from preimage (C19: the true BIP-143 digest external
         // signers must sign — hash256(preimage), NOT sha256(preimage)).
-        let sighash = compute_bip143_sighash(&final_preimage);
+        // D25: the ALL|FORKID digest for user Sigs (see user_sig_digest).
+        let sighash = user_sig_digest(
+            &final_preimage, &term_tx, &current_utxo.script, current_utxo.satoshis,
+            term_code_sep_idx, term_sig_hash_type,
+        )?;
 
         Ok(PreparedCall {
             sighash,
@@ -3179,6 +3266,23 @@ pub fn resolve_continuation_satoshis(
 
 /// Constructor param types whose arg is spliced into the locking script as a
 /// push of hex-decoded bytes.
+/// D25 hidden state field (mirrors the compiler's TWIN_BINDING_FIELD).
+const TWIN_BINDING_FIELD: &str = "_spentOutpointHash";
+
+/// sha256 of a spent outpoint as BIP-143 serializes it (txid in wire order ||
+/// vout u32 LE), hex. None when the txid is not 32 bytes of hex.
+fn spent_outpoint_hash(u: &Utxo) -> Option<String> {
+    if u.txid.len() != 64 || !u.txid.is_ascii() {
+        return None;
+    }
+    let mut wire = (0..32)
+        .map(|i| u8::from_str_radix(&u.txid[2 * i..2 * i + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    wire.reverse();
+    wire.extend_from_slice(&u.output_index.to_le_bytes());
+    Some(Sha256::digest(&wire).iter().map(|b| format!("{:02x}", b)).collect())
+}
+
 const BYTE_STRING_CTOR_TYPES: &[&str] = &[
     "ByteString", "PubKey", "Sig", "Addr", "Ripemd160", "Sha256",
     "Point", "P256Point", "P384Point", "SigHashPreimage",

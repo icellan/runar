@@ -220,8 +220,10 @@ class Counter extends StatefulSmartContract {{
 
 class TestSighashCodegen:
     def test_default_equals_explicit_all_forkid(self):
-        no = _compile_ok(_counter(""), "Counter.runar.ts")
-        allf = _compile_ok(_counter("/** @sighash ALL|FORKID */"), "Counter.runar.ts")
+        # D25: an addOutput body, because a mutate-only contract defaults to
+        # SINGLE and refuses an explicit ALL sibling.
+        no = _compile_ok(_counter_out(""), "Counter.runar.ts")
+        allf = _compile_ok(_counter_out("/** @sighash ALL|FORKID */"), "Counter.runar.ts")
         # ALL|FORKID equals the historically-pinned default → identical script.
         assert allf.script_hex == no.script_hex
         assert (
@@ -410,8 +412,12 @@ class Multi extends StatefulSmartContract {
         errs = _errors_of(src)
         assert any("SINGLE commits ONLY to the output at this input" in e for e in errs)
 
-    def test_rejects_mutate_only_under_single(self):
-        # F1: the mutate-only auto-continuation is value-skimmable under SINGLE.
+    def test_accepts_mutate_only_under_single(self):
+        # D25: the #123 (F1) refusal predated the F-024 ``_newAmount`` floor
+        # and N-038; SINGLE hashes the whole same-index output, value
+        # included, so a mutate-only SINGLE continuation is sound (and the
+        # default for a contract whose continuation methods are all
+        # mutate-only).
         src = """
 class Counter extends StatefulSmartContract {
   n: bigint;
@@ -419,13 +425,8 @@ class Counter extends StatefulSmartContract {
   /** @sighash SINGLE|FORKID */
   public bump(): void { this.n = this.n + 1n; }
 }"""
-        errs = _errors_of(src)
-        assert any(
-            "mutate-only SINGLE continuation is unsound" in e
-            or "sized by the caller-chosen _newAmount" in e
-            for e in errs
-        )
-        assert not _compiles(src)
+        assert _errors_of(src) == []
+        assert _compiles(src)
 
     def test_accepts_single_output_with_warning(self):
         # F1: the legitimate pairwise covenant is ALLOWED, with a value-pinning WARNING.

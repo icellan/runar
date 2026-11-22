@@ -28,6 +28,7 @@ import type { BindingVariant } from '../ir/anf-ir.js';
 import { continuationShape } from './side-effect-summary.js';
 import type { ContinuationShape } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
+import { TWIN_BINDING_FIELD } from './continuation-binding.js';
 
 /** What the two emitters need from a lowering context. */
 export interface ScaffoldContext<C> {
@@ -81,6 +82,18 @@ export function emitStatefulPrologue<C extends ScaffoldContext<C>>(
 }
 
 /**
+ * D25: `sha256(extractOutpoint(txPreimage))`, the value a 'bind' contract
+ * stores in its hidden last state field (`TWIN_BINDING_FIELD`) in every
+ * continuation it makes: written by the auto-continuation below, appended to
+ * every `addOutput` by ANF lowering. Returns the hash's binding name.
+ */
+export function emitOutpointBinding<C extends ScaffoldContext<C>>(ctx: C): string {
+  const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
+  const outpointRef = ctx.emit({ kind: 'call', func: 'extractOutpoint', args: [preimageRef] });
+  return ctx.emit({ kind: 'call', func: 'sha256', args: [outpointRef] });
+}
+
+/**
  * The state continuation, emitted after the user's code when the method's
  * shape needs one (nothing otherwise).
  *
@@ -116,6 +129,7 @@ export function emitStatefulContinuation<C extends ScaffoldContext<C>>(
   shape: ContinuationShape,
   addOutputRefs: readonly string[],
   addDataOutputRefs: readonly string[],
+  bindsOutpoint = false,
 ): void {
   if (!shape.needsChange) return;
 
@@ -191,6 +205,13 @@ export function emitStatefulContinuation<C extends ScaffoldContext<C>>(
   } else {
     // Single-output continuation: build raw output bytes, then splice in
     // any declared data outputs, then concat with change, then hash.
+    // D25: a 'bind' contract first records the spent outpoint in its hidden
+    // last state field, so this continuation differs from every other
+    // input's and no two inputs can share one output list.
+    if (bindsOutpoint) {
+      const bindingRef = emitOutpointBinding(ctx);
+      ctx.emit({ kind: 'update_prop', name: TWIN_BINDING_FIELD, value: bindingRef });
+    }
     const stateScriptRef = ctx.emit({ kind: 'get_state_script' });
     const preimageRef2 = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
     const newAmountRef = ctx.emit({ kind: 'load_param', name: '_newAmount' });
@@ -326,6 +347,9 @@ function sameBinding(exp: ANFBinding, act: ANFBinding, map: Map<string, string>,
     case 'deserialize_state':
       ok = ref(e.preimage, a.preimage);
       break;
+    case 'update_prop':
+      ok = e.name === a.name && ref(e.value, a.value);
+      break;
     case 'get_state_script':
       ok = true;
       break;
@@ -385,6 +409,7 @@ function scaffoldError(method: string, detail: string): Error {
 export function assertIrStatefulScaffolding(program: ANFProgram): void {
   const hasMutableState = program.properties.some((p) => !p.readonly);
   const propNames = new Set(program.properties.map((p) => p.name));
+  const bindsOutpoint = propNames.has(TWIN_BINDING_FIELD);
 
   for (const method of program.methods) {
     if (!method.isPublic || method.name === 'constructor') continue;
@@ -438,7 +463,7 @@ export function assertIrStatefulScaffolding(program: ANFProgram): void {
       }
     }
     const tail = new ExpectedContext(names);
-    emitStatefulContinuation(tail, shape, stateOutputs.map((b) => b.name), dataOutputs.map((b) => b.name));
+    emitStatefulContinuation(tail, shape, stateOutputs.map((b) => b.name), dataOutputs.map((b) => b.name), bindsOutpoint);
     const offset = rest.length - tail.bindings.length;
     for (let i = 0; i < tail.bindings.length; i++) {
       const act = offset + i >= 0 ? rest[offset + i] : undefined;
@@ -471,6 +496,81 @@ export function assertIrStatefulScaffolding(program: ANFProgram): void {
           `IR validation: stateful method '${method.name}' must bind '${b.name}' exactly once, under a name no property or parameter uses: the injected scaffolding binds it or the continuation commits to it`,
         );
       }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// D25: the --ir check of the contract-level continuation binding
+// ---------------------------------------------------------------------------
+
+/** D25: the shared --ir diagnostic for a continuation that is not bound to its input. */
+export function irUnboundContinuationMessage(detail: string): string {
+  return `IR validation: StatefulSmartContract continuation is not bound to its input (twin-input theft): ${detail}`;
+}
+
+/**
+ * D25: an `--ir` program must carry the binding the frontend would give it
+ * (`continuation-binding.ts`). Without the hidden `_spentOutpointHash` field,
+ * a program with an auto-continuation method must commit every continuation
+ * under a SINGLE base, and that method must not sit beside an addOutput one.
+ * With the field, it must be the LAST property, mutable, `Sha256`, zero at
+ * deploy, and every `add_output` must carry `sha256(extractOutpoint(txPreimage))`
+ * as its last state value (the auto-continuation's write is checked with the
+ * rest of the continuation).
+ */
+export function assertIrContinuationBinding(program: ANFProgram): void {
+  const bindsOutpoint = program.properties.some((p) => p.name === TWIN_BINDING_FIELD);
+  if (bindsOutpoint) {
+    const props = program.properties;
+    const field = props[props.length - 1]!;
+    if (
+      field.name !== TWIN_BINDING_FIELD || field.readonly || field.type !== 'Sha256' ||
+      field.initialValue !== '00'.repeat(32)
+    ) {
+      throw new Error(irUnboundContinuationMessage(
+        `'${TWIN_BINDING_FIELD}' must be the last property, mutable, of type Sha256, with initial value 32 zero bytes`,
+      ));
+    }
+    for (const m of program.methods) {
+      const byName = new Map<string, ANFValue>();
+      const index = (bs: ANFBinding[]): void => {
+        for (const b of bs) { byName.set(b.name, b.value); for (const n of nested(b.value)) index(n); }
+      };
+      index(m.body);
+      const call = (r: string | undefined, func: string): string | undefined => {
+        const v = r === undefined ? undefined : byName.get(r);
+        return v && v.kind === 'call' && v.func === func && v.args.length === 1 ? v.args[0] : undefined;
+      };
+      const check = (bs: ANFBinding[]): void => {
+        for (const b of bs) {
+          if (b.value.kind === 'add_output') {
+            const pre = call(call(b.value.stateValues[b.value.stateValues.length - 1], 'sha256'), 'extractOutpoint');
+            const v = pre === undefined ? undefined : byName.get(pre);
+            if (!v || v.kind !== 'load_param' || v.name !== 'txPreimage') {
+              throw new Error(irUnboundContinuationMessage(
+                `method '${m.name}': every add_output must carry sha256(extractOutpoint(txPreimage)) as its last state value`,
+              ));
+            }
+          }
+          for (const n of nested(b.value)) check(n);
+        }
+      };
+      check(m.body);
+    }
+    return;
+  }
+  const shapes = program.methods
+    .filter((m) => m.isPublic && m.name !== 'constructor')
+    .map((m) => ({ m, shape: irMethodShape(program, m) }))
+    .filter(({ shape }) => shape.needsChange);
+  if (!shapes.some(({ shape }) => shape.needsNewAmount)) return;
+  for (const { m, shape } of shapes) {
+    const single = ((m.sigHashType ?? SIGHASH_DEFAULT) & 0x1f) === 0x03;
+    if (!shape.needsNewAmount || !single) {
+      throw new Error(irUnboundContinuationMessage(
+        `method '${m.name}': a program with an auto-continuation method and no '${TWIN_BINDING_FIELD}' field must commit every continuation under a SIGHASH_SINGLE base, from auto-continuation methods only`,
+      ));
     }
   }
 }

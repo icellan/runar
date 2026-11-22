@@ -16,7 +16,7 @@
 //!   hashOutputs            ✓      ✗      same-idx   (per base)
 //!
 //! Mirrors the TypeScript reference `sighash-validate.ts` (plus the
-//! security-audit hardening: SINGLE value-skim reject, requireOutputP2PKH
+//! security-audit hardening: requireOutputP2PKH
 //! reject under SINGLE, transitive walk through for-loop headers + assignment
 //! targets). Default ALL|FORKID methods (no directive) are never flagged.
 
@@ -165,11 +165,13 @@ pub fn validate_sighash_usage(contract: &ContractNode) -> Vec<Diagnostic> {
                     label, u.name));
             }
 
-            // A stateful mutate-only (or data-only) method has NO explicit
-            // output intrinsic, so the compiler auto-injects a single
-            // state-continuation output whose value is the caller-chosen
-            // `_newAmount`. Under SINGLE, BIP-143 commits ONLY to the
-            // same-index output and does NOT pin its value → value-skimmable.
+            // D25: a mutate-only (auto-continuation) method under SINGLE is
+            // SOUND and is the DEFAULT for a contract whose continuation
+            // methods are all mutate-only (`continuation_binding.rs`). SINGLE
+            // hashes the whole same-index output, value included, and the
+            // F-024 floor (`_newAmount >= extractAmount`) stops a dust
+            // continuation; the change is not committed (N-038). The refusal
+            // that used to stand here predates both.
             let is_mutate_only_auto_continuation =
                 needs_continuation && scan.state_output_count == 0 && scan.data_output_count == 0;
 
@@ -183,9 +185,7 @@ pub fn validate_sighash_usage(contract: &ContractNode) -> Vec<Diagnostic> {
             let committed = state_outputs + scan.data_output_count;
 
             if is_mutate_only_auto_continuation {
-                push_err(&mut out, &Some(method.source_location.clone()), format!(
-                    "@sighash {}: this stateful method's state continuation is sized by the caller-chosen _newAmount, but SINGLE commits ONLY to the same-index output WITHOUT pinning its value — a spender can set _newAmount to dust, drive the change output to zero, and append a draining output while the covenant + OP_PUSH_TX binding still validate (value skim); an honest change>0 leaves the UTXO unspendable. A mutate-only SINGLE continuation is unsound. Use ALL, or emit an explicit addOutput/addRawOutput that carries the full protected value at this input's index.",
-                    label));
+                // Sound (see above): nothing to report.
             } else if committed > 1 {
                 let plus_cont = if state_outputs > scan.state_output_count {
                     " + state continuation"

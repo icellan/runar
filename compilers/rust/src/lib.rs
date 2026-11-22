@@ -461,6 +461,11 @@ pub fn compile_from_source_str_with_options(
         eprintln!("Validation warning: {}", w);
     }
 
+    // D25: carry the effective continuation sighash (resolved in pass 2 on a
+    // copy) into typecheck and ANF lowering (continuation_binding.rs).
+    let mut contract = contract;
+    frontend::continuation_binding::resolve_continuation_binding(&mut contract);
+
     // Pass 3: Type-check
     let tc_result = guarded_pass("type check", || frontend::typecheck::typecheck(&contract))
         .map_err(|e| e.message)?;
@@ -473,7 +478,11 @@ pub fn compile_from_source_str_with_options(
 
     // Pass 3b: Expand fixed-size array properties into scalar siblings.
     let expand_result = guarded_pass("expand fixed arrays", || {
-        frontend::expand_fixed_arrays::expand_fixed_arrays(&contract)
+        // D25: a 'bind' contract gains its hidden spent-outpoint field here
+        // (after typecheck, so user-facing arity rules never see it).
+        frontend::expand_fixed_arrays::expand_fixed_arrays(
+            &frontend::continuation_binding::inject_continuation_binding(&contract),
+        )
     })
     .map_err(|e| e.message)?;
     if !expand_result.errors.is_empty() {
@@ -597,6 +606,10 @@ pub fn compile_source_str_to_ir_collecting_warnings(
         ));
     }
 
+    // D25: see compile_from_source_str_with_options.
+    let mut contract = contract;
+    frontend::continuation_binding::resolve_continuation_binding(&mut contract);
+
     let tc_result = guarded_pass("type check", || frontend::typecheck::typecheck(&contract))
         .map_err(|e| e.message)?;
     if !tc_result.errors.is_empty() {
@@ -608,7 +621,11 @@ pub fn compile_source_str_to_ir_collecting_warnings(
 
     // Pass 3b: Expand fixed-size array properties into scalar siblings.
     let expand_result = guarded_pass("expand fixed arrays", || {
-        frontend::expand_fixed_arrays::expand_fixed_arrays(&contract)
+        // D25: a 'bind' contract gains its hidden spent-outpoint field here
+        // (after typecheck, so user-facing arity rules never see it).
+        frontend::expand_fixed_arrays::expand_fixed_arrays(
+            &frontend::continuation_binding::inject_continuation_binding(&contract),
+        )
     })
     .map_err(|e| e.message)?;
     if !expand_result.errors.is_empty() {
@@ -1042,6 +1059,13 @@ fn compile_program_checked(program: &ir::ANFProgram, opts: &CompileOptions, prei
         // D26: IR input skips typecheck's locktime-domain rule (stateless and
         // stateful programs alike); see frontend/locktime_domain.rs.
         frontend::locktime_domain::assert_ir_locktime_domain(program)?;
+        // D25: a StatefulSmartContract's continuations must be bound to their
+        // input (SINGLE, or the hidden spent-outpoint field); checked last
+        // among the IR frontend rules so every earlier, more specific
+        // diagnostic keeps precedence. See stateful_scaffold.rs.
+        if parent_class == "StatefulSmartContract" {
+            stateful_scaffold::check_ir_continuation_binding(program)?;
+        }
     }
 
     let mut program = program.clone();
@@ -1211,6 +1235,13 @@ pub fn compile_from_source_str_with_result(
         return result;
     }
 
+    // D25: carry the effective continuation sighash (resolved in pass 2 on a
+    // copy) into typecheck and ANF lowering (continuation_binding.rs).
+    if let Some(c) = result.contract.as_mut() {
+        frontend::continuation_binding::resolve_continuation_binding(c);
+    }
+    let contract = result.contract.as_ref().unwrap();
+
     // Pass 3: Type-check
     let tc_result = match guarded_pass("type check", || frontend::typecheck::typecheck(contract)) {
         Ok(t) => t,
@@ -1232,7 +1263,10 @@ pub fn compile_from_source_str_with_result(
 
     // Pass 3b: Expand fixed-size array properties into scalar siblings.
     let expand_result = match guarded_pass("expand fixed arrays", || {
-        frontend::expand_fixed_arrays::expand_fixed_arrays(contract)
+        // D25: a 'bind' contract gains its hidden spent-outpoint field here.
+        frontend::expand_fixed_arrays::expand_fixed_arrays(
+            &frontend::continuation_binding::inject_continuation_binding(contract),
+        )
     }) {
         Ok(r) => r,
         Err(e) => {

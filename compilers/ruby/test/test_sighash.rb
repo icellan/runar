@@ -460,8 +460,11 @@ class TestSighash < Minitest::Test
     assert(errors_of(src).any? { |e| e =~ /NONE commits to NO outputs|continuation/ })
   end
 
-  # Rule 4 — SINGLE rejects a mutate-only continuation (value-skimmable, F1).
-  def test_rule4_single_rejects_mutate_only_continuation
+  # D25: the #123 (F1) refusal predated the F-024 _newAmount floor and N-038;
+  # SINGLE hashes the whole same-index output, value included, so a
+  # mutate-only SINGLE continuation is sound (and the default for a contract
+  # whose continuation methods are all mutate-only).
+  def test_rule4_single_accepts_mutate_only_continuation
     src = <<~TS
       class Counter extends StatefulSmartContract {
         n: bigint;
@@ -470,8 +473,8 @@ class TestSighash < Minitest::Test
         public bump(): void { this.n = this.n + 1n; }
       }
     TS
-    assert(errors_of(src).any? { |e| e =~ /mutate-only SINGLE continuation is unsound|sized by the caller-chosen _newAmount/ })
-    refute compiles?(src)
+    assert_equal [], errors_of(src)
+    assert compiles?(src)
   end
 
   # Rule 4 — SINGLE rejects >1 committed output.

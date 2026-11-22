@@ -1,5 +1,5 @@
 {
-  "_comment": "N-055: a stateful public method (full scaffolding, zero top-level outputs) delegates an output intrinsic to a private method via method_call.",
+  "_comment": "N-055: a stateful public method (full scaffolding, zero top-level outputs) delegates an output intrinsic to a private method via method_call. D25: bump is a mutate-only continuation, so it commits under SIGHASH_SINGLE|FORKID (sigHashType 67, no change params, no change segment); a pre-D25 ALL scaffold without '_spentOutpointHash' is now refused by the --ir continuation-binding rule before the delegation diagnostic is reached.",
   "cases": [
     {
       "name": "add-output-delegated",
@@ -90,7 +90,8 @@
                 "name": "t1",
                 "value": {
                   "kind": "check_preimage",
-                  "preimage": "t0"
+                  "preimage": "t0",
+                  "sighashFlag": 67
                 }
               },
               {
@@ -121,7 +122,7 @@
                 "name": "t5",
                 "value": {
                   "kind": "load_const",
-                  "value": 65
+                  "value": 67
                 }
               },
               {
@@ -220,65 +221,6 @@
                 }
               },
               {
-                "name": "c1",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_changePKH"
-                }
-              },
-              {
-                "name": "c2",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_changeAmount"
-                }
-              },
-              {
-                "name": "c3",
-                "value": {
-                  "kind": "load_const",
-                  "value": 0
-                }
-              },
-              {
-                "name": "c4",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "!==",
-                  "left": "c2",
-                  "right": "c3"
-                }
-              },
-              {
-                "name": "c7",
-                "value": {
-                  "kind": "if",
-                  "cond": "c4",
-                  "then": [
-                    {
-                      "name": "c5",
-                      "value": {
-                        "kind": "call",
-                        "func": "buildChangeOutput",
-                        "args": [
-                          "c1",
-                          "c2"
-                        ]
-                      }
-                    }
-                  ],
-                  "else": [
-                    {
-                      "name": "c6",
-                      "value": {
-                        "kind": "load_const",
-                        "value": ""
-                      }
-                    }
-                  ]
-                }
-              },
-              {
                 "name": "s1",
                 "value": {
                   "kind": "get_state_script"
@@ -311,23 +253,12 @@
                 }
               },
               {
-                "name": "s5",
-                "value": {
-                  "kind": "call",
-                  "func": "cat",
-                  "args": [
-                    "s4",
-                    "c7"
-                  ]
-                }
-              },
-              {
                 "name": "s6",
                 "value": {
                   "kind": "call",
                   "func": "hash256",
                   "args": [
-                    "s5"
+                    "s4"
                   ]
                 }
               },
@@ -371,14 +302,6 @@
             "name": "bump",
             "params": [
               {
-                "name": "_changePKH",
-                "type": "Ripemd160"
-              },
-              {
-                "name": "_changeAmount",
-                "type": "bigint"
-              },
-              {
                 "name": "txPreimage",
                 "type": "SigHashPreimage"
               },
@@ -386,7 +309,8 @@
                 "name": "_newAmount",
                 "type": "bigint"
               }
-            ]
+            ],
+            "sigHashType": 67
           },
           {
             "name": "emit",
@@ -516,7 +440,8 @@
                 "name": "t1",
                 "value": {
                   "kind": "check_preimage",
-                  "preimage": "t0"
+                  "preimage": "t0",
+                  "sighashFlag": 67
                 }
               },
               {
@@ -547,7 +472,7 @@
                 "name": "t5",
                 "value": {
                   "kind": "load_const",
-                  "value": 65
+                  "value": 67
                 }
               },
               {
@@ -646,65 +571,6 @@
                 }
               },
               {
-                "name": "c1",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_changePKH"
-                }
-              },
-              {
-                "name": "c2",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_changeAmount"
-                }
-              },
-              {
-                "name": "c3",
-                "value": {
-                  "kind": "load_const",
-                  "value": 0
-                }
-              },
-              {
-                "name": "c4",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "!==",
-                  "left": "c2",
-                  "right": "c3"
-                }
-              },
-              {
-                "name": "c7",
-                "value": {
-                  "kind": "if",
-                  "cond": "c4",
-                  "then": [
-                    {
-                      "name": "c5",
-                      "value": {
-                        "kind": "call",
-                        "func": "buildChangeOutput",
-                        "args": [
-                          "c1",
-                          "c2"
-                        ]
-                      }
-                    }
-                  ],
-                  "else": [
-                    {
-                      "name": "c6",
-                      "value": {
-                        "kind": "load_const",
-                        "value": ""
-                      }
-                    }
-                  ]
-                }
-              },
-              {
                 "name": "s1",
                 "value": {
                   "kind": "get_state_script"
@@ -737,23 +603,12 @@
                 }
               },
               {
-                "name": "s5",
-                "value": {
-                  "kind": "call",
-                  "func": "cat",
-                  "args": [
-                    "s4",
-                    "c7"
-                  ]
-                }
-              },
-              {
                 "name": "s6",
                 "value": {
                   "kind": "call",
                   "func": "hash256",
                   "args": [
-                    "s5"
+                    "s4"
                   ]
                 }
               },
@@ -797,14 +652,6 @@
             "name": "bump",
             "params": [
               {
-                "name": "_changePKH",
-                "type": "Ripemd160"
-              },
-              {
-                "name": "_changeAmount",
-                "type": "bigint"
-              },
-              {
                 "name": "txPreimage",
                 "type": "SigHashPreimage"
               },
@@ -812,7 +659,8 @@
                 "name": "_newAmount",
                 "type": "bigint"
               }
-            ]
+            ],
+            "sigHashType": 67
           },
           {
             "name": "emit",
@@ -945,7 +793,8 @@
                 "name": "t1",
                 "value": {
                   "kind": "check_preimage",
-                  "preimage": "t0"
+                  "preimage": "t0",
+                  "sighashFlag": 67
                 }
               },
               {
@@ -976,7 +825,7 @@
                 "name": "t5",
                 "value": {
                   "kind": "load_const",
-                  "value": 65
+                  "value": 67
                 }
               },
               {
@@ -1075,65 +924,6 @@
                 }
               },
               {
-                "name": "c1",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_changePKH"
-                }
-              },
-              {
-                "name": "c2",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_changeAmount"
-                }
-              },
-              {
-                "name": "c3",
-                "value": {
-                  "kind": "load_const",
-                  "value": 0
-                }
-              },
-              {
-                "name": "c4",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "!==",
-                  "left": "c2",
-                  "right": "c3"
-                }
-              },
-              {
-                "name": "c7",
-                "value": {
-                  "kind": "if",
-                  "cond": "c4",
-                  "then": [
-                    {
-                      "name": "c5",
-                      "value": {
-                        "kind": "call",
-                        "func": "buildChangeOutput",
-                        "args": [
-                          "c1",
-                          "c2"
-                        ]
-                      }
-                    }
-                  ],
-                  "else": [
-                    {
-                      "name": "c6",
-                      "value": {
-                        "kind": "load_const",
-                        "value": ""
-                      }
-                    }
-                  ]
-                }
-              },
-              {
                 "name": "s1",
                 "value": {
                   "kind": "get_state_script"
@@ -1166,23 +956,12 @@
                 }
               },
               {
-                "name": "s5",
-                "value": {
-                  "kind": "call",
-                  "func": "cat",
-                  "args": [
-                    "s4",
-                    "c7"
-                  ]
-                }
-              },
-              {
                 "name": "s6",
                 "value": {
                   "kind": "call",
                   "func": "hash256",
                   "args": [
-                    "s5"
+                    "s4"
                   ]
                 }
               },
@@ -1226,14 +1005,6 @@
             "name": "bump",
             "params": [
               {
-                "name": "_changePKH",
-                "type": "Ripemd160"
-              },
-              {
-                "name": "_changeAmount",
-                "type": "bigint"
-              },
-              {
                 "name": "_newAmount",
                 "type": "bigint"
               },
@@ -1241,7 +1012,8 @@
                 "name": "txPreimage",
                 "type": "SigHashPreimage"
               }
-            ]
+            ],
+            "sigHashType": 67
           },
           {
             "name": "emit",

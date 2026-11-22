@@ -14,6 +14,7 @@
 //!   stack lowering          _codePart, __param_*, __shadowed_*, _pub_<digits>
 //!   auto-injected params    _changePKH, _changeAmount, _newAmount,
 //!                           _serialisedOutputs, _prevOutScript_<digits>,
+//!                           _spentOutpointHash (D25's hidden state field),
 //!                           and txPreimage in a StatefulSmartContract
 
 const std = @import("std");
@@ -69,7 +70,9 @@ fn isSourceOnlyReserved(name: []const u8) bool {
         std.mem.eql(u8, name, "_changeAmount") or
         std.mem.eql(u8, name, "_newAmount") or
         std.mem.eql(u8, name, "_serialisedOutputs") or
-        prefixDigits(name, "_prevOutScript_");
+        prefixDigits(name, "_prevOutScript_") or
+        // D25: the hidden spent-outpoint state field (continuation_binding.zig).
+        std.mem.eql(u8, name, "_spentOutpointHash");
 }
 
 /// True if a SOURCE program may not declare `name` (after name mapping).

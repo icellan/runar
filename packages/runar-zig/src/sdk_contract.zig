@@ -253,6 +253,13 @@ pub const ContractError = error{
     /// resulting tx would be invalid (or, before this fix, silently drop
     /// the extra UTXOs while reporting success). Fail closed instead.
     AdditionalContractInputsUnsupported,
+    /// D25: `options.additional_contract_inputs` on a method whose covenant
+    /// commits under a SIGHASH_SINGLE base (the default for a contract whose
+    /// continuation methods are all mutate-only). SINGLE commits each input
+    /// to its own output at its own index, so extra contract inputs cannot
+    /// be spent into one continuation; the TS text is in
+    /// `sdk_errors.lastSingleMergeMessage()`.
+    SingleContinuationMergeUnsupported,
     /// N-426: `options.change_address` is not the P2PKH address of the key the
     /// covenant's `_changePKH` enforces (see `sdk_errors.ChangeAddressError`).
     ChangeAddressMismatch,
@@ -1015,6 +1022,8 @@ pub const RunarContract = struct {
         if (!parent_stateful and n_extra_contract_inputs > 0) {
             return ContractError.AdditionalContractInputsUnsupported;
         }
+        // D25: see `refuseSingleMerge`.
+        try self.refuseSingleMerge(method_name, n_extra_contract_inputs);
         const terminal_outputs: []const types.ContractOutput =
             if (is_terminal_call) options.?.terminal_outputs.? else &.{};
         const terminal_funding: []const types.UTXO =
@@ -1151,10 +1160,13 @@ pub const RunarContract = struct {
                 const code_part = try self.getCodePartHex();
                 defer self.allocator.free(code_part);
                 for (multi_output_specs.?) |out| {
+                    // D25: see `boundState`.
+                    const out_state = try self.boundState(out.state, contract_utxo);
+                    defer freeStateValues(self.allocator, out_state);
                     const state_hex = try state_mod.serializeState(
                         self.allocator,
                         self.artifact.state_fields,
-                        out.state,
+                        out_state,
                     );
                     defer self.allocator.free(state_hex);
                     const script_hex = try std.mem.concat(self.allocator, u8, &[_][]const u8{ code_part, "6a", state_hex });
@@ -1168,12 +1180,9 @@ pub const RunarContract = struct {
                 // new_state) see consistent contract state. The "primary"
                 // continuation is by convention the first entry.
                 const primary_state = multi_output_specs.?[0].state;
+                const vals = try self.boundState(primary_state, contract_utxo);
                 for (self.state) |*s| s.deinit(self.allocator);
                 if (self.state.len > 0) self.allocator.free(self.state);
-                var vals = try self.allocator.alloc(types.StateValue, primary_state.len);
-                for (primary_state, 0..) |s, i| {
-                    vals[i] = try s.clone(self.allocator);
-                }
                 self.state = vals;
                 new_satoshis = multi_output_specs.?[0].satoshis;
                 // Skip new_locking_script — multi_outputs_hex feeds the
@@ -1183,12 +1192,10 @@ pub const RunarContract = struct {
                     anf_data_outputs = try self.autoComputeDataOutputs(method_name, user_params, resolved_args, &anf_ordered_outputs);
                 }
                 const ns = options.?.new_state.?;
+                // D25: see `boundState`.
+                const vals = try self.boundState(ns, contract_utxo);
                 for (self.state) |*s| s.deinit(self.allocator);
                 if (self.state.len > 0) self.allocator.free(self.state);
-                var vals = try self.allocator.alloc(types.StateValue, ns.len);
-                for (ns, 0..) |s, i| {
-                    vals[i] = try s.clone(self.allocator);
-                }
                 self.state = vals;
                 new_locking_script = try self.getLockingScript();
             } else if (has_continuation and self.artifact.anf_json != null) {
@@ -2446,6 +2453,8 @@ pub const RunarContract = struct {
         // valid when finalizeCall swaps input 0's placeholder for the real Sig.
         const extra_contract_utxos: []const types.UTXO =
             if (options) |o| (if (o.additional_contract_inputs) |aci| aci else &.{}) else &.{};
+        // D25: see `refuseSingleMerge`.
+        try self.refuseSingleMerge(method_name, extra_contract_utxos.len);
         // Per-input arg overrides (additional_contract_input_args) are not
         // ported to the two-phase path: call() sizes its first pass from
         // per-input placeholder args this path does not build. Fail closed
@@ -2512,10 +2521,10 @@ pub const RunarContract = struct {
         if (options) |o| {
             if (o.satoshis > 0) new_satoshis = o.satoshis;
             if (o.new_state) |ns| {
+                // D25: see `boundState`.
+                const vals = try self.boundState(ns, contract_utxo);
                 for (self.state) |*s| s.deinit(self.allocator);
                 if (self.state.len > 0) self.allocator.free(self.state);
-                var vals = try self.allocator.alloc(types.StateValue, ns.len);
-                for (ns, 0..) |s, i| vals[i] = try s.clone(self.allocator);
                 self.state = vals;
             }
         }
@@ -3052,6 +3061,49 @@ pub const RunarContract = struct {
             const byte: u8 = @truncate(vout >> @intCast(b * 8));
             out[64 + b * 2] = hex_chars[byte >> 4];
             out[64 + b * 2 + 1] = hex_chars[byte & 0x0f];
+        }
+        return out;
+    }
+
+    /// D25: an owned copy of a caller-supplied post-state (`new_state`, or an
+    /// `outputs` entry's state) with the hidden `_spentOutpointHash` field of
+    /// a 'bind' contract set to the only value its covenant accepts for this
+    /// spend: sha256 of the spent outpoint (the auto-derived path gets the
+    /// same value from the ANF interpreter). The field is compiler-owned and
+    /// always last, so a caller may pass the user fields only (it is
+    /// appended) or all of them (it is overwritten). Without this a
+    /// user-fields-only state serialized one field short, and a full state
+    /// carried whatever stale hash the caller copied, so every explicit-state
+    /// call of such a contract built a continuation its covenant rejects.
+    /// Any other contract gets a plain copy.
+    fn boundState(self: *const RunarContract, vals: []const types.StateValue, utxo: types.UTXO) ![]types.StateValue {
+        const fields = self.artifact.state_fields;
+        const binds = fields.len > 0 and std.mem.eql(u8, fields[fields.len - 1].name, "_spentOutpointHash");
+        const n = if (binds and vals.len == fields.len - 1) vals.len + 1 else vals.len;
+        const out = try self.allocator.alloc(types.StateValue, n);
+        var filled: usize = 0;
+        errdefer {
+            for (out[0..filled]) |*v| v.deinit(self.allocator);
+            self.allocator.free(out);
+        }
+        for (vals) |v| {
+            out[filled] = try v.clone(self.allocator);
+            filled += 1;
+        }
+        if (binds and n == fields.len) {
+            const op = try outpointHex(self.allocator, utxo);
+            defer self.allocator.free(op);
+            var raw: [36]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&raw, op);
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(&raw, &digest, .{});
+            const hex = std.fmt.bytesToHex(digest, .lower);
+            if (filled == n) {
+                out[n - 1].deinit(self.allocator);
+                filled -= 1;
+            }
+            out[n - 1] = .{ .bytes = try self.allocator.dupe(u8, &hex) };
+            filled = n;
         }
         return out;
     }
@@ -3839,6 +3891,10 @@ pub const RunarContract = struct {
         var mock_env = anf_interp.MockEnv.init(work);
         defer mock_env.deinit();
         mock_env.script_code_hex = script_code_hex;
+        // D12 D2 / D25: the real spent outpoint, so an add_output's hidden
+        // `_spentOutpointHash = sha256(extractOutpoint(txPreimage))` state
+        // value is the one the covenant computes (36 zero bytes otherwise).
+        mock_env.outpoint_hex = try outpointHex(work, self.current_utxo.?);
 
         // FAIL CLOSED (NEW-006) — see the matching note in autoComputeState.
         const result = anf_interp.computeNewStateWithMockEnv(
@@ -4117,6 +4173,20 @@ pub const RunarContract = struct {
     /// the named public method, or the default ALL|FORKID (0x41) when the method
     /// carries no directive. Keeps every call/finalize path mode-aware with no
     /// call-site churn (mirrors the Go SDK's methodSigHashType).
+    /// D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+    /// continuation methods are all mutate-only) commits ONE output per
+    /// input, at that input's index. A call that spends extra contract inputs
+    /// into the one continuation (a many-to-one merge) is exactly the
+    /// twin-input shape SINGLE refuses: every extra input would need its own
+    /// continuation at its own index, so the tx cannot verify. Fail closed
+    /// before building it (TS `RunarContract.call`, same text).
+    fn refuseSingleMerge(self: *const RunarContract, method_name: []const u8, n_extra: usize) ContractError!void {
+        if (n_extra == 0) return;
+        if ((self.methodSigHashType(method_name) & 0x1f) != 0x03) return;
+        errors_mod.recordSingleMergeRefusal(method_name);
+        return ContractError.SingleContinuationMergeUnsupported;
+    }
+
     fn methodSigHashType(self: *const RunarContract, method_name: []const u8) u32 {
         for (self.artifact.abi.methods) |m| {
             if (m.is_public and std.mem.eql(u8, m.name, method_name)) {

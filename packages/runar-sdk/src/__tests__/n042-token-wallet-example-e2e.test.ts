@@ -165,21 +165,15 @@ describe('N-042 TokenWallet against the shipped WalletToken example', () => {
       .rejects.toThrow(/refusing to broadcast invalid transaction/);
   });
 
-  it('merge: spends both token outpoints once, every input validates, supply is summed', async () => {
+  // D25: WalletToken's continuation method (merge) is mutate-only, so it
+  // commits under SIGHASH_SINGLE, one output per input; a two-input merge into
+  // one continuation is the twin-input shape SINGLE closes, refused up front.
+  it('merge is refused before anything is broadcast (SIGHASH_SINGLE, D25)', async () => {
     const artifact = compileExample();
-    const { provider, wallet, tokenUtxos, known } = await setup(artifact, [100n, 250n]);
+    const { provider, wallet } = await setup(artifact, [100n, 250n]);
     expect(await wallet.getBalance()).toBe(350n);
-
-    const txid = await wallet.merge();
-
-    const txHex = lastBroadcast(provider);
-    const tx = Transaction.fromHex(txHex);
-    expect(tx.id('hex')).toBe(txid);
-    const spent = tx.inputs.map((inp) => `${inp.sourceTXID}:${inp.sourceOutputIndex}`);
-    for (const u of tokenUtxos) expect(spent).toContain(`${u.txid}:${u.outputIndex}`);
-    expect(new Set(spent).size).toBe(spent.length);
-    spendValidateAll(txHex, known);
-    const merged = await RunarContract.fromTxId(artifact, txid, 0, provider);
-    expect(merged.state['supply']).toBe(350n);
+    const before = provider.getBroadcastedTxs().length;
+    await expect(wallet.merge()).rejects.toThrow(/additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method/);
+    expect(provider.getBroadcastedTxs().length).toBe(before);
   });
 });

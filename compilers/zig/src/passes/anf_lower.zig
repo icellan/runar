@@ -19,6 +19,7 @@ const types = @import("../ir/types.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
 const input_limits = @import("../frontend/input_limits.zig");
 const stateful_scaffold = @import("../ir/stateful_scaffold.zig");
+const continuation_binding = @import("continuation_binding.zig");
 const typecheck = @import("typecheck.zig");
 const validate = @import("validate.zig");
 
@@ -183,6 +184,24 @@ pub fn lowerToANFWithDiagnostic(
             tc.deinit(allocator);
         } else |_| {}
     }
+    // D25: the same for the twin-input binding. A caller that assembles its
+    // own pipeline and skips continuation_binding.inject would otherwise lower
+    // a mixed contract with no _spentOutpointHash, leaving its continuations
+    // unbound. Idempotent: a contract that already carries the field is
+    // returned unchanged, so the compiler's own path is unaffected. When it
+    // does inject, only the new property slice is allocated; the ANF copies
+    // each property by value (the field's strings are static), so the slice
+    // is freed once lowering is done.
+    const bound = try continuation_binding.inject(allocator, contract);
+    defer if (bound.properties.ptr != contract.properties.ptr) allocator.free(bound.properties);
+    return lowerBoundToANF(allocator, bound, diag);
+}
+
+fn lowerBoundToANF(
+    allocator: Allocator,
+    contract: ContractNode,
+    diag: ?*LowerDiagnostic,
+) LowerError!ANFProgram {
     const properties = try lowerPropertiesWithDiagnostic(allocator, contract, diag);
     const methods = try lowerMethods(allocator, contract, diag);
 
@@ -947,6 +966,16 @@ fn lowerStatefulPublicMethod(
             // Single-output continuation: build raw state output bytes, then
             // splice in declared data outputs, then concat with change,
             // then hash.
+            // D25: a 'bind' contract first records the spent outpoint in its
+            // hidden last state field, so this continuation differs from
+            // every other input's and no two inputs can share one output list.
+            if (continuation_binding.bindsOutpoint(ctx.contract)) {
+                const binding_ref = try emitOutpointBinding(ctx);
+                _ = try ctx.emit(.{ .update_prop = .{
+                    .name = continuation_binding.TWIN_BINDING_FIELD,
+                    .value = binding_ref,
+                } });
+            }
             const state_script_ref = try ctx.emit(.{ .get_state_script = {} });
             const preimage_ref2 = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
             const new_amount_ref = try ctx.emit(.{ .load_param = .{ .name = "_newAmount" } });
@@ -983,6 +1012,22 @@ fn lowerStatefulPublicMethod(
             _ = try ctx.emit(.{ .assert = .{ .value = eq_ref, .is_auto_injected_state_check = true } });
         }
     }
+}
+
+/// D25: `sha256(extractOutpoint(txPreimage))`, the value a 'bind' contract
+/// stores in its hidden last state field in every continuation it makes
+/// (mirrors `emitOutpointBinding` in stateful-scaffold.ts). Returns the hash's
+/// binding name.
+fn emitOutpointBinding(ctx: *LowerCtx) LowerError![]const u8 {
+    const preimage_ref = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
+    const outpoint_ref = try ctx.emit(.{ .call = .{
+        .func = "extractOutpoint",
+        .args = try ctx.allocSlice(&.{preimage_ref}),
+    } });
+    return try ctx.emit(.{ .call = .{
+        .func = "sha256",
+        .args = try ctx.allocSlice(&.{outpoint_ref}),
+    } });
 }
 
 // ============================================================================
@@ -2890,9 +2935,17 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
     if ((is_self or is_stateful_ctx) and std.mem.eql(u8, mc.method, "addOutput")) {
         const arg_refs = try lowerAddOutputArgs(ctx, mc.args);
         if (arg_refs.len > 0) {
+            var state_values: []const []const u8 = if (arg_refs.len > 1) arg_refs[1..] else &.{};
+            // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+            if (continuation_binding.bindsOutpoint(ctx.contract)) {
+                const bound = try ctx.allocator.alloc([]const u8, state_values.len + 1);
+                @memcpy(bound[0..state_values.len], state_values);
+                bound[state_values.len] = try emitOutpointBinding(ctx);
+                state_values = bound;
+            }
             const ref = try ctx.emit(.{ .add_output = .{
                 .satoshis = arg_refs[0],
-                .state_values = if (arg_refs.len > 1) arg_refs[1..] else &.{},
+                .state_values = state_values,
                 .preimage = "",
             } });
             try ctx.addOutputRef(ref);

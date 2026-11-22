@@ -93,7 +93,9 @@ class ValidationResult:
 def validate(contract: ContractNode) -> ValidationResult:
     """Validate a Runar AST against language subset constraints.
 
-    Does NOT modify the AST; only reports errors and warnings.
+    Reports errors and warnings. The one AST write is D25's: the effective
+    ``sighash_type`` of a mutate-only contract's continuation methods
+    (continuation_binding.py; idempotent).
     """
     ctx = _ValidationContext(contract=contract)
 
@@ -116,6 +118,15 @@ def validate(contract: ContractNode) -> ValidationResult:
     # both errors (unsound usages) and warnings (e.g. an explicit single-output
     # SINGLE covenant whose same-index value cannot be pinned statically), so
     # route each diagnostic to the matching bucket.
+    # D25: classify the contract's continuation binding and set the effective
+    # sighash of a mutate-only contract's continuation methods (SINGLE) BEFORE
+    # the field checks, so they and every later pass see the effective mode.
+    # The one place this pass writes the AST (method.sighash_type only;
+    # idempotent). See continuation_binding.py.
+    from runar_compiler.frontend.continuation_binding import resolve_continuation_binding
+    for d in resolve_continuation_binding(contract):
+        (ctx.warnings if d.severity == Severity.WARNING else ctx.errors).append(d)
+
     from runar_compiler.frontend.sighash_validate import validate_sighash_usage
     for d in validate_sighash_usage(contract):
         (ctx.warnings if d.severity == Severity.WARNING else ctx.errors).append(d)

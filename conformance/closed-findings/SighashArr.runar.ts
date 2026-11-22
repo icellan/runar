@@ -4,9 +4,10 @@
 //
 // This probe is only compilable at all since N-124 taught the Zig tier
 // `this.arr[i]++`. Its continuation is an explicit addOutput carrying the
-// whole table: a mutate-only SINGLE method (auto-continuation sized by the
-// spender's _newAmount) is refused as a value skim, and since PR C that
-// includes a write to a FixedArray element (conformance/negatives/N539).
+// whole table. (It was written when a mutate-only SINGLE method was refused
+// as a value skim; D25 removed that refusal — a mutate-only continuation now
+// commits under SINGLE by design — so the explicit addOutput is no longer
+// required, only kept so this probe's bytes stay stable.)
 import { StatefulSmartContract, assert } from 'runar-lang';
 import type { FixedArray } from 'runar-lang';
 

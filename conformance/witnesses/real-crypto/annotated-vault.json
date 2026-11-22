@@ -4,8 +4,8 @@
   "signerKey": "alice",
   "note": "N-044: memo (mutable ByteString) is serialized BEFORE owner (mutable PubKey) and balance, so the on-chain reader must decode memo's PUSHDATA length to find owner. Before the fix every tier read that length with bare OP_BIN2NUM (signed): a 128-byte memo (4c 80) read as length 0 and the memo's first 33 bytes became owner. Memos below begin with bob's (the stranger's) compressed pubkey, the attack shape. The owner is alice throughout. N-045: owner (PubKey) is now width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY) before the continuation commit. No method takes a fixed-width argument, so the WideHash attack has no entry point here; every accept spend above re-proves the honest path through the new check.",
   "goldenHashes": {
-    "expected-script.hex": "70f36e569b57255620bd865e7dee2f57cb47633e7e68d569e4e452230dd5a49e",
-    "expected-ir.json": "7f29a7527f49a1be1e7f88a45a2bead2f4db794f55e4618b43607f3d321b7603"
+    "expected-script.hex": "0dff0e16cf5291814d7d5695f81d27b74653498423b056039a61e88e6306f896",
+    "expected-ir.json": "3948abe5099e7842ba37b65e7c3be9c4d652983bfadfb07ec58a84d65e19b926"
   },
   "constructorArgs": [
     "eeeeeeeeeeeeeeeeeeee",

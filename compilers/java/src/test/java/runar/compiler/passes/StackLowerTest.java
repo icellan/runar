@@ -222,6 +222,15 @@ class StackLowerTest {
         }
         """;
 
+    /**
+     * D25: COUNTER_SRC plus an addOutput sibling, which keeps increment on
+     * ALL|FORKID: the pinned TS-reference binding blob ends in the 0x41 flag
+     * byte, and a mutate-only contract defaults to SIGHASH_SINGLE (0x43).
+     */
+    private static final String COUNTER_ALL_SRC = COUNTER_SRC.replace(
+        "    }\n}\n",
+        "    }\n\n    @Public\n    public void settle() {\n        this.addOutput(1L, this.count);\n    }\n}\n");
+
     @Test
     void statefulCounterIncludesCodeSeparator() {
         StackProgram p = compile(COUNTER_SRC, "Counter.runar.java");
@@ -287,7 +296,7 @@ class StackLowerTest {
         assertEquals(TS_REFERENCE_PREIMAGE_BINDING_SHA256, java.util.HexFormat.of().formatHex(
             java.security.MessageDigest.getInstance("SHA-256").digest(reference)));
 
-        StackProgram p = compile(COUNTER_SRC, "Counter.runar.java");
+        StackProgram p = compile(COUNTER_ALL_SRC, "Counter.runar.java");
         StackMethod inc = findMethod(p, "increment");
         int exact = 0;
         for (StackOp op : inc.ops()) {

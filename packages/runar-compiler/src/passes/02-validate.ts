@@ -16,6 +16,7 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { validateSighashUsage } from './sighash-validate.js';
+import { resolveContinuationBinding } from './continuation-binding.js';
 import { isReservedSourceName } from './reserved-names.js';
 import { InputLimits } from 'runar-ir-schema';
 import { computeSideEffectSummary } from './side-effect-summary.js';
@@ -62,6 +63,14 @@ export function validate(contract: ContractNode): ValidationResult {
   // both errors (unsound usages) and warnings (e.g. an explicit single-output
   // SINGLE covenant whose same-index value cannot be pinned statically), so
   // route each diagnostic to the matching bucket.
+  // D25: classify the contract's continuation binding and set the effective
+  // sighash of a mutate-only contract's continuation methods (SINGLE) BEFORE
+  // the field checks, so they and every later pass see the effective mode.
+  // The one place pass 2 writes the AST (method.sighashType only; idempotent).
+  for (const d of resolveContinuationBinding(contract)) {
+    (d.severity === 'warning' ? warnings : errors).push(d);
+  }
+
   for (const d of validateSighashUsage(contract)) {
     (d.severity === 'warning' ? warnings : errors).push(d);
   }

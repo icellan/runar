@@ -17,14 +17,6 @@
         "name": "increment",
         "params": [
           {
-            "name": "_changePKH",
-            "type": "Ripemd160"
-          },
-          {
-            "name": "_changeAmount",
-            "type": "bigint"
-          },
-          {
             "name": "_newAmount",
             "type": "bigint"
           },
@@ -34,20 +26,13 @@
           }
         ],
         "isPublic": true,
-        "usesCodePart": true
+        "usesCodePart": true,
+        "sigHashType": 67
       },
       {
         "name": "decrement",
         "params": [
           {
-            "name": "_changePKH",
-            "type": "Ripemd160"
-          },
-          {
-            "name": "_changeAmount",
-            "type": "bigint"
-          },
-          {
             "name": "_newAmount",
             "type": "bigint"
           },
@@ -57,12 +42,13 @@
           }
         ],
         "isPublic": true,
-        "usesCodePart": true
+        "usesCodePart": true,
+        "sigHashType": 67
       }
     ]
   },
-  "script": "61ab76009c637553798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877767519d53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f77817600a069768c7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877768",
-  "asm": "OP_NOP OP_CODESEPARATOR OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_3 OP_PICK OP_SIZE <14> OP_NUMEQUALVERIFY OP_DROP OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_6 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_1ADD OP_NIP OP_OVER OP_SIZE <34> OP_SUB OP_SPLIT OP_NIP OP_8 OP_SPLIT OP_DROP OP_BIN2NUM OP_3 OP_PICK OP_SWAP OP_GREATERTHANOREQUAL OP_VERIFY OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_SWAP OP_8 OP_NUM2BIN OP_2 OP_PICK OP_4 OP_ROLL OP_SWAP OP_DROP OP_8 OP_NUM2BIN OP_TOALTSTACK OP_3 OP_PICK <6a> OP_CAT OP_SWAP OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_FROMALTSTACK OP_SWAP OP_CAT OP_SWAP OP_CAT OP_HASH256 OP_SWAP OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_ELSE OP_1 OP_NUMEQUALVERIFY OP_3 OP_PICK OP_SIZE <14> OP_NUMEQUALVERIFY OP_DROP OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_6 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY OP_DUP OP_1SUB OP_NIP OP_OVER OP_SIZE <34> OP_SUB OP_SPLIT OP_NIP OP_8 OP_SPLIT OP_DROP OP_BIN2NUM OP_3 OP_PICK OP_SWAP OP_GREATERTHANOREQUAL OP_VERIFY OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_SWAP OP_8 OP_NUM2BIN OP_2 OP_PICK OP_4 OP_ROLL OP_SWAP OP_DROP OP_8 OP_NUM2BIN OP_TOALTSTACK OP_3 OP_PICK <6a> OP_CAT OP_SWAP OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_FROMALTSTACK OP_SWAP OP_CAT OP_SWAP OP_CAT OP_HASH256 OP_SWAP OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_ENDIF",
+  "script": "61ab76009c63757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01437e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686854798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101439d7601687f7782012c947f758258947f758258947f7781768b7778820134947f77587f758153797ca269588078537a7c7558806b5279016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7eaa7c820128947f7701207f75877767519d7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01437e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686854798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101439d7601687f7782012c947f758258947f758258947f77817600a069768c7778820134947f77587f758153797ca269588078537a7c7558806b5279016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7eaa7c820128947f7701207f75877768",
+  "asm": "OP_NOP OP_CODESEPARATOR OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_4 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <43> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_1ADD OP_NIP OP_OVER OP_SIZE <34> OP_SUB OP_SPLIT OP_NIP OP_8 OP_SPLIT OP_DROP OP_BIN2NUM OP_3 OP_PICK OP_SWAP OP_GREATERTHANOREQUAL OP_VERIFY OP_8 OP_NUM2BIN OP_OVER OP_3 OP_ROLL OP_SWAP OP_DROP OP_8 OP_NUM2BIN OP_TOALTSTACK OP_2 OP_PICK <6a> OP_CAT OP_SWAP OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_FROMALTSTACK OP_SWAP OP_CAT OP_HASH256 OP_SWAP OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_ELSE OP_1 OP_NUMEQUALVERIFY OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_4 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <43> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY OP_DUP OP_1SUB OP_NIP OP_OVER OP_SIZE <34> OP_SUB OP_SPLIT OP_NIP OP_8 OP_SPLIT OP_DROP OP_BIN2NUM OP_3 OP_PICK OP_SWAP OP_GREATERTHANOREQUAL OP_VERIFY OP_8 OP_NUM2BIN OP_OVER OP_3 OP_ROLL OP_SWAP OP_DROP OP_8 OP_NUM2BIN OP_TOALTSTACK OP_2 OP_PICK <6a> OP_CAT OP_SWAP OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_FROMALTSTACK OP_SWAP OP_CAT OP_HASH256 OP_SWAP OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_ENDIF",
   "stateFields": [
     {
       "name": "count",
@@ -76,13 +62,13 @@
   ],
   "rawScriptSpans": [
     {
-      "offset": 15,
+      "offset": 8,
       "length": 422,
       "inArity": 1,
       "outArity": 1
     },
     {
-      "offset": 714,
+      "offset": 664,
       "length": 422,
       "inArity": 1,
       "outArity": 1
@@ -91,68 +77,68 @@
   "sourceMap": {
     "mappings": [
       {
-        "opcodeIndex": 113,
+        "opcodeIndex": 107,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 42,
         "column": 8
       },
       {
-        "opcodeIndex": 114,
+        "opcodeIndex": 108,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 42,
         "column": 8
       },
       {
-        "opcodeIndex": 115,
+        "opcodeIndex": 109,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 42,
         "column": 8
       },
       {
-        "opcodeIndex": 351,
+        "opcodeIndex": 309,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 51,
         "column": 8
       },
       {
-        "opcodeIndex": 352,
+        "opcodeIndex": 310,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 51,
         "column": 8
       },
       {
-        "opcodeIndex": 353,
+        "opcodeIndex": 311,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 51,
         "column": 8
       },
       {
-        "opcodeIndex": 354,
+        "opcodeIndex": 312,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 51,
         "column": 8
       },
       {
-        "opcodeIndex": 355,
+        "opcodeIndex": 313,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 52,
         "column": 8
       },
       {
-        "opcodeIndex": 356,
+        "opcodeIndex": 314,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 52,
         "column": 8
       },
       {
-        "opcodeIndex": 357,
+        "opcodeIndex": 315,
         "sourceFile": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
         "line": 52,
         "column": 8
       }
     ]
   },
-  "buildTimestamp": "2026-11-17T08:04:48Z",
+  "buildTimestamp": "2026-11-19T12:30:28Z",
   "anf": {
     "contractName": "Counter",
     "methods": [
@@ -233,7 +219,8 @@
             "name": "t1",
             "value": {
               "kind": "check_preimage",
-              "preimage": "t0"
+              "preimage": "t0",
+              "sighashFlag": 67
             }
           },
           {
@@ -264,7 +251,7 @@
             "name": "t5",
             "value": {
               "kind": "load_const",
-              "value": 65
+              "value": 67
             }
           },
           {
@@ -391,162 +378,84 @@
           {
             "name": "t19",
             "value": {
-              "kind": "load_param",
-              "name": "_changePKH"
+              "kind": "get_state_script"
             }
           },
           {
             "name": "t20",
             "value": {
               "kind": "load_param",
-              "name": "_changeAmount"
-            }
-          },
-          {
-            "name": "t21",
-            "value": {
-              "kind": "load_const",
-              "value": 0
-            }
-          },
-          {
-            "name": "t22",
-            "value": {
-              "kind": "bin_op",
-              "left": "t20",
-              "op": "!==",
-              "right": "t21"
-            }
-          },
-          {
-            "name": "t25",
-            "value": {
-              "cond": "t22",
-              "else": [
-                {
-                  "name": "t24",
-                  "value": {
-                    "kind": "load_const",
-                    "value": ""
-                  }
-                }
-              ],
-              "kind": "if",
-              "then": [
-                {
-                  "name": "t23",
-                  "value": {
-                    "args": [
-                      "t19",
-                      "t20"
-                    ],
-                    "func": "buildChangeOutput",
-                    "kind": "call"
-                  }
-                }
-              ]
-            }
-          },
-          {
-            "name": "t26",
-            "value": {
-              "kind": "get_state_script"
-            }
-          },
-          {
-            "name": "t27",
-            "value": {
-              "kind": "load_param",
               "name": "txPreimage"
             }
           },
           {
-            "name": "t28",
+            "name": "t21",
             "value": {
               "kind": "load_param",
               "name": "_newAmount"
             }
           },
           {
-            "name": "t29",
+            "name": "t22",
             "value": {
               "args": [
-                "t27",
-                "t26",
-                "t28"
+                "t20",
+                "t19",
+                "t21"
               ],
               "func": "computeStateOutput",
               "kind": "call"
             }
           },
           {
-            "name": "t30",
+            "name": "t23",
             "value": {
               "args": [
-                "t29",
-                "t25"
-              ],
-              "func": "cat",
-              "kind": "call"
-            }
-          },
-          {
-            "name": "t31",
-            "value": {
-              "args": [
-                "t30"
+                "t22"
               ],
               "func": "hash256",
               "kind": "call"
             }
           },
           {
-            "name": "t32",
+            "name": "t24",
             "value": {
               "kind": "load_param",
               "name": "txPreimage"
             }
           },
           {
-            "name": "t33",
+            "name": "t25",
             "value": {
               "args": [
-                "t32"
+                "t24"
               ],
               "func": "extractOutputHash",
               "kind": "call"
             }
           },
           {
-            "name": "t34",
+            "name": "t26",
             "value": {
               "kind": "bin_op",
-              "left": "t31",
+              "left": "t23",
               "op": "===",
               "result_type": "bytes",
-              "right": "t33"
+              "right": "t25"
             }
           },
           {
-            "name": "t35",
+            "name": "t27",
             "value": {
               "isAutoInjectedStateCheck": true,
               "kind": "assert",
-              "value": "t34"
+              "value": "t26"
             }
           }
         ],
         "isPublic": true,
         "name": "increment",
         "params": [
-          {
-            "name": "_changePKH",
-            "type": "Ripemd160"
-          },
-          {
-            "name": "_changeAmount",
-            "type": "bigint"
-          },
           {
             "name": "_newAmount",
             "type": "bigint"
@@ -555,7 +464,8 @@
             "name": "txPreimage",
             "type": "SigHashPreimage"
           }
-        ]
+        ],
+        "sigHashType": 67
       },
       {
         "body": [
@@ -570,7 +480,8 @@
             "name": "t1",
             "value": {
               "kind": "check_preimage",
-              "preimage": "t0"
+              "preimage": "t0",
+              "sighashFlag": 67
             }
           },
           {
@@ -601,7 +512,7 @@
             "name": "t5",
             "value": {
               "kind": "load_const",
-              "value": 65
+              "value": 67
             }
           },
           {
@@ -778,162 +689,84 @@
           {
             "name": "t23",
             "value": {
-              "kind": "load_param",
-              "name": "_changePKH"
+              "kind": "get_state_script"
             }
           },
           {
             "name": "t24",
             "value": {
               "kind": "load_param",
-              "name": "_changeAmount"
-            }
-          },
-          {
-            "name": "t25",
-            "value": {
-              "kind": "load_const",
-              "value": 0
-            }
-          },
-          {
-            "name": "t26",
-            "value": {
-              "kind": "bin_op",
-              "left": "t24",
-              "op": "!==",
-              "right": "t25"
-            }
-          },
-          {
-            "name": "t29",
-            "value": {
-              "cond": "t26",
-              "else": [
-                {
-                  "name": "t28",
-                  "value": {
-                    "kind": "load_const",
-                    "value": ""
-                  }
-                }
-              ],
-              "kind": "if",
-              "then": [
-                {
-                  "name": "t27",
-                  "value": {
-                    "args": [
-                      "t23",
-                      "t24"
-                    ],
-                    "func": "buildChangeOutput",
-                    "kind": "call"
-                  }
-                }
-              ]
-            }
-          },
-          {
-            "name": "t30",
-            "value": {
-              "kind": "get_state_script"
-            }
-          },
-          {
-            "name": "t31",
-            "value": {
-              "kind": "load_param",
               "name": "txPreimage"
             }
           },
           {
-            "name": "t32",
+            "name": "t25",
             "value": {
               "kind": "load_param",
               "name": "_newAmount"
             }
           },
           {
-            "name": "t33",
+            "name": "t26",
             "value": {
               "args": [
-                "t31",
-                "t30",
-                "t32"
+                "t24",
+                "t23",
+                "t25"
               ],
               "func": "computeStateOutput",
               "kind": "call"
             }
           },
           {
-            "name": "t34",
+            "name": "t27",
             "value": {
               "args": [
-                "t33",
-                "t29"
-              ],
-              "func": "cat",
-              "kind": "call"
-            }
-          },
-          {
-            "name": "t35",
-            "value": {
-              "args": [
-                "t34"
+                "t26"
               ],
               "func": "hash256",
               "kind": "call"
             }
           },
           {
-            "name": "t36",
+            "name": "t28",
             "value": {
               "kind": "load_param",
               "name": "txPreimage"
             }
           },
           {
-            "name": "t37",
+            "name": "t29",
             "value": {
               "args": [
-                "t36"
+                "t28"
               ],
               "func": "extractOutputHash",
               "kind": "call"
             }
           },
           {
-            "name": "t38",
+            "name": "t30",
             "value": {
               "kind": "bin_op",
-              "left": "t35",
+              "left": "t27",
               "op": "===",
               "result_type": "bytes",
-              "right": "t37"
+              "right": "t29"
             }
           },
           {
-            "name": "t39",
+            "name": "t31",
             "value": {
               "isAutoInjectedStateCheck": true,
               "kind": "assert",
-              "value": "t38"
+              "value": "t30"
             }
           }
         ],
         "isPublic": true,
         "name": "decrement",
         "params": [
-          {
-            "name": "_changePKH",
-            "type": "Ripemd160"
-          },
-          {
-            "name": "_changeAmount",
-            "type": "bigint"
-          },
           {
             "name": "_newAmount",
             "type": "bigint"
@@ -942,7 +775,8 @@
             "name": "txPreimage",
             "type": "SigHashPreimage"
           }
-        ]
+        ],
+        "sigHashType": 67
       }
     ],
     "parentClass": "StatefulSmartContract",

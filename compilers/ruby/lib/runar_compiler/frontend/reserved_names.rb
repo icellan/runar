@@ -34,7 +34,9 @@ module RunarCompiler
         /\A_changeAmount\z/,
         /\A_newAmount\z/,
         /\A_serialisedOutputs\z/,
-        /\A_prevOutScript_[0-9]+\z/
+        /\A_prevOutScript_[0-9]+\z/,
+        # D25: the hidden spent-outpoint state field (continuation_binding.rb).
+        /\A_spentOutpointHash\z/
       ].freeze
 
       # The diagnostic, shared verbatim by all seven tiers (source and --ir).

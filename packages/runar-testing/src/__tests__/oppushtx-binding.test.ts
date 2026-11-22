@@ -13,13 +13,18 @@
 
 import { describe, it, expect } from 'vitest';
 import type { StackOp } from 'runar-ir-schema';
-import { emitMethod, emitCheckPreimageBinding, CHECK_PREIMAGE_BINDING_HEX } from 'runar-compiler';
+import {
+  emitMethod, emitCheckPreimageBinding, checkPreimageBindingBytes,
+  CHECK_PREIMAGE_BINDING_HEX, CHECK_PREIMAGE_BINDING_ALL_HEX,
+} from 'runar-compiler';
 import {
   LockingScript,
   UnlockingScript,
   TransactionSignature,
+  Spend,
 } from '@bsv/sdk';
 import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
+import { PROVEN_BINDING_FLAGS, PROVEN_BINDING_VARIANTS } from '../oracle/proven-binding-blobs.js';
 
 // tx context shared by the preimage builder and the Spend interpreter
 const CTX = {
@@ -157,3 +162,90 @@ describe('BUG-100 fix: on-chain OP_PUSH_TX preimage binding', () => {
     expect(accepted).toBe(60);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D25: the same exploit proof over EVERY blob a tier may emit — both variants
+// and every sighash flag the compiler bakes in (0x41 default, 0x43
+// SINGLE|FORKID for mutate-only stateful contracts, 0xC3 for their
+// ANYONECANPAY form). The flag is part of the derived signature, so OP_CHECKSIG
+// recomputes the sighash under THAT scope: a 0x43 blob must accept the genuine
+// SINGLE preimage and reject the ALL preimage of the very same transaction.
+// `conformance/preimage-binding/preimage-binding.test.ts` accepts a tier's
+// contract only if it carries one of these (PROVEN_BINDING_FLAGS x VARIANTS).
+// ---------------------------------------------------------------------------
+const P2PKH_A = '76a914' + '11'.repeat(20) + '88ac';
+const P2PKH_B = '76a914' + '22'.repeat(20) + '88ac';
+const TWO_OUTPUTS = [
+  { satoshis: 1000, lockingScript: LockingScript.fromHex(P2PKH_A) },
+  { satoshis: 2000, lockingScript: LockingScript.fromHex(P2PKH_B) },
+] as never[];
+
+for (const variant of PROVEN_BINDING_VARIANTS) {
+  for (const flag of PROVEN_BINDING_FLAGS) {
+    const label = `${variant} blob, flag 0x${flag.toString(16)}`;
+    // `all` is only spendable at nVersion > 1 (binding-variant.test.ts), where
+    // @bsv/sdk's Spend is relaxed; lowS goes through the strict v1 rule set.
+    const version = variant === 'lowS' ? CONSENSUS_TX_VERSION : 2;
+    describe(`BUG-100 binding proof — ${label}`, () => {
+      const lockingHex = Buffer.from(checkPreimageBindingBytes(flag, variant)).toString('hex');
+      const ctxFor = (i: number) => ({
+        ...CTX, transactionVersion: version, outputs: TWO_OUTPUTS,
+        lockTime: i * 7919 + 1, sourceSatoshis: 100000 + i * 131,
+      });
+      const preimageOf = (ctx: ReturnType<typeof ctxFor>, scope: number) => Uint8Array.from(
+        TransactionSignature.formatBytes({ ...ctx, subscript: LockingScript.fromHex(lockingHex), scope }) as unknown as number[],
+      );
+      const run = (ctx: ReturnType<typeof ctxFor>, pre: Uint8Array): { ok: boolean; err?: string } => {
+        const params = {
+          ...ctx,
+          lockingScript: LockingScript.fromHex(lockingHex),
+          unlockingScript: UnlockingScript.fromHex(pushDataHex(pre)),
+        };
+        const spend = version === CONSENSUS_TX_VERSION ? newConsensusSpend(params) : new Spend(params);
+        try { return { ok: spend.validate() }; } catch (e) { return { ok: false, err: e instanceof Error ? e.message : String(e) }; }
+      };
+
+      it('the blob carries the flag in its derived-signature tail', () => {
+        expect(lockingHex).toContain('01' + flag.toString(16).padStart(2, '0') + '7e21');
+        if (flag === 0x41) {
+          expect(lockingHex).toBe(variant === 'lowS' ? CHECK_PREIMAGE_BINDING_HEX : CHECK_PREIMAGE_BINDING_ALL_HEX);
+        }
+      });
+
+      it('ACCEPTS the genuine preimage across 60 contexts', () => {
+        for (let i = 0; i < 60; i++) {
+          const ctx = ctxFor(i);
+          const r = run(ctx, preimageOf(ctx, flag));
+          expect(r.ok, `${label} context ${i}: ${r.err ?? ''}`).toBe(true);
+        }
+      });
+
+      it('REJECTS a decoupled preimage (another context\'s genuine preimage)', () => {
+        const r = run(ctxFor(3), preimageOf(ctxFor(4), flag));
+        expect(r.ok).toBe(false);
+      });
+
+      it('REJECTS a forged hashOutputs field', () => {
+        const ctx = ctxFor(5);
+        const forged = preimageOf(ctx, flag);
+        // BIP-143 tail: hashOutputs(32) || nLockTime(4) || sighashType(4).
+        const at = forged.length - 40;
+        for (let i = at; i < at + 32; i++) forged[i] = (forged[i]! ^ 0xff) & 0xff;
+        expect(run(ctx, forged).ok).toBe(false);
+      });
+
+      it('REJECTS a zeroed preimage', () => {
+        const ctx = ctxFor(6);
+        expect(run(ctx, new Uint8Array(preimageOf(ctx, flag).length)).ok).toBe(false);
+      });
+
+      it('REJECTS the same transaction\'s genuine preimage under any OTHER scope', () => {
+        const ctx = ctxFor(7);
+        for (const other of [0x41, 0x43, 0xc1, 0xc3, 0x42]) {
+          if (other === flag) continue;
+          expect(run(ctx, preimageOf(ctx, other)).ok, `scope 0x${other.toString(16)}`).toBe(false);
+        }
+      });
+    });
+  }
+}

@@ -11,7 +11,7 @@ type Counter struct {
 	Count runar.Bigint
 }
 
-//runar:sighash ALL|FORKID
+//runar:sighash SINGLE|FORKID
 func (c *Counter) Increment() {
 	c.Count++
 }

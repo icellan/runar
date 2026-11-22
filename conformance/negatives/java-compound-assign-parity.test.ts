@@ -40,8 +40,9 @@ import { isCiEnv } from '../env.js';
  * parser refuses `<<= >>= &= |= ^=` independently of this item.
  */
 
+// D25: re-pinned, -41 B (941 -> 900 B; the mutate-only contract commits under SIGHASH_SINGLE, no change segment or `_changePKH` gate).
 // PR B (#180/#213): re-pinned, +7 B (entry width gate on `_changePKH`; 934 -> 941 B).
-const COMPOUND_SHA256 = 'cc9b5518a45f4b6ef99365051e9c423f0870310759fb695db4eb44d909fb68f0';
+const COMPOUND_SHA256 = 'b5dfecc5b3778c5ba32fc7e2d9a741e54fea41d48aeb2ce15289511e24116117';
 
 const ALL_OPS = ['+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '|=', '^='] as const;
 

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BrokenTier, REPO, Tier, buildSourceTiers, compileHex } from './tier-harness.js';
+import { compile } from '../../packages/runar-compiler/src/index.js';
 import { isCiEnv } from '../env.js';
 
 /**
@@ -484,8 +485,15 @@ class Typo extends StatefulSmartContract {
   // Follow-on of D18's FixedArray fix: validate / typecheck / sighash-validate
   // see the UNEXPANDED contract, where a FixedArray element write is still an
   // index_access. Before every tier counted it as a state write, a @sighash
-  // SINGLE method whose only write was an element took the mutate-only auto
-  // continuation unrefused (the value-skim shape sighash-validate exists for).
+  // SINGLE method whose only write was an element took no continuation at
+  // all. Every tier then refused the shape as a mutate-only SINGLE value skim
+  // (N539). D25 deleted that refusal: a mutate-only continuation now commits
+  // under SIGHASH_SINGLE by design (one output per input, the twin-input
+  // binding), so the shape is SOUND and compiles. What still matters is that
+  // the element write is counted: if it were not, `bump` would be terminal
+  // (no `_newAmount`, no continuation covenant) and anyone could spend it.
+  // The unannotated `this.table[i]++` shape is pinned byte-for-byte in all
+  // nine formats by the fixed-array-write conformance fixture (now SINGLE).
   describe('SINGLE + FixedArray element write is a mutate-only continuation', () => {
     const src = (write: string): string => `import { StatefulSmartContract, assert, FixedArray } from 'runar-lang';
 
@@ -503,24 +511,19 @@ class Sg extends StatefulSmartContract {
   }
 }
 `;
-    const n539 = readFileSync(join(__dirname, 'N539-ts-single-fixedarray-element-mutate-only.runar.ts'), 'utf8');
-    for (const tier of TIERS) {
-      it(`${tier.id} refuses N539 (the rejection fixture of this shape)`, () => {
-        const { status, out, diag } = run(tier, writeFile('N539.runar.ts', n539));
-        expect(status, `${tier.id} accepted N539 (emitted "${out}")`).not.toBe(0);
-        expect(diag.toLowerCase()).toContain('mutate-only single continuation is unsound');
-      });
-    }
     for (const write of ['this.slots[0] = 5n;', 'this.slots[i]++;']) {
-      for (const tier of TIERS) {
-        it(`${tier.id} refuses \`${write}\` under SINGLE`, () => {
-          const { status, out, diag } = run(tier, writeFile('Sg.runar.ts', src(write)));
-          expect(status, `${tier.id} accepted (emitted "${out}")`).not.toBe(0);
-          // Case-insensitive: the Zig tier words the sentence break differently
-          // ("...; a mutate-only"), a pre-existing wording drift.
-          expect(diag.toLowerCase()).toContain('mutate-only single continuation is unsound');
-        });
-      }
+      it(`ts commits \`${write}\` under SINGLE as a state continuation`, () => {
+        const r = compile(src(write), { fileName: 'Sg.runar.ts' });
+        expect(r.success, r.diagnostics.map((d) => d.message).join('; ')).toBe(true);
+        const bump = r.artifact!.abi.methods.find((m) => m.name === 'bump')!;
+        expect(bump.params.map((p) => p.name)).toEqual(['i', '_newAmount', 'txPreimage']);
+        expect(bump.sigHashType).toBe(0x43);
+      });
+      it(`every tier compiles \`${write}\` under SINGLE to the same bytes`, () => {
+        const input = writeFile('Sg.runar.ts', src(write));
+        const hexes = new Set(TIERS.map((t) => compileHex(t, input)));
+        expect([...hexes]).toHaveLength(1);
+      });
     }
   });
 });

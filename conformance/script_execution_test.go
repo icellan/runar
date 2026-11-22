@@ -130,6 +130,86 @@ process.stdout.write(r.scriptHex);
 	return hexOut, nil
 }
 
+// tsMethodABI is what a stateful spend harness needs from a method's ABI
+// entry: the BIP-143 sighash type its covenant preimage is built under, and
+// whether it takes the change params. D25 made both a property of the
+// CONTRACT (a mutate-only contract commits under SIGHASH_SINGLE|FORKID and
+// takes no _changePKH / _changeAmount), so the harnesses read them from the
+// artifact instead of assuming the pre-D25 ALL|FORKID layout.
+type tsMethodABI struct {
+	SigHashType int
+	HasChange   bool
+}
+
+var (
+	abiCacheMu sync.Mutex
+	abiCache   = map[string]tsMethodABI{}
+)
+
+// compileRúnarMethodABI reads one public method's sighash type and change
+// params from the TS compiler's artifact for a conformance contract.
+func compileRúnarMethodABI(t *testing.T, contractName, method string) tsMethodABI {
+	t.Helper()
+	key := contractName + "\x00" + method
+	abiCacheMu.Lock()
+	if a, ok := abiCache[key]; ok {
+		abiCacheMu.Unlock()
+		return a
+	}
+	abiCacheMu.Unlock()
+	srcRelPath, err := resolveTSSource(contractName)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", contractName, err)
+	}
+	fileName := filepath.Base(srcRelPath)
+	code := fmt.Sprintf(`
+(async () => {
+const { compile } = await import('./packages/runar-compiler/dist/index.js');
+const fs = require('fs');
+const r = compile(fs.readFileSync('%s', 'utf-8'), { fileName: '%s' });
+if (!r.success || !r.artifact) { process.exit(1); }
+const m = r.artifact.abi.methods.find((x) => x.name === '%s');
+if (!m) { process.exit(2); }
+process.stdout.write(JSON.stringify({ sigHashType: m.sigHashType ?? 0x41, params: m.params.map((p) => p.name) }));
+})();
+`, srcRelPath, fileName, method)
+	cmd := exec.Command("node", "-e", code)
+	cmd.Dir = ".."
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("read ABI of %s.%s: %v", contractName, method, err)
+	}
+	var raw struct {
+		SigHashType int      `json:"sigHashType"`
+		Params      []string `json:"params"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatalf("parse ABI of %s.%s: %v", contractName, method, err)
+	}
+	a := tsMethodABI{SigHashType: raw.SigHashType}
+	for _, p := range raw.Params {
+		if p == "_changePKH" {
+			a.HasChange = true
+		}
+	}
+	abiCacheMu.Lock()
+	abiCache[key] = a
+	abiCacheMu.Unlock()
+	return a
+}
+
+// changePushes is the `_changePKH, _changeAmount` unlock segment when the
+// method takes it, else nothing.
+func (a tsMethodABI) changePushes(changePKH []byte, changeAmount int64) string {
+	if !a.HasChange {
+		return ""
+	}
+	return encodePushBytes(changePKH) + encodePushInt(changeAmount)
+}
+
+// flag is the sighash flag the covenant preimage must be built under.
+func (a tsMethodABI) flag() sighash.Flag { return sighash.Flag(a.SigHashType) }
+
 // buildUnlockingScript builds a simple unlocking script that pushes each
 // bigint arg onto the stack.
 func buildUnlockingScript(args ...int64) string {
@@ -978,6 +1058,9 @@ func serializeBigintState(n int64) string {
 }
 
 func TestStateful_Increment(t *testing.T) {
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "stateful-counter", "increment")
 	// Step 1: Compile the stateful counter contract.
 	// The codePart is the logic script without state — state is appended after OP_RETURN.
 	codePartHex, err := compileRúnar("stateful-counter", `{"count":"0"}`)
@@ -1055,7 +1138,7 @@ func TestStateful_Increment(t *testing.T) {
 		LockingScript: scriptCodeScript,
 	})
 
-	preimage, err := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	preimage, err := spendTx.CalcInputPreimage(0, abi.flag())
 	if err != nil {
 		t.Fatalf("calc preimage: %v", err)
 	}
@@ -1073,8 +1156,7 @@ func TestStateful_Increment(t *testing.T) {
 	// Stack layout (bottom to top / first pushed to last pushed):
 	//   _codePart, _changePKH, _changeAmount, _newAmount, txPreimage, methodSelector
 	unlockingHex := encodePushBytes(codePartBytes) + // _codePart
-		encodePushBytes(changePKH) + // _changePKH
-		encodePushInt(int64(changeSatoshis)) + // _changeAmount
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) + // _newAmount
 		encodePushBytes(preimage) + // txPreimage
 		encodePushInt(0) // methodSelector = 0 (increment)
@@ -1089,6 +1171,9 @@ func TestStateful_Increment(t *testing.T) {
 }
 
 func TestStateful_Decrement(t *testing.T) {
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "stateful-counter", "decrement")
 	// Decrement from count=5 to count=4 (method selector = 1).
 	codePartHex, err := compileRúnar("stateful-counter", `{"count":"0"}`)
 	if err != nil {
@@ -1148,15 +1233,14 @@ func TestStateful_Decrement(t *testing.T) {
 		LockingScript: scriptCodeScript,
 	})
 
-	preimage, _ := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	preimage, _ := spendTx.CalcInputPreimage(0, abi.flag())
 
 	// BUG-100: the injected checkPreimage derives the OP_PUSH_TX signature
 	// on-chain from the preimage; the spender no longer supplies _opPushTxSig.
 	spendTx.Inputs[0].SetSourceTxOutput(prevOutput)
 
 	unlockingHex := encodePushBytes(codePartBytes) +
-		encodePushBytes(changePKH) +
-		encodePushInt(int64(changeSatoshis)) +
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) +
 		encodePushBytes(preimage) +
 		encodePushInt(1) // methodSelector = 1 (decrement)
@@ -1170,6 +1254,9 @@ func TestStateful_Decrement(t *testing.T) {
 }
 
 func TestStateful_WrongState_Fail(t *testing.T) {
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "stateful-counter", "increment")
 	// Increment from count=0, but build the continuation output with WRONG state (count=99).
 	// The hashOutputs comparison should fail.
 	codePartHex, err := compileRúnar("stateful-counter", `{"count":"0"}`)
@@ -1220,7 +1307,7 @@ func TestStateful_WrongState_Fail(t *testing.T) {
 		LockingScript: scriptCodeScript,
 	})
 
-	preimage, _ := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	preimage, _ := spendTx.CalcInputPreimage(0, abi.flag())
 
 	// BUG-100: the injected checkPreimage derives the OP_PUSH_TX signature
 	// on-chain from the preimage; the spender no longer supplies _opPushTxSig.
@@ -1229,8 +1316,7 @@ func TestStateful_WrongState_Fail(t *testing.T) {
 	spendTx.Inputs[0].SetSourceTxOutput(prevOutput)
 
 	unlockingHex := encodePushBytes(codePartBytes) +
-		encodePushBytes(changePKH) +
-		encodePushInt(int64(changeSatoshis)) +
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) +
 		encodePushBytes(preimage) +
 		encodePushInt(0)
@@ -1457,6 +1543,9 @@ func TestRawOutput_ScriptExecution_Reject_RawOutputAbsent(t *testing.T) {
 // witness at a DIFFERENT, independently-known prevout rather than the
 // contract's own deployed script.
 func TestIntentPrevOutputScript_ScriptExecution_Accept(t *testing.T) {
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "intent-prev-output-script", "bind")
 	// Companion prevout: input 0's real previous-output locking script.
 	companionScript, err := hex.DecodeString("76a914" + strings.Repeat("11", 20) + "88ac")
 	if err != nil {
@@ -1513,15 +1602,19 @@ func TestIntentPrevOutputScript_ScriptExecution_Accept(t *testing.T) {
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, contractPrevOutput)
 
+	// The contract is input 1. Under ALL the covenant hashes [continuation,
+	// change] from output 0; under SINGLE (D25) it hashes output[1] alone, so
+	// the continuation goes at index 1 and the (uncommitted) change at 0.
 	contScript, _ := script.NewFromHex(continuationScriptHex)
-	spendTx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      contSatoshis,
-		LockingScript: contScript,
-	})
-	spendTx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      changeSatoshis,
-		LockingScript: buildP2PKHLockingScript(changePKH),
-	})
+	contOut := &transaction.TransactionOutput{Satoshis: contSatoshis, LockingScript: contScript}
+	changeOut := &transaction.TransactionOutput{Satoshis: changeSatoshis, LockingScript: buildP2PKHLockingScript(changePKH)}
+	if abi.SigHashType&0x1f == 0x03 {
+		spendTx.AddOutput(changeOut)
+		spendTx.AddOutput(contOut)
+	} else {
+		spendTx.AddOutput(contOut)
+		spendTx.AddOutput(changeOut)
+	}
 
 	scriptCodeHex := fullLockingHex[(codeSepOffset+1)*2:]
 	scriptCodeScript, _ := script.NewFromHex(scriptCodeHex)
@@ -1530,7 +1623,7 @@ func TestIntentPrevOutputScript_ScriptExecution_Accept(t *testing.T) {
 		LockingScript: scriptCodeScript,
 	})
 
-	preimage, err := spendTx.CalcInputPreimage(1, sighash.AllForkID)
+	preimage, err := spendTx.CalcInputPreimage(1, abi.flag())
 	if err != nil {
 		t.Fatalf("calc preimage: %v", err)
 	}
@@ -1541,8 +1634,7 @@ func TestIntentPrevOutputScript_ScriptExecution_Accept(t *testing.T) {
 	// _newAmount, txPreimage, _prevOutScript_0. No method selector (single
 	// public method).
 	unlockingHex := encodePushBytes(codePartBytes) +
-		encodePushBytes(changePKH) +
-		encodePushInt(int64(changeSatoshis)) +
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) +
 		encodePushBytes(preimage) +
 		encodePushBytes(companionScript)
@@ -1560,6 +1652,9 @@ func TestIntentPrevOutputScript_ScriptExecution_Accept(t *testing.T) {
 // _prevOutScript_0 than the constructor-baked expectedHash commits to (a
 // tampered/forged prevout-script claim). The real engine must reject.
 func TestIntentPrevOutputScript_ScriptExecution_Reject_WrongWitness(t *testing.T) {
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "intent-prev-output-script", "bind")
 	companionScript, err := hex.DecodeString("76a914" + strings.Repeat("11", 20) + "88ac")
 	if err != nil {
 		t.Fatalf("decode companion script: %v", err)
@@ -1605,15 +1700,19 @@ func TestIntentPrevOutputScript_ScriptExecution_Reject_WrongWitness(t *testing.T
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, contractPrevOutput)
 
+	// The contract is input 1. Under ALL the covenant hashes [continuation,
+	// change] from output 0; under SINGLE (D25) it hashes output[1] alone, so
+	// the continuation goes at index 1 and the (uncommitted) change at 0.
 	contScript, _ := script.NewFromHex(continuationScriptHex)
-	spendTx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      contSatoshis,
-		LockingScript: contScript,
-	})
-	spendTx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      changeSatoshis,
-		LockingScript: buildP2PKHLockingScript(changePKH),
-	})
+	contOut := &transaction.TransactionOutput{Satoshis: contSatoshis, LockingScript: contScript}
+	changeOut := &transaction.TransactionOutput{Satoshis: changeSatoshis, LockingScript: buildP2PKHLockingScript(changePKH)}
+	if abi.SigHashType&0x1f == 0x03 {
+		spendTx.AddOutput(changeOut)
+		spendTx.AddOutput(contOut)
+	} else {
+		spendTx.AddOutput(contOut)
+		spendTx.AddOutput(changeOut)
+	}
 
 	scriptCodeHex := fullLockingHex[(codeSepOffset+1)*2:]
 	scriptCodeScript, _ := script.NewFromHex(scriptCodeHex)
@@ -1622,7 +1721,7 @@ func TestIntentPrevOutputScript_ScriptExecution_Reject_WrongWitness(t *testing.T
 		LockingScript: scriptCodeScript,
 	})
 
-	preimage, err := spendTx.CalcInputPreimage(1, sighash.AllForkID)
+	preimage, err := spendTx.CalcInputPreimage(1, abi.flag())
 	if err != nil {
 		t.Fatalf("calc preimage: %v", err)
 	}
@@ -1633,8 +1732,7 @@ func TestIntentPrevOutputScript_ScriptExecution_Reject_WrongWitness(t *testing.T
 	tamperedScript, _ := hex.DecodeString("76a914" + strings.Repeat("22", 20) + "88ac")
 
 	unlockingHex := encodePushBytes(codePartBytes) +
-		encodePushBytes(changePKH) +
-		encodePushInt(int64(changeSatoshis)) +
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) +
 		encodePushBytes(preimage) +
 		encodePushBytes(tamperedScript)
@@ -1943,6 +2041,9 @@ func TestWOTS_ScriptExecution_WrongMessage(t *testing.T) {
 // analogous SLH-DSA situation).
 
 func TestStatefulWOTSGate_ScriptExecution(t *testing.T) {
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "stateful-wots-gate", "advance")
 	if testing.Short() {
 		t.Skip("WOTS+ script execution is slow, skipping in short mode")
 	}
@@ -2017,7 +2118,7 @@ func TestStatefulWOTSGate_ScriptExecution(t *testing.T) {
 		LockingScript: scriptCodeScript,
 	})
 
-	preimage, err := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	preimage, err := spendTx.CalcInputPreimage(0, abi.flag())
 	if err != nil {
 		t.Fatalf("calc preimage: %v", err)
 	}
@@ -2038,8 +2139,7 @@ func TestStatefulWOTSGate_ScriptExecution(t *testing.T) {
 		encodePushBytes(msg) + // msg
 		encodePushBytes(sig) + // sig
 		encodePushBytes(kp.PK) + // wotsPubKey
-		encodePushBytes(changePKH) + // _changePKH
-		encodePushInt(int64(changeSatoshis)) + // _changeAmount
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) + // _newAmount
 		encodePushBytes(preimage) // txPreimage
 
@@ -2052,6 +2152,9 @@ func TestStatefulWOTSGate_ScriptExecution(t *testing.T) {
 }
 
 func TestStatefulWOTSGate_ScriptExecution_TamperedSig(t *testing.T) {
+	// D25: sighash type and change params come from the method's ABI (a
+	// mutate-only contract commits under SIGHASH_SINGLE|FORKID, no change params).
+	abi := compileRúnarMethodABI(t, "stateful-wots-gate", "advance")
 	if testing.Short() {
 		t.Skip("WOTS+ script execution is slow, skipping in short mode")
 	}
@@ -2123,7 +2226,7 @@ func TestStatefulWOTSGate_ScriptExecution_TamperedSig(t *testing.T) {
 		LockingScript: scriptCodeScript,
 	})
 
-	preimage, err := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	preimage, err := spendTx.CalcInputPreimage(0, abi.flag())
 	if err != nil {
 		t.Fatalf("calc preimage: %v", err)
 	}
@@ -2134,8 +2237,7 @@ func TestStatefulWOTSGate_ScriptExecution_TamperedSig(t *testing.T) {
 		encodePushBytes(msg) +
 		encodePushBytes(tampered) +
 		encodePushBytes(kp.PK) +
-		encodePushBytes(changePKH) +
-		encodePushInt(int64(changeSatoshis)) +
+		abi.changePushes(changePKH, int64(changeSatoshis)) + // _changePKH, _changeAmount iff the method takes them
 		encodePushInt(int64(contSatoshis)) +
 		encodePushBytes(preimage)
 

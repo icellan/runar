@@ -147,13 +147,18 @@ describe('P256Point / P384Point are fixed-width raw state', () => {
       // the injected `_changePKH` (+14 hex chars, 1704 -> 1718 for the framed
       // rows), plus one on the fixed-width `next` param (+28 total, 1388 -> 1416).
       // Gate-only delta; Point == P256Point and ByteString == Sig still hold.
-      { shape: 0, type: 'Point', digest: '5c6cc2d2', hexLen: 1416 },
-      { shape: 0, type: 'P256Point', digest: '5c6cc2d2', hexLen: 1416 },
-      { shape: 0, type: 'P384Point', digest: 'ddce4cf0', hexLen: 1416 },
-      { shape: 0, type: 'PubKey', digest: 'cbae90ab', hexLen: 1416 },
-      { shape: 0, type: 'Sha256', digest: '157de632', hexLen: 1416 },
-      { shape: 0, type: 'ByteString', digest: 'c5bde21d', hexLen: 1718 },
-      { shape: 0, type: 'Sig', digest: 'c5bde21d', hexLen: 1718 },
+      // D25 re-stamp: only shape 0 moves — its only continuation method is
+      // mutate-only, so it now commits under SIGHASH_SINGLE|FORKID: no change
+      // segment and no `_changePKH` gate (-86 hex chars, 1416 -> 1330 and
+      // 1718 -> 1632). Re-measured in the TS tier; Point == P256Point and
+      // ByteString == Sig still hold.
+      { shape: 0, type: 'Point', digest: 'cfcb5751', hexLen: 1330 },
+      { shape: 0, type: 'P256Point', digest: 'cfcb5751', hexLen: 1330 },
+      { shape: 0, type: 'P384Point', digest: 'ab656cf1', hexLen: 1330 },
+      { shape: 0, type: 'PubKey', digest: '70368f2e', hexLen: 1330 },
+      { shape: 0, type: 'Sha256', digest: '0ec3469f', hexLen: 1330 },
+      { shape: 0, type: 'ByteString', digest: '63656173', hexLen: 1632 },
+      { shape: 0, type: 'Sig', digest: '63656173', hexLen: 1632 },
       { shape: 1, type: 'Point', digest: 'e1202b56', hexLen: 930 },
       { shape: 1, type: 'P256Point', digest: 'e1202b56', hexLen: 930 },
       { shape: 1, type: 'P384Point', digest: '40ced076', hexLen: 930 },

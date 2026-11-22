@@ -16,12 +16,11 @@
 //! signature covers a tx with different outputs/inputs, so this goes RED. The
 //! on-chain verdict for the same flow is proven by the TS/Go F-045 tests.
 //!
-//! Proves: each token-input signature covers the broadcast tx, and merge spends
-//! BOTH token outpoints exactly once. Does NOT prove: script execution in this
+//! Proves: each token-input signature covers the broadcast tx, and (D25) a
+//! merge of this mutate-only (SIGHASH_SINGLE) token is refused before broadcast. Does NOT prove: script execution in this
 //! tier, node acceptance, or token semantics beyond this fixture.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use runar_lang::sdk::contract::hex_to_bsv_tx;
@@ -175,29 +174,24 @@ fn transfer_signs_the_broadcast_tx() {
     }
 }
 
+// D25: this token's continuation methods are all mutate-only, so they commit
+// under SIGHASH_SINGLE, one output per input. merge spends two token UTXOs
+// into ONE continuation, which is exactly the twin-input shape SINGLE closes:
+// the second input would need its own continuation at its own index. The SDK
+// refuses before building or broadcasting the tx. (A merge needs an addOutput
+// method; see FungibleToken.merge.) Mirrors the TS F-045 test.
+const SINGLE_MERGE_REFUSAL: &str =
+    "additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method";
+
 #[test]
-fn merge_spends_both_token_utxos_signed_over_the_broadcast_tx() {
+fn merge_of_a_mutate_only_single_token_is_refused_before_anything_is_broadcast() {
     let art = artifact();
-    // Second case: token UTXOs larger than the funding coin — funding
-    // selection must not also pick the second token UTXO as a P2PKH input.
     for (token_sats, funding_sats) in [(5_000, 200_000), (300_000, 50_000)] {
         let mut f = setup(&art, &[100, 250], token_sats, funding_sats);
-        f.wallet.merge().expect("merge");
-        let broadcast = f.provider.borrow().get_broadcasted_txs().last().unwrap().clone();
-        let spent = outpoints(&broadcast);
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        for s in &spent { *seen.entry(s.clone()).or_default() += 1; }
-        for u in &f.tokens {
-            assert_eq!(seen.get(&format!("{}:0", u.txid)), Some(&1), "token {} not spent exactly once: {:?}", u.txid, spent);
-        }
-        assert_eq!(seen.len(), spent.len(), "an outpoint is spent twice: {:?}", spent);
-        assert_token_sigs_cover(&f, &broadcast);
-        let tx = hex_to_bsv_tx(&broadcast).unwrap();
-        let merged = RunarContract::from_utxo(art.clone(), &Utxo {
-            txid: "00".repeat(32), output_index: 0,
-            satoshis: tx.outputs[0].satoshis.unwrap() as i64, script: tx.outputs[0].locking_script.to_hex(),
-        }).unwrap();
-        assert!(matches!(merged.state().get("supply"), Some(SdkValue::Int(350))), "{:?}", merged.state());
+        let before = f.provider.borrow().get_broadcasted_txs().len();
+        let err = f.wallet.merge().expect_err("a SINGLE merge must be refused");
+        assert!(err.contains(SINGLE_MERGE_REFUSAL), "{err}");
+        assert_eq!(f.provider.borrow().get_broadcasted_txs().len(), before, "nothing broadcast");
     }
 }
 
@@ -230,21 +224,16 @@ fn n042_transfer_drives_the_shipped_example() {
     assert_token_sigs_cover(&f, &broadcast);
 }
 
+// D25: WalletToken's continuation method (merge) is mutate-only, so it
+// commits under SIGHASH_SINGLE, one output per input; a two-input merge into
+// one continuation is the twin-input shape SINGLE closes, refused up front.
 #[test]
-fn n042_merge_drives_the_shipped_example() {
+fn n042_merge_is_refused_before_anything_is_broadcast() {
     let art = example_artifact();
     let mut f = setup(&art, &[100, 250], 5_000, 200_000);
-    f.wallet.merge().expect("merge");
-    let broadcast = f.provider.borrow().get_broadcasted_txs().last().unwrap().clone();
-    let spent = outpoints(&broadcast);
-    for u in &f.tokens {
-        assert_eq!(spent.iter().filter(|s| **s == format!("{}:0", u.txid)).count(), 1, "{:?}", spent);
-    }
-    assert_token_sigs_cover(&f, &broadcast);
-    let tx = hex_to_bsv_tx(&broadcast).unwrap();
-    let merged = RunarContract::from_utxo(art.clone(), &Utxo {
-        txid: "00".repeat(32), output_index: 0,
-        satoshis: tx.outputs[0].satoshis.unwrap() as i64, script: tx.outputs[0].locking_script.to_hex(),
-    }).unwrap();
-    assert!(matches!(merged.state().get("supply"), Some(SdkValue::Int(350))), "{:?}", merged.state());
+    assert_eq!(f.wallet.get_balance().expect("balance"), 350);
+    let before = f.provider.borrow().get_broadcasted_txs().len();
+    let err = f.wallet.merge().expect_err("a SINGLE merge must be refused");
+    assert!(err.contains(SINGLE_MERGE_REFUSAL), "{err}");
+    assert_eq!(f.provider.borrow().get_broadcasted_txs().len(), before, "nothing broadcast");
 }

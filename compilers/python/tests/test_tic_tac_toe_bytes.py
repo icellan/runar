@@ -77,7 +77,8 @@ PY_DSL = REPO_ROOT / "examples" / "python" / "tic-tac-toe" / "TicTacToe.runar.py
 # N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
 # N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
 # #180 / #213 took it 7762 -> 7804: six 7-byte public-method entry width gates (<d> OP_PICK OP_SIZE <w> OP_NUMEQUALVERIFY OP_DROP); equals the TS reference for the same sources.
-EXPECTED_BYTES = 7804  # #180/#213: +42; Ports #170: -36 (six C=1 binding blobs, -6 each); W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17; N-045: +8; N-216: -2; N-376: -54 (18 ROT^3 runs); N-397: -3
+# D25 took it 7804 -> 7715: every continuation method is mutate-only, so they commit under SIGHASH_SINGLE (no change segment, no _changePKH gate); equals the TS reference.
+EXPECTED_BYTES = 7715  # D25: -89; #180/#213: +42; Ports #170: -36 (six C=1 binding blobs, -6 each); W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17; N-045: +8; N-216: -2; N-376: -54 (18 ROT^3 runs); N-397: -3
 
 
 def _byte_len(hex_str: str) -> int:

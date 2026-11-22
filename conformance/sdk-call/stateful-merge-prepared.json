@@ -37,10 +37,6 @@
               "type": "bigint"
             },
             {
-              "name": "_newAmount",
-              "type": "bigint"
-            },
-            {
               "name": "txPreimage",
               "type": "SigHashPreimage"
             }
@@ -50,51 +46,483 @@
         }
       ]
     },
-    "script": "61ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a00ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f758777",
-    "asm": "OP_NOP OP_CODESEPARATOR OP_3 OP_PICK OP_SIZE <14> OP_NUMEQUALVERIFY OP_DROP OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_7 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_5 OP_ROLL OP_0 OP_CHECKSIGVERIFY OP_DUP OP_1ADD OP_NIP OP_OVER OP_SIZE <34> OP_SUB OP_SPLIT OP_NIP OP_8 OP_SPLIT OP_DROP OP_BIN2NUM OP_3 OP_PICK OP_SWAP OP_GREATERTHANOREQUAL OP_VERIFY OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_SWAP OP_8 OP_NUM2BIN OP_2 OP_PICK OP_4 OP_ROLL OP_SWAP OP_DROP OP_8 OP_NUM2BIN OP_TOALTSTACK OP_3 OP_PICK <6a> OP_CAT OP_SWAP OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_FROMALTSTACK OP_SWAP OP_CAT OP_SWAP OP_CAT OP_HASH256 OP_SWAP OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP",
+    "script": "61ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a00ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777",
+    "asm": "OP_NOP OP_CODESEPARATOR OP_2 OP_PICK OP_SIZE <14> OP_NUMEQUALVERIFY OP_DROP OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_6 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_4 OP_ROLL OP_0 OP_CHECKSIGVERIFY OP_OVER OP_SIZE <34> OP_SUB OP_SPLIT OP_NIP OP_8 OP_SPLIT OP_DROP OP_BIN2NUM OP_OVER OP_1ADD OP_6 OP_PICK <6a> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_CAT OP_HASH256 OP_ROT OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_NIP",
     "buildTimestamp": "1970-01-01T00:00:00.000Z",
     "sourceMap": {
       "mappings": [
         {
           "opcodeIndex": 108,
           "sourceFile": "MergeCounter.runar.ts",
-          "line": 24,
+          "line": 32,
           "column": 4
         },
         {
           "opcodeIndex": 109,
           "sourceFile": "MergeCounter.runar.ts",
-          "line": 24,
+          "line": 32,
           "column": 4
         },
         {
           "opcodeIndex": 110,
           "sourceFile": "MergeCounter.runar.ts",
-          "line": 24,
+          "line": 32,
           "column": 4
         },
         {
           "opcodeIndex": 111,
           "sourceFile": "MergeCounter.runar.ts",
-          "line": 24,
+          "line": 32,
           "column": 4
         },
         {
           "opcodeIndex": 112,
           "sourceFile": "MergeCounter.runar.ts",
-          "line": 25,
+          "line": 33,
           "column": 4
         },
         {
           "opcodeIndex": 113,
           "sourceFile": "MergeCounter.runar.ts",
-          "line": 25,
+          "line": 33,
           "column": 4
         },
         {
           "opcodeIndex": 114,
           "sourceFile": "MergeCounter.runar.ts",
-          "line": 25,
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 115,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 116,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 117,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 118,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 119,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 120,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 121,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 122,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 123,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 124,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 125,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 126,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 127,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 128,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 129,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 130,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 131,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 132,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 133,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 134,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 135,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 136,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 137,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 138,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 139,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 140,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 141,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 142,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 143,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 144,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 145,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 146,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 147,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 148,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 149,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 150,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 151,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 152,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 153,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 154,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 155,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 156,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 157,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 158,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 159,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 160,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 161,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 162,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 163,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 164,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 165,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 166,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 167,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 168,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 169,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 170,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 171,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 172,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 173,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 174,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 175,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 176,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 177,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 178,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 179,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 180,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 181,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 182,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 183,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 184,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 185,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
+          "column": 4
+        },
+        {
+          "opcodeIndex": 186,
+          "sourceFile": "MergeCounter.runar.ts",
+          "line": 33,
           "column": 4
         }
       ]
@@ -146,7 +574,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 18,
+                "line": 26,
                 "column": 4
               }
             },
@@ -158,7 +586,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 18,
+                "line": 26,
                 "column": 4
               }
             },
@@ -174,7 +602,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 18,
+                "line": 26,
                 "column": 4
               }
             },
@@ -186,7 +614,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 19,
+                "line": 27,
                 "column": 4
               }
             },
@@ -199,7 +627,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 19,
+                "line": 27,
                 "column": 4
               }
             },
@@ -211,7 +639,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 20,
+                "line": 28,
                 "column": 4
               }
             },
@@ -224,7 +652,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 20,
+                "line": 28,
                 "column": 4
               }
             }
@@ -244,10 +672,6 @@
             },
             {
               "name": "_changeAmount",
-              "type": "bigint"
-            },
-            {
-              "name": "_newAmount",
               "type": "bigint"
             },
             {
@@ -339,7 +763,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 24,
+                "line": 32,
                 "column": 4
               }
             },
@@ -351,7 +775,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 24,
+                "line": 32,
                 "column": 4
               }
             },
@@ -367,7 +791,7 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 24,
+                "line": 32,
                 "column": 4
               }
             },
@@ -379,152 +803,142 @@
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 24,
+                "line": 32,
                 "column": 4
               }
             },
             {
               "name": "t14",
               "value": {
-                "kind": "load_prop",
-                "name": "count"
+                "kind": "load_param",
+                "name": "txPreimage"
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 25,
+                "line": 33,
                 "column": 4
               }
             },
             {
               "name": "t15",
               "value": {
-                "kind": "load_const",
-                "value": "1n"
+                "kind": "call",
+                "func": "extractAmount",
+                "args": [
+                  "t14"
+                ]
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 25,
+                "line": 33,
                 "column": 4
               }
             },
             {
               "name": "t16",
               "value": {
-                "kind": "bin_op",
-                "op": "+",
-                "left": "t14",
-                "right": "t15"
+                "kind": "load_prop",
+                "name": "count"
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 25,
+                "line": 33,
                 "column": 4
               }
             },
             {
               "name": "t17",
               "value": {
-                "kind": "update_prop",
-                "name": "count",
-                "value": "t16"
+                "kind": "load_const",
+                "value": "1n"
               },
               "sourceLoc": {
                 "file": "MergeCounter.runar.ts",
-                "line": 25,
+                "line": 33,
                 "column": 4
               }
             },
             {
               "name": "t18",
               "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
+                "kind": "bin_op",
+                "op": "+",
+                "left": "t16",
+                "right": "t17"
+              },
+              "sourceLoc": {
+                "file": "MergeCounter.runar.ts",
+                "line": 33,
+                "column": 4
               }
             },
             {
               "name": "t19",
               "value": {
-                "kind": "call",
-                "func": "extractAmount",
-                "args": [
+                "kind": "add_output",
+                "satoshis": "t15",
+                "stateValues": [
                   "t18"
-                ]
+                ],
+                "preimage": ""
+              },
+              "sourceLoc": {
+                "file": "MergeCounter.runar.ts",
+                "line": 33,
+                "column": 4
               }
             },
             {
               "name": "t20",
               "value": {
                 "kind": "load_param",
-                "name": "_newAmount"
-              }
-            },
-            {
-              "name": "t21",
-              "value": {
-                "kind": "bin_op",
-                "op": ">=",
-                "left": "t20",
-                "right": "t19"
-              }
-            },
-            {
-              "name": "t22",
-              "value": {
-                "kind": "assert",
-                "value": "t21"
-              }
-            },
-            {
-              "name": "t23",
-              "value": {
-                "kind": "load_param",
                 "name": "_changePKH"
               }
             },
             {
-              "name": "t24",
+              "name": "t21",
               "value": {
                 "kind": "load_param",
                 "name": "_changeAmount"
               }
             },
             {
-              "name": "t25",
+              "name": "t22",
               "value": {
                 "kind": "load_const",
                 "value": "0n"
               }
             },
             {
-              "name": "t26",
+              "name": "t23",
               "value": {
                 "kind": "bin_op",
                 "op": "!==",
-                "left": "t24",
-                "right": "t25"
+                "left": "t21",
+                "right": "t22"
               }
             },
             {
-              "name": "t29",
+              "name": "t26",
               "value": {
                 "kind": "if",
-                "cond": "t26",
+                "cond": "t23",
                 "then": [
                   {
-                    "name": "t27",
+                    "name": "t24",
                     "value": {
                       "kind": "call",
                       "func": "buildChangeOutput",
                       "args": [
-                        "t23",
-                        "t24"
+                        "t20",
+                        "t21"
                       ]
                     }
                   }
                 ],
                 "else": [
                   {
-                    "name": "t28",
+                    "name": "t25",
                     "value": {
                       "kind": "load_const",
                       "value": ""
@@ -534,90 +948,58 @@
               }
             },
             {
-              "name": "t30",
+              "name": "t27",
               "value": {
-                "kind": "get_state_script"
+                "kind": "call",
+                "func": "cat",
+                "args": [
+                  "t19",
+                  "t26"
+                ]
               }
             },
             {
-              "name": "t31",
+              "name": "t28",
+              "value": {
+                "kind": "call",
+                "func": "hash256",
+                "args": [
+                  "t27"
+                ]
+              }
+            },
+            {
+              "name": "t29",
               "value": {
                 "kind": "load_param",
                 "name": "txPreimage"
               }
             },
             {
-              "name": "t32",
-              "value": {
-                "kind": "load_param",
-                "name": "_newAmount"
-              }
-            },
-            {
-              "name": "t33",
+              "name": "t30",
               "value": {
                 "kind": "call",
-                "func": "computeStateOutput",
+                "func": "extractOutputHash",
                 "args": [
-                  "t31",
-                  "t30",
-                  "t32"
-                ]
-              }
-            },
-            {
-              "name": "t34",
-              "value": {
-                "kind": "call",
-                "func": "cat",
-                "args": [
-                  "t33",
                   "t29"
                 ]
               }
             },
             {
-              "name": "t35",
-              "value": {
-                "kind": "call",
-                "func": "hash256",
-                "args": [
-                  "t34"
-                ]
-              }
-            },
-            {
-              "name": "t36",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t37",
-              "value": {
-                "kind": "call",
-                "func": "extractOutputHash",
-                "args": [
-                  "t36"
-                ]
-              }
-            },
-            {
-              "name": "t38",
+              "name": "t31",
               "value": {
                 "kind": "bin_op",
                 "op": "===",
-                "left": "t35",
-                "right": "t37",
+                "left": "t28",
+                "right": "t30",
                 "result_type": "bytes"
               }
             },
             {
-              "name": "t39",
+              "name": "t32",
               "value": {
                 "kind": "assert",
-                "value": "t38",
+                "value": "t31",
                 "isAutoInjectedStateCheck": true
               }
             }
@@ -680,13 +1062,13 @@
     "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "outputIndex": 0,
     "satoshis": 10000,
-    "script": "61ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a0000000000000000"
+    "script": "61ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a0000000000000000"
   },
   "extraContractUtxo": {
     "txid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "outputIndex": 1,
     "satoshis": 10000,
-    "script": "61ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a0000000000000000"
+    "script": "61ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a0000000000000000"
   },
   "fundingUtxo": {
     "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -699,12 +1081,12 @@
     "sigIndices": [
       0
     ],
-    "sighash": "29393ab3cc9ba90e456085938b01dc184fd00f8c518238fca4a8432c8c6084bb",
-    "preimageHex": "01000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fde60253798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a00000000000000001027000000000000ffffffff3b946bcc6269e02d76f6aab7aa1d6a7f0c1560ecc40b3eafbcf86633643f9c110000000041000000",
-    "primarySignatureHex": "30450221009d3f59f4cd361172b8adcd02f08b6b2293d798aca1a1e93cac0d2d0d3a226a3b022028ea65e754260a5abc40eaeef6afdc01c8abea6e037a123897a861100012225441",
-    "preparedTxHex": "0100000003aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fdcf064ddf0261ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587774800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014751e76e8199196d454941c45d1b3a323f1433bd603ecab010210274d850301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fde60253798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a00000000000000001027000000000000ffffffff3b946bcc6269e02d76f6aab7aa1d6a7f0c1560ecc40b3eafbcf86633643f9c110000000041000000ffffffffcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fdcf064ddf0261ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f758777483045022100aacf88267e7022606007904cf4a2495b3d1e699c9ca583eb462af2543d70e126022005b6296107935ac6600859fae3c2574a64118c2c77c73bcdf3388904f25ba5914114751e76e8199196d454941c45d1b3a323f1433bd603ecab010210274d850301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fde60253798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a00000000000000001027000000000000ffffffff3b946bcc6269e02d76f6aab7aa1d6a7f0c1560ecc40b3eafbcf86633643f9c110000000041000000ffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000000006a4730440220024c4395537350e6af559fd14011d3a6b7371888dfc82e9f66ef577a88300f4802205cee63d6fdb740bab6bb236b58a573c400100b8daa11c8e49aef89a097816bc441210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ffffffff021027000000000000fde80261ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a0100000000000000ecab0100000000001976a914751e76e8199196d454941c45d1b3a323f1433bd688ac00000000",
+    "sighash": "08aba1fefe4ae7d50a51bec4452721a422666d0eb2058af86ef83e776c5122f1",
+    "preimageHex": "01000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fdd80252798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a00000000000000001027000000000000ffffffffe43123bcf4d0eeab865f10e322c4d16fc46b3a43efa7c12fbe647625f43f716b0000000041000000",
+    "primarySignatureHex": "304402206e28a16d52458dfa9cf044624998ec11dd40325cd977f60717b2899140fa5d5c0220254be349dcd9560d14c52b16e427b14ac27617a094eccae4f72431d13b2c18cd41",
+    "preparedTxHex": "0100000003aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fdb0064dd10261ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777774800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014751e76e8199196d454941c45d1b3a323f1433bd603f3ab014d770301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fdd80252798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a00000000000000001027000000000000ffffffffe43123bcf4d0eeab865f10e322c4d16fc46b3a43efa7c12fbe647625f43f716b0000000041000000ffffffffcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fdaf064dd10261ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777473044022070771db0d862ef7a7f8919ed0cd7651070bca6a2c003e895569541338ba4b4a402205e486cc329e3e31998dedefa9a5901dd2fbdb0e23a29b236130dc958f33e81704114751e76e8199196d454941c45d1b3a323f1433bd603f3ab014d770301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fdd80252798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a00000000000000001027000000000000ffffffffe43123bcf4d0eeab865f10e322c4d16fc46b3a43efa7c12fbe647625f43f716b0000000041000000ffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000000006a4730440220573556f2d170f146005aa144fe5648f4b2c18e88dba7464cf887b341f0a15a3c022073c0bd36084ddfd3b8d259d9c2ca07ef05761b119b4abe5aefa5508ef43e527841210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ffffffff021027000000000000fdda0261ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a0100000000000000f3ab0100000000001976a914751e76e8199196d454941c45d1b3a323f1433bd688ac00000000",
     "inputCount": 3,
     "outputCount": 2,
-    "referenceTxHex": "0100000003aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fdcf064ddf0261ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587774830450221009d3f59f4cd361172b8adcd02f08b6b2293d798aca1a1e93cac0d2d0d3a226a3b022028ea65e754260a5abc40eaeef6afdc01c8abea6e037a123897a86110001222544114751e76e8199196d454941c45d1b3a323f1433bd603ecab010210274d850301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fde60253798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a00000000000000001027000000000000ffffffff3b946bcc6269e02d76f6aab7aa1d6a7f0c1560ecc40b3eafbcf86633643f9c110000000041000000ffffffffcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fdcf064ddf0261ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f758777483045022100aacf88267e7022606007904cf4a2495b3d1e699c9ca583eb462af2543d70e126022005b6296107935ac6600859fae3c2574a64118c2c77c73bcdf3388904f25ba5914114751e76e8199196d454941c45d1b3a323f1433bd603ecab010210274d850301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fde60253798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a00000000000000001027000000000000ffffffff3b946bcc6269e02d76f6aab7aa1d6a7f0c1560ecc40b3eafbcf86633643f9c110000000041000000ffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000000006a4730440220024c4395537350e6af559fd14011d3a6b7371888dfc82e9f66ef577a88300f4802205cee63d6fdb740bab6bb236b58a573c400100b8daa11c8e49aef89a097816bc441210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ffffffff021027000000000000fde80261ab53798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f7587776a0100000000000000ecab0100000000001976a914751e76e8199196d454941c45d1b3a323f1433bd688ac00000000"
+    "referenceTxHex": "0100000003aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fdaf064dd10261ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f7587777747304402206e28a16d52458dfa9cf044624998ec11dd40325cd977f60717b2899140fa5d5c0220254be349dcd9560d14c52b16e427b14ac27617a094eccae4f72431d13b2c18cd4114751e76e8199196d454941c45d1b3a323f1433bd603f3ab014d770301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000fdd80252798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a00000000000000001027000000000000ffffffffe43123bcf4d0eeab865f10e322c4d16fc46b3a43efa7c12fbe647625f43f716b0000000041000000ffffffffcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fdaf064dd10261ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777473044022070771db0d862ef7a7f8919ed0cd7651070bca6a2c003e895569541338ba4b4a402205e486cc329e3e31998dedefa9a5901dd2fbdb0e23a29b236130dc958f33e81704114751e76e8199196d454941c45d1b3a323f1433bd603f3ab014d770301000000f81f4842d6ef7032c06b4ab50d5a9c032c4704fa3f20d7267e850a75e8da307f82a7d5bb59fc957ff7f737ca0b8be713c705d6173783ad5edb067819bed70be8cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000fdd80252798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a00000000000000001027000000000000ffffffffe43123bcf4d0eeab865f10e322c4d16fc46b3a43efa7c12fbe647625f43f716b0000000041000000ffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000000006a4730440220573556f2d170f146005aa144fe5648f4b2c18e88dba7464cf887b341f0a15a3c022073c0bd36084ddfd3b8d259d9c2ca07ef05761b119b4abe5aefa5508ef43e527841210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ffffffff021027000000000000fdda0261ab52798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad78820134947f77587f7581788b5679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f758777776a0100000000000000f3ab0100000000001976a914751e76e8199196d454941c45d1b3a323f1433bd688ac00000000"
   }
 }

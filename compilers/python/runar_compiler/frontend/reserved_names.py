@@ -43,6 +43,8 @@ _SOURCE_ONLY_RESERVED = [
     re.compile(r"^_newAmount\Z"),
     re.compile(r"^_serialisedOutputs\Z"),
     re.compile(r"^_prevOutScript_[0-9]+\Z"),
+    # D25: the hidden spent-outpoint state field (continuation_binding.py).
+    re.compile(r"^_spentOutpointHash\Z"),
 ]
 
 

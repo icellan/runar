@@ -1217,6 +1217,23 @@ func (c *RunarContract) prepareCallInner(
 		)
 	}
 
+	// D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+	// continuation methods are all mutate-only) commits ONE output per input,
+	// at that input's index. A call that spends extra contract inputs into the
+	// one continuation (a many-to-one merge) is exactly the twin-input shape
+	// SINGLE refuses: every extra input would need its own continuation at its
+	// own index, so the tx cannot verify. Fail closed before building it.
+	if len(extraContractUtxos) > 0 && c.methodSigHashType(methodName)&0x1f == 0x03 {
+		return nil, fmt.Errorf(
+			"RunarContract.call(%s): additionalContractInputs cannot be spent into one "+
+				"continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation "+
+				"methods are all mutate-only, D25): SINGLE commits each input to its own output at its own "+
+				"index. Merge with an addOutput method instead (see FungibleToken.merge), or build each "+
+				"input's continuation with assembleMultiContractCall",
+			methodName,
+		)
+	}
+
 	// Build contract outputs
 	var contractOutputs []ContractOutput
 	hasMultiOutput := options != nil && len(options.Outputs) > 0
@@ -1335,10 +1352,38 @@ func (c *RunarContract) prepareCallInner(
 	newLockingScript := ""
 	newSatoshis := int64(0)
 
+	// D25: a bind-class contract's every continuation carries the hidden
+	// _spentOutpointHash = sha256(outpoint this input spends), written by the
+	// covenant itself. A caller-supplied state (Outputs / NewState) cannot be
+	// expected to know it — left out, SerializeState has no value; copied from
+	// GetState(), it is the PREVIOUS outpoint's hash and the covenant rejects
+	// the spend. No other value can ever validate, so it is always overwritten.
+	withOutpointBinding := func(st map[string]interface{}) map[string]interface{} { return st }
+	if n := len(c.Artifact.StateFields); isStateful && n > 0 && c.Artifact.StateFields[n-1].Name == "_spentOutpointHash" {
+		if txidBytes, err := hex.DecodeString(contractUtxo.Txid); err == nil && len(txidBytes) == 32 {
+			wire := make([]byte, 0, 36)
+			for i := 31; i >= 0; i-- {
+				wire = append(wire, txidBytes[i])
+			}
+			vout := uint32(contractUtxo.OutputIndex)
+			wire = append(wire, byte(vout), byte(vout>>8), byte(vout>>16), byte(vout>>24))
+			sum := sha256.Sum256(wire)
+			binding := hex.EncodeToString(sum[:])
+			withOutpointBinding = func(st map[string]interface{}) map[string]interface{} {
+				out := make(map[string]interface{}, len(st)+1)
+				for k, v := range st {
+					out[k] = v
+				}
+				out["_spentOutpointHash"] = binding
+				return out
+			}
+		}
+	}
+
 	if isStateful && hasMultiOutput {
 		codePartHex := c.getCodePartHex()
 		for _, out := range options.Outputs {
-			stateHex := SerializeState(c.Artifact.StateFields, out.State)
+			stateHex := SerializeState(c.Artifact.StateFields, withOutpointBinding(out.State))
 			contractOutputs = append(contractOutputs, ContractOutput{
 				Script:   codePartHex + "6a" + stateHex,
 				Satoshis: out.Satoshis,
@@ -1359,7 +1404,7 @@ func (c *RunarContract) prepareCallInner(
 		}
 		if options != nil && options.NewState != nil {
 			// Explicit newState takes priority (backward compat)
-			for k, v := range options.NewState {
+			for k, v := range withOutpointBinding(options.NewState) {
 				c.state[k] = v
 			}
 		} else if methodHasContinuation && autoComputedState != nil {
@@ -2060,8 +2105,13 @@ func (c *RunarContract) prepareCallInner(
 	}
 
 	// Compute sighash from preimage (C19: the true BIP-143 digest external
-	// signers must sign — hash256(preimage), NOT sha256(preimage)).
-	sighash := computeBip143Sighash(finalPreimage)
+	// signers must sign — hash256(preimage), NOT sha256(preimage)). D25: the
+	// digest of a user Sig (always ALL|FORKID), which differs from the
+	// covenant preimage's when the method commits under another mode.
+	sighash, sighashErr := c.userSigDigest(finalPreimage, signedTx, contractUtxo, codeSepIdx, sigHashType)
+	if sighashErr != nil {
+		return nil, fmt.Errorf("RunarContract.PrepareCall: %w", sighashErr)
+	}
 
 	return &PreparedCall{
 		Sighash:              sighash,
@@ -3259,8 +3309,12 @@ func (c *RunarContract) prepareCallTerminal(
 	}
 
 	// Compute sighash from preimage (C19: the true BIP-143 digest external
-	// signers must sign — hash256(preimage), NOT sha256(preimage)).
-	sighash := computeBip143Sighash(finalPreimage)
+	// signers must sign — hash256(preimage), NOT sha256(preimage)). D25: the
+	// user-Sig (ALL|FORKID) digest when the method's mode differs.
+	sighash, sighashErr := c.userSigDigest(finalPreimage, termTx, contractUtxo, termCodeSepIdx, termSigHashType)
+	if sighashErr != nil {
+		return nil, fmt.Errorf("RunarContract.PrepareCall terminal: %w", sighashErr)
+	}
 
 	return &PreparedCall{
 		Sighash:              sighash,
@@ -3352,6 +3406,27 @@ func readVarintBytes(data []byte, offset int) (uint64, int) {
 // value, such a signer signs the wrong message and the node's real OP_CHECKSIG
 // rejects the spend. Mirrors computeBip143Sighash in
 // packages/runar-sdk/src/contract.ts.
+// userSigDigest (D25, TS RunarContract.userSigDigest): the digest an external
+// signer signs for a user Sig argument. User signatures are ALL|FORKID (the
+// byte every signer appends), so when the method's covenant preimage is built
+// under another mode (SIGHASH_SINGLE is the default for a mutate-only
+// contract) the digest is recomputed over the same tx, subscript and code
+// separator under ALL|FORKID. The covenant's own preimage
+// (PreparedCall.Preimage) is unchanged.
+func (c *RunarContract) userSigDigest(covenantPreimage, txHex string, utxo UTXO, codeSepIdx, sigHashType int) (string, error) {
+	if covenantPreimage == "" {
+		return computeBip143Sighash(covenantPreimage), nil
+	}
+	if sigHashType == 0x41 {
+		return computeBip143Sighash(covenantPreimage), nil
+	}
+	pre, err := ComputeOpPushTxPreimageWithSigHash(txHex, 0, utxo.Script, utxo.Satoshis, codeSepIdx, 0x41)
+	if err != nil {
+		return "", fmt.Errorf("user-signature (ALL|FORKID) digest: %w", err)
+	}
+	return computeBip143Sighash(hex.EncodeToString(pre)), nil
+}
+
 func computeBip143Sighash(preimageHex string) string {
 	if preimageHex == "" {
 		return ""

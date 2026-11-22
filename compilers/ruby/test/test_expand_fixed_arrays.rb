@@ -355,8 +355,9 @@ class TestExpandFixedArrays < Minitest::Test
     # N-376 took it 7855 -> 7801: the ROT ROT ROT -> [] peephole rule deletes 18 identity ROT^3 runs (54 bytes).
     # N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
     # #180 / #213 took it 7762 -> 7804: six 7-byte public-method entry width gates (<d> OP_PICK OP_SIZE <w> OP_NUMEQUALVERIFY OP_DROP); equals the TS reference for the same sources.
-    assert_equal 7804, v1.script.length / 2, "v1 script must be 7804 bytes" # Ports #170: -36 (six C=1 binding blobs); #180/#213: +42
-    assert_equal 7804, v2.script.length / 2, "v2 script must be 7804 bytes"
+    # D25 took it 7804 -> 7715: every continuation method is mutate-only, so they commit under SIGHASH_SINGLE (no change segment, no _changePKH gate); equals the TS reference and the Python tier.
+    assert_equal 7715, v1.script.length / 2, "v1 script must be 7715 bytes" # D25: -89; Ports #170: -36 (six C=1 binding blobs); #180/#213: +42
+    assert_equal 7715, v2.script.length / 2, "v2 script must be 7715 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 

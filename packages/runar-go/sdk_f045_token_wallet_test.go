@@ -1,7 +1,6 @@
 package runar
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -158,36 +157,24 @@ func TestF045_TokenWalletTransfer_SignsTheBroadcastTx(t *testing.T) {
 	}
 }
 
-func TestF045_TokenWalletMerge_SpendsBothTokenUtxos(t *testing.T) {
+// D25: this token's continuation methods are all mutate-only, so they commit
+// under SIGHASH_SINGLE, one output per input. Merge spends two token UTXOs
+// into ONE continuation, which is exactly the twin-input shape SINGLE closes:
+// the second input would need its own continuation at its own index. The SDK
+// refuses before building or broadcasting the tx (a merge needs an addOutput
+// method; see FungibleToken.merge). Both funding layouts the old test drove
+// are kept, so the refusal precedes funding selection in each.
+func TestF045_TokenWalletMerge_RefusedUnderSingle(t *testing.T) {
 	art := f045Artifact(t)
-	// Token UTXOs larger than the funding coin: largest-first funding
-	// selection must not also pick the second token UTXO as a P2PKH input.
 	for _, sats := range [][2]int64{{5000, 200000}, {300000, 50000}} {
-		provider, wallet, tokens, known := f045Setup(t, art, []int64{100, 250}, sats[0], sats[1])
-		if _, err := wallet.Merge(); err != nil {
-			t.Fatalf("Merge (token %d sats, funding %d sats): %v", sats[0], sats[1], err)
+		provider, wallet, _, _ := f045Setup(t, art, []int64{100, 250}, sats[0], sats[1])
+		before := len(provider.GetBroadcastedTxs())
+		_, err := wallet.Merge()
+		if err == nil || !strings.Contains(err.Error(), "additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method") {
+			t.Fatalf("Merge (token %d sats, funding %d sats): want the D25 refusal, got %v", sats[0], sats[1], err)
 		}
-		txs := provider.GetBroadcastedTxs()
-		tx := f045ValidateAll(t, txs[len(txs)-1], known)
-		spent := f045Spent(tx)
-		seen := map[string]int{}
-		for _, s := range spent {
-			seen[s]++
-		}
-		for _, u := range tokens {
-			if seen[u.Txid+":0"] != 1 {
-				t.Fatalf("token %s spent %d times, want 1 (inputs %v)", u.Txid, seen[u.Txid+":0"], spent)
-			}
-		}
-		if len(seen) != len(spent) {
-			t.Fatalf("an outpoint is spent twice: %v", spent)
-		}
-		merged, err := FromUtxo(art, UTXO{Txid: "00", OutputIndex: 0, Satoshis: int64(tx.Outputs[0].Satoshis), Script: hex.EncodeToString(*tx.Outputs[0].LockingScript)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := anfToBigInt(merged.GetState()["supply"]).Int64(); got != 350 {
-			t.Fatalf("merged supply = %d, want 350", got)
+		if after := len(provider.GetBroadcastedTxs()); after != before {
+			t.Fatalf("Merge broadcast %d tx(s) before refusing", after-before)
 		}
 	}
 }

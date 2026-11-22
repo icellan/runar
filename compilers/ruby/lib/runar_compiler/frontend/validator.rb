@@ -12,6 +12,7 @@ require_relative "sighash_validate"
 require_relative "reserved_names"
 require_relative "input_limits"
 require_relative "continuation_rules"
+require_relative "continuation_binding"
 
 module RunarCompiler
   module Frontend
@@ -84,7 +85,9 @@ module RunarCompiler
 
     # Validate a Runar AST against language subset constraints.
     #
-    # Does NOT modify the AST; only reports errors and warnings.
+    # Reports errors and warnings. The one AST write is D25's: the effective
+    # +sighash_type+ of a mutate-only contract's continuation methods
+    # (continuation_binding.rb; idempotent).
     #
     # @param contract [ContractNode]
     # @return [ValidationResult]
@@ -110,6 +113,15 @@ module RunarCompiler
       # pass emits both errors (unsound usages) and warnings (e.g. an explicit
       # single-output SINGLE covenant whose same-index value cannot be pinned
       # statically), so route each diagnostic to the matching bucket.
+      # D25: classify the contract's continuation binding and set the effective
+      # sighash of a mutate-only contract's continuation methods (SINGLE)
+      # BEFORE the field checks, so they and every later pass see the
+      # effective mode. The one place this pass writes the AST
+      # (method.sighash_type only; idempotent). See continuation_binding.rb.
+      ContinuationBinding.resolve(contract).each do |d|
+        (d.severity == Severity::WARNING ? ctx.warnings : ctx.errors) << d
+      end
+
       SighashValidate.validate_sighash_usage(contract).each do |d|
         (d.severity == Severity::WARNING ? ctx.warnings : ctx.errors) << d
       end

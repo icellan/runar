@@ -13,7 +13,10 @@
       "expect": "accept",
       "note": "private bump(): counter 0->1",
       "expectedState": {
-        "counter": "1n"
+        "counter": "1n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -24,7 +27,10 @@
       "expect": "accept",
       "note": "private record(): data output",
       "expectedState": {
-        "counter": "0n"
+        "counter": "0n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -37,7 +43,10 @@
       "note": "private forkOutput(): extra output",
       "satoshis": 500,
       "expectedState": {
-        "counter": "7n"
+        "counter": "7n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -50,6 +59,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "4b281122af1002c7b74be581870895a7656611639293131b5c7de93ef52eff8f"
+    "expected-script.hex": "63c7fb31eea704e2f999470df8871348384a7ed617740794e087ccd89a70a508",
+    "expected-ir.json": "b656af8d6dded7f2a7b6a34d79a44f66d77259c5bbb8d18a9668362b36a455c5"
   }
 }

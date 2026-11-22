@@ -1,5 +1,6 @@
 package runar.compiler.passes;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -98,8 +99,12 @@ class SighashValidateTest {
 
     // ---- Rule 4: SINGLE -------------------------------------------------------
 
+    // D25: the #123 (F1) refusal predated the F-024 `_newAmount` floor and
+    // N-038; SINGLE hashes the whole same-index output, value included, so a
+    // mutate-only SINGLE continuation is sound (and the default for a contract
+    // whose continuation methods are all mutate-only).
     @Test
-    void rejectsMutateOnlyContinuationUnderSingle() throws Exception {
+    void acceptsMutateOnlyContinuationUnderSingle() throws Exception {
         String src =
             "class Counter extends StatefulSmartContract {\n"
             + "  n: bigint;\n"
@@ -108,9 +113,8 @@ class SighashValidateTest {
             + "  public bump(): void { this.n = this.n + 1n; }\n"
             + "}\n";
         List<String> errs = errorsOf(src);
-        assertTrue(anyMatch(errs, "mutate-only SINGLE continuation is unsound")
-            || anyMatch(errs, "sized by the caller-chosen _newAmount"), errs.toString());
-        assertFalse(PipelineTestSupport.compiles(src, "X.runar.ts"));
+        assertEquals(List.of(), errs);
+        assertTrue(PipelineTestSupport.compiles(src, "X.runar.ts"));
     }
 
     @Test

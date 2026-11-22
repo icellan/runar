@@ -86,26 +86,29 @@ class SighashCallTest {
     }
 
     @Test
-    void anyonecanpayCallBuildsPreimageAndSigUnder0xc1() throws Exception {
+    void anyonecanpayCallBuildsPreimageAndSigUnder0xc3() throws Exception {
         String unlock = callPledgeUnlock(load("fund-acp.runar.json"));
         List<String> pushes = parsePushes(unlock);
         String preimage = largestPush(pushes);
         // Optimal OP_PUSH_TX derives the covenant signature ON-CHAIN from the
         // preimage (no witness sig is pushed), so the SDK's contribution is the
-        // preimage itself. Its trailing sighashType (LE uint32) is 0xc1 ->
-        // "c1000000", proving the SDK built it under the declared ANYONECANPAY mode.
-        assertTrue(preimage.endsWith("c1000000"),
-            "ANYONECANPAY preimage must end with sighashType c1000000; tail="
+        // preimage itself. D25: Fund's only continuation method is mutate-only,
+        // so its ALL|ANYONECANPAY|FORKID directive compiles to
+        // SINGLE|ANYONECANPAY|FORKID; the trailing sighashType (LE uint32) is
+        // 0xc3 -> "c3000000", proving the SDK built it under the artifact's mode.
+        assertTrue(preimage.endsWith("c3000000"),
+            "ANYONECANPAY preimage must end with sighashType c3000000; tail="
                 + preimage.substring(Math.max(0, preimage.length() - 8)));
     }
 
     @Test
-    void defaultCallBuildsPreimageAndSigUnder0x41() throws Exception {
+    void defaultCallBuildsPreimageAndSigUnder0x43() throws Exception {
         String unlock = callPledgeUnlock(load("fund-default.runar.json"));
         List<String> pushes = parsePushes(unlock);
         String preimage = largestPush(pushes);
-        assertTrue(preimage.endsWith("41000000"),
-            "default preimage must end with sighashType 41000000; tail="
+        // D25: a mutate-only contract's default is SINGLE|FORKID (0x43).
+        assertTrue(preimage.endsWith("43000000"),
+            "default preimage must end with sighashType 43000000; tail="
                 + preimage.substring(Math.max(0, preimage.length() - 8)));
     }
 }

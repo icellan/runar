@@ -12,6 +12,9 @@ const parse_java = @import("passes/parse_java.zig");
 const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
 const expand_fixed_arrays = @import("passes/expand_fixed_arrays.zig");
+const continuation_binding = @import("passes/continuation_binding.zig");
+const stateful_scaffold = @import("ir/stateful_scaffold.zig");
+const required_fields = @import("ir/required_fields.zig");
 const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
@@ -432,7 +435,10 @@ pub fn runPipeline(
 
     // Pass 3b: Expand FixedArray properties into scalar siblings + dispatch
     // chains. No-op when the contract has no FixedArray properties.
-    const expanded = expand_fixed_arrays.expand(work, contract) catch return error.OutOfMemory;
+    // D25: a 'bind' contract gains its hidden spent-outpoint state field here
+    // (after typecheck, so user-facing arity rules never see it).
+    const bound = continuation_binding.inject(work, contract) catch return error.OutOfMemory;
+    const expanded = expand_fixed_arrays.expand(work, bound) catch return error.OutOfMemory;
     for (expanded.errors) |d| diag.addError(work, "  fixed-array error: ", d.message);
     if (expanded.errors.len > 0) return error.ValidationFailed;
     const expanded_contract = expanded.contract;
@@ -443,6 +449,20 @@ pub fn runPipeline(
         if (lower_diag.message) |message| diag.addError(work, "  anf lowering error: ", message);
         return err;
     };
+
+    // D25 (fail closed): the lowered program must carry the continuation
+    // binding the --ir loader demands. The classifier runs on the AST before
+    // FixedArray expansion; a shape it misjudged would otherwise ship an
+    // unbound (twin-input-stealable) continuation, so refuse instead.
+    if (expanded_contract.parent_class == .stateful_smart_contract) {
+        stateful_scaffold.checkContinuationBinding(work, program.properties, program.methods) catch |err| switch (err) {
+            error.ContinuationUnbound => {
+                diag.addError(work, "  anf lowering error: ", required_fields.lastDiagnostic() orelse "continuation not bound to its input");
+                return error.ANFLowerFailed;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
 
     // Pass 4.25: Constant Fold
     if (!opts.disable_constant_folding) {

@@ -15,7 +15,7 @@ func (c *Counter) Increment() {
 	c.Count++
 }
 
-//runar:sighash ALL|FORKID
+//runar:sighash SINGLE|FORKID
 func (c *Counter) helper() {
 	c.Count++
 }

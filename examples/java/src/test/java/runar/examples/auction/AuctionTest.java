@@ -17,6 +17,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class AuctionTest {
 
+    /**
+     * D25: a contract whose continuation methods are all mutate-only commits
+     * them under SIGHASH_SINGLE|FORKID by default, and the stateful prologue
+     * pins the preimage's sighash type to it.
+     */
+    private static final long SIGHASH_SINGLE_FORKID = 0x43;
+
     private static final PubKey AUCTIONEER = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000001");
     private static final PubKey ALICE      = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000002");
     private static final PubKey BOB        = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000003");
@@ -47,7 +54,7 @@ class AuctionTest {
         // N-027: continuationAmount() is 10000 off-chain, so a bid of 100 that is
         // paid into the pot has a prior pot (the preimage amount) of 9900.
         Preimage pre = sim.preimageFor("bid",
-            Preimage.builder().locktime(500_000).amount(BigInteger.valueOf(10000 - 100)).build(),
+            Preimage.builder().sighashType(SIGHASH_SINGLE_FORKID).locktime(500_000).amount(BigInteger.valueOf(10000 - 100)).build(),
             SIG, ALICE, Bigint.of(100));
         sim.callStateful("bid", pre, SIG, ALICE, Bigint.of(100));
         assertEquals(ALICE, a.highestBidder);
@@ -60,7 +67,7 @@ class AuctionTest {
         ContractSimulator sim = ContractSimulator.stateful(a, SOURCE);
         // Paid (N-027), so the only failing assert is bidAmount > highestBid.
         Preimage pre = sim.preimageFor("bid",
-            Preimage.builder().locktime(100_000).amount(BigInteger.valueOf(10000 - 400)).build(),
+            Preimage.builder().sighashType(SIGHASH_SINGLE_FORKID).locktime(100_000).amount(BigInteger.valueOf(10000 - 400)).build(),
             SIG, BOB, Bigint.of(400));
         AssertionError e = assertThrows(
             AssertionError.class,
@@ -81,7 +88,7 @@ class AuctionTest {
             Auction a = new Auction(AUCTIONEER, AUCTIONEER, Bigint.ZERO, Bigint.of(1_000_000));
             ContractSimulator sim = ContractSimulator.stateful(a, SOURCE);
             Preimage pre = sim.preimageFor("bid",
-                Preimage.builder().locktime(500_000).amount(BigInteger.valueOf(pot)).build(),
+                Preimage.builder().sighashType(SIGHASH_SINGLE_FORKID).locktime(500_000).amount(BigInteger.valueOf(pot)).build(),
                 SIG, ALICE, Bigint.of(100));
             AssertionError e = assertThrows(AssertionError.class,
                 () -> sim.callStateful("bid", pre, SIG, ALICE, Bigint.of(100)),

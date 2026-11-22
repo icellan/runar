@@ -301,3 +301,82 @@ describe('stateful — without artifact info, behavior is unchanged', () => {
     expect(dec.recoveryPath).not.toBe('symexec');
   });
 });
+
+describe('stateful — D25 continuation-binding scaffolds', () => {
+  function roundTrip(source: string, className: string) {
+    const r = compileSource(source, `${className}.runar.ts`);
+    const dec = decompile(hexToBytes(r.scriptHex!), {
+      stateFields: r.artifact!.stateFields,
+      codeSeparatorIndex: r.artifact!.codeSeparatorIndex,
+      codeSeparatorIndices: r.artifact!.codeSeparatorIndices,
+      parentClass: 'StatefulSmartContract',
+      anf: r.artifact!.anf,
+      className,
+    });
+    expect(dec.ok).toBe(true);
+    expect(dec.recoveryPath).toBe('symexec');
+    const recompiled = compile(dec.source, { fileName: `${className}.runar.ts` });
+    expect(recompiled.success, JSON.stringify(recompiled.diagnostics)).toBe(true);
+    expect(recompiled.scriptHex).toBe(r.scriptHex);
+    return { r, dec };
+  }
+
+  it("'single' class (mutate-only): the 0x43 sighash pin is stripped and NOT re-annotated (idiomatic source)", () => {
+    const { r, dec } = roundTrip(`
+      import { StatefulSmartContract } from 'runar-lang';
+      export class Counter extends StatefulSmartContract {
+        count: bigint;
+        constructor(count: bigint) { super(count); this.count = count; }
+        public increment() { this.count = this.count + 1n; }
+      }
+    `, 'Counter');
+    expect(r.artifact!.abi.methods.find((m) => m.name === 'increment')!.sigHashType).toBe(0x43);
+    expect(dec.source).not.toContain('@sighash');
+    expect(dec.source).not.toContain('extractSigHashType');
+  });
+
+  it("'single' class under ANYONECANPAY: the 0xC3 pin is restored as @sighash ALL|ANYONECANPAY|FORKID", () => {
+    const { dec } = roundTrip(`
+      import { StatefulSmartContract } from 'runar-lang';
+      export class AcpCounter extends StatefulSmartContract {
+        count: bigint;
+        constructor(count: bigint) { super(count); this.count = count; }
+        /** @sighash ALL|ANYONECANPAY|FORKID */
+        public increment() { this.count = this.count + 1n; }
+      }
+    `, 'AcpCounter');
+    expect(dec.source).toContain('@sighash ALL|ANYONECANPAY|FORKID');
+  });
+
+  it("'bind' class (MixedPot): the hidden _spentOutpointHash field and its writes are stripped, not rendered", () => {
+    const { r, dec } = roundTrip(`
+      import { StatefulSmartContract, extractAmount } from 'runar-lang';
+      export class MixedPot extends StatefulSmartContract {
+        count: bigint;
+        constructor(count: bigint) { super(count); this.count = count; }
+        public increment() { this.count = this.count + 1n; }
+        public bump() { this.addOutput(extractAmount(this.txPreimage), this.count + 1n); }
+      }
+    `, 'MixedPot');
+    expect(r.artifact!.stateFields!.map((f) => f.name)).toEqual(['count', '_spentOutpointHash']);
+    expect(dec.source).not.toContain('_spentOutpointHash');
+    expect(dec.source).not.toContain('extractOutpoint');
+    expect(dec.source).toContain('this.addOutput(extractAmount(this.txPreimage), (this.count + 1n));');
+    expect(dec.source).toContain('this.count = ');
+  });
+
+  it('explicit @sighash SINGLE|FORKID on an addOutput method of a non-single contract is restored', () => {
+    const { dec } = roundTrip(`
+      import { StatefulSmartContract } from 'runar-lang';
+      export class Pair extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @sighash SINGLE|FORKID */
+        public bump(amount: bigint) { this.addOutput(amount, this.n + 1n); }
+        public plain() { this.n = this.n + 1n; }
+      }
+    `, 'Pair');
+    expect(dec.source).toContain('/** @sighash SINGLE|FORKID */\n  public bump(');
+    expect(dec.source.match(/@sighash/g)!.length).toBe(1);
+  });
+});

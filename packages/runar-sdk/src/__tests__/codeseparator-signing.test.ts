@@ -351,14 +351,16 @@ describe('OP_CODESEPARATOR: stateful terminal method without terminalOutputs', (
     // Verify the unlocking script has _codePart.
     // For bid(sig, bidder, bidAmount) on a stateful contract with 2 methods
     // (BUG-100 fix: OP_PUSH_TX signature derived on-chain, no _opPushTxSig):
-    //   <codePart> <sig> <bidder> <bidAmount> <changePKH> <changeAmount> <newAmount> <txPreimage> <methodSelector>
+    //   <codePart> <sig> <bidder> <bidAmount> <newAmount> <txPreimage> <methodSelector>
+    // (D25: Auction's continuation methods are all mutate-only, so bid commits
+    // under SIGHASH_SINGLE and takes no _changePKH / _changeAmount.)
     const broadcastedTxs = provider.getBroadcastedTxs();
     const callTx = broadcastedTxs[broadcastedTxs.length - 1]!;
     const unlocks = parseUnlockingScripts(callTx);
     const contractUnlock = unlocks[0]!;
     const itemCount = countPushdataItems(contractUnlock);
-    // 9 items: codePart + sig + bidder + bidAmount + changePKH + changeAmount + newAmount + txPreimage + methodSelector (opPushTxSig removed)
-    expect(itemCount).toBe(9);
+    // 7 items: codePart + sig + bidder + bidAmount + newAmount + txPreimage + methodSelector (opPushTxSig removed)
+    expect(itemCount).toBe(7);
   });
 });
 

@@ -125,11 +125,13 @@ pub fn validateSighashUsage(
                 try err(allocator, out, loc, "@sighash {s}: 'requireOutputP2PKH' asserts an output at a fixed index, but SINGLE commits ONLY to the output at THIS input's index — the asserted index cannot be statically proven equal to the input index, so the assertion may bind an uncommitted (attacker-controllable) output or silently brick the spend. Use ALL.", .{label});
             }
 
-            // F1: a stateful mutate-only (or data-only) method has NO explicit
-            // output intrinsic, so the compiler auto-injects a single
-            // state-continuation output whose value is the caller-chosen
-            // _newAmount. Under SINGLE, BIP-143 commits ONLY to the output at
-            // THIS input's index and does NOT pin its value -> value-skimmable.
+            // D25: a mutate-only (auto-continuation) method under SINGLE is
+            // SOUND and is the DEFAULT for a contract whose continuation
+            // methods are all mutate-only (continuation_binding.zig). SINGLE
+            // hashes the whole same-index output, value included, and the
+            // F-024 floor (`_newAmount >= extractAmount`) stops a dust
+            // continuation; the change is not committed (N-038). The refusal
+            // that used to stand here (e88f202c8) predates both.
             const is_mutate_only_auto_continuation = needs_continuation and
                 scan.state_output_count == 0 and scan.data_output_count == 0;
 
@@ -142,7 +144,7 @@ pub fn validateSighashUsage(
             const committed = state_outputs + scan.data_output_count;
 
             if (is_mutate_only_auto_continuation) {
-                try err(allocator, out, loc, "@sighash {s}: this stateful method's state continuation is sized by the caller-chosen _newAmount, but SINGLE commits ONLY to the same-index output WITHOUT pinning its value — a spender can set _newAmount to dust, drive the change output to zero, and append a draining output while the covenant + OP_PUSH_TX binding still validate (value skim); a mutate-only SINGLE continuation is unsound. Use ALL, or emit an explicit addOutput/addRawOutput that carries the full protected value at this input's index.", .{label});
+                // Sound (see above): nothing to report.
             } else if (committed > 1) {
                 try err(allocator, out, loc, "@sighash {s}: SINGLE commits ONLY to the output at this input's index, but this method binds {d} outputs ({d} addOutput + {d} addDataOutput). Outputs beyond the same-index one are uncommitted and attacker-controllable. A SINGLE covenant must bind exactly one same-index output.", .{ label, committed, scan.state_output_count, scan.data_output_count });
             } else if (committed == 1) {

@@ -183,6 +183,20 @@ function stateValue(v: unknown): unknown {
   return scalar(v);
 }
 
+/**
+ * D25: `{"$spentOutpointHash": "deploy:0"}` = sha256(spent outpoint as BIP-143
+ * serializes it: deploy txid in wire order || vout u32 LE). Computed here from
+ * the outpoint the call tx's input 0 spends (pinned to deploy:0 by the oracle's
+ * auditCallShape), NOT from the SDK's derived state, so a wrong hidden-field
+ * value written by the covenant or the SDK cannot match it.
+ */
+function spentOutpointHash(which: string, deployTxid: string | undefined): string {
+  if (which !== 'deploy:0') throw new Error(`$spentOutpointHash: only "deploy:0" is supported, got ${which}`);
+  if (!deployTxid || !/^[0-9a-f]{64}$/.test(deployTxid)) throw new Error('$spentOutpointHash: no deploy txid');
+  const wire = Buffer.concat([Buffer.from(deployTxid, 'hex').reverse(), Buffer.from([0, 0, 0, 0])]);
+  return createHash('sha256').update(wire).digest('hex');
+}
+
 /** Resolve constructor args (record for stateless, array for stateful). */
 function resolveCtorRecord(raw: unknown): Record<string, bigint | boolean | string> {
   const out: Record<string, bigint | boolean | string> = {};
@@ -515,6 +529,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
                   const p = placeholder(v);
                   if (p?.tag === 'pubkey') want[k] = testKey(p.key).pubKey;
                   else if (p?.tag === 'pkh') want[k] = testKey(p.key).pubKeyHash;
+                  else if (p?.tag === 'spentOutpointHash') want[k] = spentOutpointHash(p.key, r.deployTxid);
                   else want[k] = stateValue(v);
                 }
                 expect(
