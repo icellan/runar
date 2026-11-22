@@ -184,6 +184,24 @@ pub fn lowerToANFWithDiagnostic(
             tc.deinit(allocator);
         } else |_| {}
     }
+    // D25: the same for the twin-input binding. A caller that assembles its
+    // own pipeline and skips continuation_binding.inject would otherwise lower
+    // a mixed contract with no _spentOutpointHash, leaving its continuations
+    // unbound. Idempotent: a contract that already carries the field is
+    // returned unchanged, so the compiler's own path is unaffected. When it
+    // does inject, only the new property slice is allocated; the ANF copies
+    // each property by value (the field's strings are static), so the slice
+    // is freed once lowering is done.
+    const bound = try continuation_binding.inject(allocator, contract);
+    defer if (bound.properties.ptr != contract.properties.ptr) allocator.free(bound.properties);
+    return lowerBoundToANF(allocator, bound, diag);
+}
+
+fn lowerBoundToANF(
+    allocator: Allocator,
+    contract: ContractNode,
+    diag: ?*LowerDiagnostic,
+) LowerError!ANFProgram {
     const properties = try lowerPropertiesWithDiagnostic(allocator, contract, diag);
     const methods = try lowerMethods(allocator, contract, diag);
 

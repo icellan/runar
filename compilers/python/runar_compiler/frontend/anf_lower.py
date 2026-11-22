@@ -88,6 +88,13 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
     if _has_untyped_operator(contract):
         from runar_compiler.frontend.typecheck import type_check
         type_check(contract)
+    # D25: the same for the twin-input binding. A caller that assembles its
+    # own pipeline and skips inject_continuation_binding would otherwise lower
+    # a mixed contract with no _spentOutpointHash, leaving its continuations
+    # unbound. Idempotent: a contract that already carries the field is
+    # returned unchanged, so the compiler's own path is unaffected.
+    from runar_compiler.frontend.continuation_binding import inject_continuation_binding
+    contract = inject_continuation_binding(contract)
     properties = _lower_properties(contract)
     methods = _lower_methods(contract)
 

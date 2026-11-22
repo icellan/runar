@@ -38,7 +38,7 @@ import { computeSideEffectSummary, continuationShape } from './side-effect-summa
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
 import { emitOutpointBinding, emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
-import { TWIN_BINDING_FIELD } from './continuation-binding.js';
+import { injectContinuationBinding, TWIN_BINDING_FIELD } from './continuation-binding.js';
 import { loopOutputIntrinsicMessage, ternaryOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import type { BindingVariant } from '../ir/anf-ir.js';
@@ -62,6 +62,12 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
   // types still come from the checker and never from a guess. A node the
   // checker could not type keeps no annotation and is refused below.
   if (hasUntypedOperator(contract)) typecheck(contract);
+  // D25: the same for the twin-input binding. A caller that assembles its
+  // own pipeline and skips injectContinuationBinding would otherwise lower a
+  // mixed contract with no _spentOutpointHash, leaving its continuations
+  // unbound. Idempotent: a contract that already carries the field is
+  // returned unchanged, so the compiler's own path is unaffected.
+  contract = injectContinuationBinding(contract);
   const properties = lowerProperties(contract);
   const methods = lowerMethods(contract);
 

@@ -53,6 +53,13 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     if has_untyped_operator(contract) {
         let _ = super::typecheck::typecheck(contract);
     }
+    // D25: the same for the twin-input binding. A caller that assembles its
+    // own pipeline and skips inject_continuation_binding would otherwise lower
+    // a mixed contract with no _spentOutpointHash, leaving its continuations
+    // unbound. Idempotent: a contract that already carries the field is
+    // returned unchanged, so the compiler's own path is unaffected.
+    let injected = super::continuation_binding::inject_continuation_binding(contract);
+    let contract = &injected;
     let properties = lower_properties(contract);
     let mut methods = lower_methods(contract);
 

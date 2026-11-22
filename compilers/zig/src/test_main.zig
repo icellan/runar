@@ -105,6 +105,7 @@ test {
     _ = @import("tests/sighash_codegen.zig");
     _ = @import("tests/binding_variant.zig");
     _ = @import("tests/d25_continuation_binding.zig");
+    _ = @import("tests/d25_lower_injects_binding.zig");
     _ = @import("tests/sighash_validate_test.zig");
     _ = @import("tests/local_shadowing_property.zig");
     _ = @import("tests/param_reassignment.zig");

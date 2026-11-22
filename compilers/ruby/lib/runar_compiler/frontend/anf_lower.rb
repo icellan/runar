@@ -43,6 +43,12 @@ module RunarCompiler
       # node the checker could not type keeps no annotation and is refused
       # below.
       Frontend.type_check(contract) if _has_untyped_operator(contract)
+      # D25: the same for the twin-input binding. A caller that assembles its
+      # own pipeline and skips ContinuationBinding.inject would otherwise
+      # lower a mixed contract with no _spentOutpointHash, leaving its
+      # continuations unbound. Idempotent: a contract that already carries the
+      # field is returned unchanged, so the compiler's own path is unaffected.
+      contract = ContinuationBinding.inject(contract)
       properties = _lower_properties(contract)
       methods = _lower_methods(contract)
 
