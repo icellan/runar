@@ -52,6 +52,10 @@ class TestF038IRParentClassSighash < Minitest::Test
         this.count = 0n;
         assert(true);
       }
+
+      public close(): void {
+        assert(this.count == 0n);
+      }
     }
   TS
 
@@ -105,10 +109,15 @@ class TestF038IRParentClassSighash < Minitest::Test
     with_counter do |path|
       direct, via_ir, ir = round_trip(path)
       by_name = ir["methods"].to_h { |m| [m["name"], m] }
-      assert_equal 0xc1, by_name["increment"]["sigHashType"]
-      refute by_name["reset"].key?("sigHashType"), "the default ALL|FORKID must be omitted"
+      # D25: every continuation method is mutate-only, so ALL|ANYONECANPAY|FORKID
+      # maps to SINGLE|ANYONECANPAY|FORKID and the unannotated reset to
+      # SINGLE|FORKID; the effective mode is what must survive. The terminal
+      # close keeps the default ALL|FORKID, which stays omitted.
+      assert_equal 0xc3, by_name["increment"]["sigHashType"]
+      assert_equal 0x43, by_name["reset"]["sigHashType"]
+      refute by_name["close"].key?("sigHashType"), "the default ALL|FORKID must be omitted"
       refute by_name["increment"].key?("sighash_type")
-      assert_equal 0xc1, direct["abi"]["methods"].find { |m| m["name"] == "increment" }["sigHashType"]
+      assert_equal 0xc3, direct["abi"]["methods"].find { |m| m["name"] == "increment" }["sigHashType"]
       assert_same_artifact(direct, via_ir)
     end
   end

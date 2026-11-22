@@ -173,7 +173,10 @@ class R021VarDeclSideEffectDescentTest {
     @Test
     void varDeclMutationIsNotTerminal() throws Exception {
         assertEquals(
-            List.of("amount", "_changePKH", "_changeAmount", "_newAmount", "txPreimage"),
+            // D25: a contract whose only continuation method is mutate-only
+            // commits it under SIGHASH_SINGLE, which takes no change params;
+            // `_newAmount` is the auto-continuation this rule is about.
+            List.of("amount", "_newAmount", "txPreimage"),
             settleParams(VARDECL_MUTATION, "VarDeclMutation.runar.ts"),
             "a state mutation reached through a var-decl initialiser was classified "
                 + "TERMINAL: the deployed script carries no continuation covenant and a "

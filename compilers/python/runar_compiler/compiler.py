@@ -219,8 +219,11 @@ def _expand_fixed_arrays(contract: Any) -> Any:
     Returns a tuple ``(rewritten_contract, errors)``. On any error the
     original contract is returned unchanged.
     """
+    from runar_compiler.frontend.continuation_binding import inject_continuation_binding
     from runar_compiler.frontend.expand_fixed_arrays import expand_fixed_arrays
-    result = expand_fixed_arrays(contract)
+    # D25: a 'bind' contract gains its hidden spent-outpoint state field here
+    # (after typecheck, so user-facing arity rules never see it).
+    result = expand_fixed_arrays(inject_continuation_binding(contract))
     return result.contract, result.errors
 
 

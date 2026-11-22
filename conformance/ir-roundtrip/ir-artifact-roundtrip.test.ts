@@ -48,10 +48,12 @@ import { isCiEnv } from '../env.js';
 const HERE = __dirname;
 const PROBES: { file: string; parentClass: string; sigHash?: Record<string, number> }[] = [
   { file: join(REPO, 'examples/ts/all-readonly-cleanstack/AllReadonlyCleanstack.runar.ts'), parentClass: 'StatefulSmartContract' },
-  { file: join(REPO, 'examples/ts/fixed-array-write/ArrayWrite.runar.ts'), parentClass: 'StatefulSmartContract' },
+  // D25: a mutate-only continuation commits under SIGHASH_SINGLE|FORKID, and
+  // `@sighash ALL|ANYONECANPAY|FORKID` on one becomes SINGLE|ANYONECANPAY|FORKID.
+  { file: join(REPO, 'examples/ts/fixed-array-write/ArrayWrite.runar.ts'), parentClass: 'StatefulSmartContract', sigHash: { bump: 0x43 } },
   { file: join(REPO, 'examples/ts/asm-raw-script/Anyone.runar.ts'), parentClass: 'UnsafeSmartContract' },
   { file: join(HERE, 'SighashSingle.runar.ts'), parentClass: 'SmartContract', sigHash: { unlock: 0x43 } },
-  { file: join(HERE, 'SighashCounter.runar.ts'), parentClass: 'StatefulSmartContract', sigHash: { increment: 0xc1 } },
+  { file: join(HERE, 'SighashCounter.runar.ts'), parentClass: 'StatefulSmartContract', sigHash: { increment: 0xc3 } },
 ];
 
 const DIR = mkdtempSync(join(tmpdir(), 'f038-ir-roundtrip-'));

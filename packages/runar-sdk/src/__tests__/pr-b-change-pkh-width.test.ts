@@ -18,12 +18,16 @@ import { compile } from 'runar-compiler';
 import { RunarContract } from '../contract.js';
 import { assembleMultiContractCall } from '../multi-contract.js';
 
+// D25: the addOutput sibling keeps the contract on ALL (a mutate-only-only
+// contract commits under SINGLE and takes no changePKH at all), so increment
+// still declares `_changePKH`.
 const SRC = `import { StatefulSmartContract } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
   count: bigint;
   constructor(count: bigint) { super(count); this.count = count; }
   public increment() { this.count = this.count + 1n; }
+  public bump() { this.addOutput(1n, this.count + 1n); }
 }
 `;
 

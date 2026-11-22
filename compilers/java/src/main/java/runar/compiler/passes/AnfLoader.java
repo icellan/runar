@@ -255,6 +255,13 @@ public final class AnfLoader {
         // D26: IR input skips typecheck's locktime-domain rule (stateless and
         // stateful programs alike; see LocktimeDomain).
         LocktimeDomain.checkIr(methods);
+        // D25: a StatefulSmartContract's continuations must be bound to their
+        // input (SINGLE, or the hidden spent-outpoint field); checked last
+        // among the IR frontend rules so every earlier, more specific
+        // diagnostic keeps precedence. See StatefulScaffold.
+        if ("StatefulSmartContract".equals(effectiveClass)) {
+            StatefulScaffold.checkContinuationBinding(props, methods);
+        }
         return new AnfProgram(name, props, methods, parentClass);
     }
 

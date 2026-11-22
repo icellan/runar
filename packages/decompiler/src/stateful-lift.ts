@@ -97,6 +97,13 @@ export interface StatefulLiftResult {
   program: ANFProgram;
   /** Imports the rendered source needs. */
   imports: string[];
+  /**
+   * Per public method: the `@sighash` annotation the rendered source must
+   * carry so recompiling re-derives the method's covenant flag (absent when
+   * the compiler's default — 0x41, or 0x43 for a mutate-only contract's
+   * continuation methods (D25) — already yields it).
+   */
+  sighashAnnotations?: Record<string, string>;
 }
 
 export interface StatefulLiftFailure {
@@ -136,7 +143,9 @@ export interface StatefulLiftOptions {
  */
 function stripStatefulWrapping(
   body: readonly ANFBinding[],
-): { user: ANFBinding[]; ok: true } | { ok: false; reason: string } {
+):
+  | { user: ANFBinding[]; ok: true; sighashFlag: number; hasContinuation: boolean }
+  | { ok: false; reason: string } {
   // -- Prelude --
   let cursor = 0;
 
@@ -167,7 +176,12 @@ function stripStatefulWrapping(
   //     bin_op === (sigHashType, 0x41)
   //     assert
   // It carries no user-visible meaning — the compiler re-injects it on
-  // recompile — so strip it before recovering the user body.
+  // recompile — so strip it before recovering the user body. The constant
+  // is the method's covenant sighash flag: 0x41 by default, 0x43 for every
+  // continuation method of a mutate-only contract (D25), or whatever an
+  // `@sighash` annotation chose. It is recorded so the renderer can restore
+  // the annotation where the compiler would not re-derive the same flag.
+  let sighashFlag = 0x41;
   if (cursor + 5 <= body.length) {
     const p0 = body[cursor]!;
     const p1 = body[cursor + 1]!;
@@ -178,11 +192,12 @@ function stripStatefulWrapping(
       p0.value.kind === 'load_param' && p0.value.name === 'txPreimage' &&
       p1.value.kind === 'call' && p1.value.func === 'extractSigHashType' &&
       p1.value.args.length === 1 && p1.value.args[0] === p0.name &&
-      p2.value.kind === 'load_const' && p2.value.value === 0x41n &&
+      p2.value.kind === 'load_const' && typeof p2.value.value === 'bigint' &&
       p3.value.kind === 'bin_op' && p3.value.op === '===' &&
       p3.value.left === p1.name && p3.value.right === p2.name &&
       p4.value.kind === 'assert' && p4.value.value === p3.name
     ) {
+      sighashFlag = Number(p2.value.value as bigint);
       cursor += 5;
     }
   }
@@ -211,7 +226,7 @@ function stripStatefulWrapping(
   // reachable from that assert and chop everything from there onwards.
   if (body.length < cursor + 2) {
     // No trailing assert — method's user body has no continuation.
-    return { ok: true, user: body.slice(cursor) };
+    return { ok: true, user: body.slice(cursor), sighashFlag, hasContinuation: false };
   }
 
   const lastIdx = body.length - 1;
@@ -220,7 +235,7 @@ function stripStatefulWrapping(
     // No trailing assert — user body ends with something else. That's
     // valid for some shapes (e.g. methods that only have asserts inside
     // an if). For now we don't strip a continuation in this case.
-    return { ok: true, user: body.slice(cursor) };
+    return { ok: true, user: body.slice(cursor), sighashFlag, hasContinuation: false };
   }
 
   // Identify whether the trailing assert is the continuation-equality
@@ -230,7 +245,7 @@ function stripStatefulWrapping(
   const continuationStart = findContinuationStart(body, preludeEnd, lastIdx);
   if (continuationStart === null) {
     // Trailing assert is user code, not a continuation. Return body as-is.
-    return { ok: true, user: body.slice(cursor) };
+    return { ok: true, user: body.slice(cursor), sighashFlag, hasContinuation: false };
   }
 
   // F-024 (R14) value-conservation check. Auto-injected immediately before
@@ -264,8 +279,97 @@ function stripStatefulWrapping(
     }
   }
 
-  return { ok: true, user: body.slice(cursor, userEnd) };
+  return { ok: true, user: body.slice(cursor, userEnd), sighashFlag, hasContinuation: true };
 }
+
+/**
+ * D25: the hidden state field a "bind"-class contract (an auto-continuation
+ * method alongside addOutput methods) carries. Mirrors runar-compiler's
+ * TWIN_BINDING_FIELD.
+ */
+const TWIN_BINDING_FIELD = '_spentOutpointHash';
+
+/**
+ * D25: remove the compiler-injected spent-outpoint binding from a method
+ * body of a bind-class contract. The compiler writes
+ *
+ *     load_param txPreimage → call extractOutpoint → call sha256
+ *
+ * and consumes it either as `update_prop _spentOutpointHash` (at the top of
+ * the auto-continuation, before get_state_script) or as the LAST state value
+ * of every `add_output`. Both are re-injected on recompile, so they are not
+ * user code: drop the update_prop / trailing state value and the three
+ * feeding bindings (only when nothing else reads them). Recurses into `if`
+ * branches, where an addOutput may sit.
+ */
+function stripOutpointBinding(body: readonly ANFBinding[]): ANFBinding[] {
+  const all = new Map<string, ANFBinding>();
+  const collect = (bs: readonly ANFBinding[]): void => {
+    for (const b of bs) {
+      all.set(b.name, b);
+      if (b.value.kind === 'if') { collect(b.value.then); collect(b.value.else); }
+    }
+  };
+  collect(body);
+  /** The 3 binding names of sha256(extractOutpoint(load_param txPreimage)) rooted at `ref`, or null. */
+  const chainOf = (ref: string): string[] | null => {
+    const h = all.get(ref);
+    if (!h || h.value.kind !== 'call' || h.value.func !== 'sha256' || h.value.args.length !== 1) return null;
+    const o = all.get(h.value.args[0]!);
+    if (!o || o.value.kind !== 'call' || o.value.func !== 'extractOutpoint' || o.value.args.length !== 1) return null;
+    const p = all.get(o.value.args[0]!);
+    if (!p || p.value.kind !== 'load_param' || p.value.name !== 'txPreimage') return null;
+    return [p.name, o.name, h.name];
+  };
+  const drop = new Set<string>();
+  const rewrite = new Map<string, ANFValue>();
+  for (const b of all.values()) {
+    const v = b.value;
+    if (v.kind === 'update_prop' && v.name === TWIN_BINDING_FIELD) {
+      const c = chainOf(v.value);
+      if (c) { drop.add(b.name); c.forEach((n) => drop.add(n)); }
+    } else if (v.kind === 'add_output' && v.stateValues.length > 0) {
+      const c = chainOf(v.stateValues[v.stateValues.length - 1]!);
+      if (c) {
+        rewrite.set(b.name, { ...v, stateValues: v.stateValues.slice(0, -1) });
+        c.forEach((n) => drop.add(n));
+      }
+    }
+  }
+  if (drop.size === 0 && rewrite.size === 0) return body.slice();
+  // Keep a feeding binding that something other than the binding reads.
+  const readers = new Map<string, number>();
+  for (const b of all.values()) {
+    if (drop.has(b.name)) continue;
+    const v = rewrite.get(b.name) ?? b.value;
+    for (const r of refsOf(v)) readers.set(r, (readers.get(r) ?? 0) + 1);
+  }
+  for (const n of [...drop]) if ((readers.get(n) ?? 0) > 0) drop.delete(n);
+  const apply = (bs: readonly ANFBinding[]): ANFBinding[] =>
+    bs.filter((b) => !drop.has(b.name)).map((b) => {
+      const r = rewrite.get(b.name);
+      if (r) return { ...b, value: r };
+      if (b.value.kind === 'if') return { ...b, value: { ...b.value, then: apply(b.value.then), else: apply(b.value.else) } };
+      return b;
+    });
+  return apply(body);
+}
+
+/** Does any binding (recursively) emit an addOutput / addRawOutput / addDataOutput? */
+function emitsOutputs(body: readonly ANFBinding[]): boolean {
+  return body.some((b) =>
+    b.value.kind === 'add_output' || b.value.kind === 'add_raw_output' || b.value.kind === 'add_data_output' ||
+    (b.value.kind === 'if' && (emitsOutputs(b.value.then) || emitsOutputs(b.value.else))));
+}
+
+const SIGHASH_ANNOTATION: Record<number, string> = {
+  0x41: 'ALL|FORKID',
+  0x42: 'NONE|FORKID',
+  0x43: 'SINGLE|FORKID',
+  0xc1: 'ALL|ANYONECANPAY|FORKID',
+  0xc2: 'NONE|ANYONECANPAY|FORKID',
+  0xc3: 'SINGLE|ANYONECANPAY|FORKID',
+};
 
 /**
  * Detect the start index of the trailing continuation block. Returns the
@@ -496,9 +600,17 @@ export function liftStatefulFromArtifact(
 ): StatefulLiftOutcome {
   const className = opts.className ?? anf.contractName;
 
-  const properties = buildProperties(anf.properties, opts.stateFields);
+  // D25: a bind-class contract carries the hidden `_spentOutpointHash` state
+  // field (last property). The compiler re-adds it and its writes on
+  // recompile, and the name is reserved in source, so it is not rendered.
+  const bindsOutpoint = anf.properties.some((p) => p.name === TWIN_BINDING_FIELD);
+  const properties = buildProperties(
+    anf.properties.filter((p) => p.name !== TWIN_BINDING_FIELD),
+    opts.stateFields,
+  );
 
   const newMethods: ANFMethod[] = [];
+  const flags: { name: string; flag: number; hasContinuation: boolean }[] = [];
   for (const m of anf.methods) {
     if (m.name === 'constructor') {
       // Constructor body — keep as-is (it's lowered without the stateful
@@ -516,10 +628,11 @@ export function liftStatefulFromArtifact(
       continue;
     }
 
-    const stripped = stripStatefulWrapping(m.body);
+    const stripped = stripStatefulWrapping(bindsOutpoint ? stripOutpointBinding(m.body) : m.body);
     if (!stripped.ok) {
       return { ok: false, reason: `method '${m.name}': ${stripped.reason}` };
     }
+    flags.push({ name: m.name, flag: stripped.sighashFlag, hasContinuation: stripped.hasContinuation });
 
     // Filter implicit params from the surface param list.
     const userParams: ANFParam[] = m.params.filter(p => !isImplicitParam(p.name));
@@ -538,11 +651,28 @@ export function liftStatefulFromArtifact(
     methods: newMethods,
   };
 
+  // D25 'single' class: no hidden field, no method emits outputs, and some
+  // public method has the auto-continuation. Its continuation methods default
+  // to SINGLE|FORKID (0x43) and an `ALL|ANYONECANPAY|FORKID` annotation is
+  // what yields 0xC3; terminal methods and every other class default to 0x41.
+  const singleClass = !bindsOutpoint && flags.some((f) => f.hasContinuation) &&
+    !anf.methods.some((m) => emitsOutputs(m.body));
+  const sighashAnnotations: Record<string, string> = {};
+  for (const f of flags) {
+    const dflt = singleClass && f.hasContinuation ? 0x43 : 0x41;
+    if (f.flag === dflt) continue;
+    const ann = singleClass && f.hasContinuation && f.flag === 0xc3
+      ? 'ALL|ANYONECANPAY|FORKID'
+      : SIGHASH_ANNOTATION[f.flag];
+    if (!ann) return { ok: false, reason: `method '${f.name}': unrecognised sighash pin 0x${f.flag.toString(16)}` };
+    sighashAnnotations[f.name] = ann;
+  }
+
   const imports = new Set<string>();
   imports.add('StatefulSmartContract');
   collectImports(program, imports);
 
-  return { ok: true, program, imports: Array.from(imports) };
+  return { ok: true, program, imports: Array.from(imports), sighashAnnotations };
 }
 
 /** Walk the ANF and add to `imports` any surface types we'll reference. */
@@ -655,7 +785,9 @@ export function renderStatefulSource(
     if (!m.isPublic) continue; // Private methods that survived stripping are out of scope.
     const params = m.params.map(p => `${p.name}: ${p.type}`).join(', ');
     const body = renderMethodBody(m.body);
-    methodBlocks.push(`  public ${m.name}(${params}): void {\n${body}\n  }`);
+    const ann = result.sighashAnnotations?.[m.name];
+    const doc = ann ? `  /** @sighash ${ann} */\n` : '';
+    methodBlocks.push(`${doc}  public ${m.name}(${params}): void {\n${body}\n  }`);
   }
 
   const blocks = [propDecls, ctorBlock, ...methodBlocks].filter(s => s.length > 0).join('\n\n');
@@ -697,7 +829,10 @@ function renderBindings(
     const v = b.value;
     switch (v.kind) {
       case 'load_param': {
-        exprs.set(b.name, v.name);
+        // The implicit preimage of a StatefulSmartContract is `this.txPreimage`
+        // in source; a bare `txPreimage` is an undeclared name the extractors
+        // (extractAmount, ...) refuse as an unchecked preimage.
+        exprs.set(b.name, v.name === 'txPreimage' ? 'this.txPreimage' : v.name);
         break;
       }
       case 'load_prop': {

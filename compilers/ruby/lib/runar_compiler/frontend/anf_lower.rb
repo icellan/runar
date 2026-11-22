@@ -43,6 +43,12 @@ module RunarCompiler
       # node the checker could not type keeps no annotation and is refused
       # below.
       Frontend.type_check(contract) if _has_untyped_operator(contract)
+      # D25: the same for the twin-input binding. A caller that assembles its
+      # own pipeline and skips ContinuationBinding.inject would otherwise
+      # lower a mixed contract with no _spentOutpointHash, leaving its
+      # continuations unbound. Idempotent: a contract that already carries the
+      # field is returned unchanged, so the compiler's own path is unaffected.
+      contract = ContinuationBinding.inject(contract)
       properties = _lower_properties(contract)
       methods = _lower_methods(contract)
 
@@ -511,6 +517,14 @@ module RunarCompiler
               # Single-output continuation: build raw output bytes, then
               # splice in any declared data outputs, then concat with
               # change, then hash.
+              # D25: a "bind" contract first records the spent outpoint in
+              # its hidden last state field, so this continuation differs
+              # from every other input's and no two inputs can share one
+              # output list.
+              if method_ctx.binds_outpoint?
+                binding_ref = _emit_outpoint_binding(method_ctx)
+                method_ctx.emit(_make_update_prop(ContinuationBinding::TWIN_BINDING_FIELD, binding_ref))
+              end
               state_script_ref = method_ctx.emit(IR::ANFValue.new(kind: "get_state_script"))
               preimage_ref2 = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
               new_amount_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_newAmount" })
@@ -594,6 +608,16 @@ module RunarCompiler
       result
     end
     private_class_method :_lower_methods
+
+    # D25: +sha256(extractOutpoint(txPreimage))+, the value a "bind" contract
+    # stores in its hidden last state field in every continuation it makes
+    # (mirrors +emitOutpointBinding+ in stateful-scaffold.ts). Returns the
+    # hash's binding name.
+    def self._emit_outpoint_binding(ctx)
+      preimage_ref = ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
+      outpoint_ref = ctx.emit(_make_call("extractOutpoint", [preimage_ref]))
+      ctx.emit(_make_call("sha256", [outpoint_ref]))
+    end
 
     # True when a property carries the +/** @embedAlways */+ directive (#109).
     # PropertyNode gained the +embed_always+ field with the directive; guard
@@ -999,6 +1023,11 @@ module RunarCompiler
       # @return [String]
       def get_local_alias(local_name)
         @local_aliases.fetch(local_name, "")
+      end
+
+      # D25: the contract carries the hidden spent-outpoint field ("bind" class).
+      def binds_outpoint?
+        @contract.properties.any? { |p| p.name == ContinuationBinding::TWIN_BINDING_FIELD }
       end
 
       # Track an add_output reference.
@@ -2031,6 +2060,8 @@ module RunarCompiler
           arg_refs = _lower_args(flattened)
           satoshis = arg_refs[0]
           state_values = arg_refs[1..]
+          # D25: a "bind" contract's hidden last state field is the spent outpoint.
+          state_values << Frontend._emit_outpoint_binding(self) if binds_outpoint?
           ref = emit(IR::ANFValue.new(kind: "add_output").tap do |v|
             v.satoshis = satoshis
             v.state_values = state_values
@@ -2077,6 +2108,8 @@ module RunarCompiler
           arg_refs = _lower_args(flattened)
           satoshis = arg_refs[0]
           state_values = arg_refs[1..]
+          # D25: a "bind" contract's hidden last state field is the spent outpoint.
+          state_values << Frontend._emit_outpoint_binding(self) if binds_outpoint?
           ref = emit(IR::ANFValue.new(kind: "add_output").tap do |v|
             v.satoshis = satoshis
             v.state_values = state_values

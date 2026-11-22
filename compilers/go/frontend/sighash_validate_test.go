@@ -105,8 +105,11 @@ func TestSighashValidate_NONE_RejectsContinuation(t *testing.T) {
 
 // ---- SINGLE ---------------------------------------------------------------
 
-// F1: the mutate-only auto-continuation is value-skimmable under SINGLE.
-func TestSighashValidate_SINGLE_RejectsMutateOnlyContinuation(t *testing.T) {
+// D25: the #123 (F1) refusal predated the F-024 `_newAmount` floor and
+// N-038; SINGLE hashes the whole same-index output, value included, so a
+// mutate-only SINGLE continuation is sound (and the default for a contract
+// whose continuation methods are all mutate-only).
+func TestSighashValidate_SINGLE_AcceptsMutateOnlyContinuation(t *testing.T) {
 	src := `
     class Counter extends StatefulSmartContract {
       n: bigint;
@@ -114,10 +117,8 @@ func TestSighashValidate_SINGLE_RejectsMutateOnlyContinuation(t *testing.T) {
       /** @sighash SINGLE|FORKID */
       public bump(): void { this.n = this.n + 1n; }
     }`
-	errs := sighashErrors(t, src)
-	if !anyContains(errs, "mutate-only SINGLE continuation is unsound") &&
-		!anyContains(errs, "sized by the caller-chosen _newAmount") {
-		t.Fatalf("want mutate-only SINGLE reject, got %v", errs)
+	if errs := sighashErrors(t, src); len(errs) != 0 {
+		t.Fatalf("a mutate-only SINGLE continuation must be accepted, got %v", errs)
 	}
 }
 

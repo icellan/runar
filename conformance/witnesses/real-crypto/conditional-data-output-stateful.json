@@ -16,7 +16,10 @@
       "expect": "accept",
       "note": "flag true: emits data output",
       "expectedState": {
-        "amount": "1n"
+        "amount": "1n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -28,7 +31,10 @@
       "expect": "accept",
       "note": "flag false: no data output",
       "expectedState": {
-        "amount": "1n"
+        "amount": "1n",
+        "_spentOutpointHash": {
+          "$spentOutpointHash": "deploy:0"
+        }
       }
     },
     {
@@ -44,6 +50,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "4ab169e7a6157135b54278e900e6f1deb2930bd6c20e89a24547bd329a0d12aa"
+    "expected-script.hex": "5db5ea4fda385a3c8d41e7319199a855df4cd2c3a2bce6fff6e4a2077c9f3669",
+    "expected-ir.json": "1f3a8eae1e948ebc99b337ce3bd6eca46f41566db34cd64bdfb844d0aff412b0"
   }
 }

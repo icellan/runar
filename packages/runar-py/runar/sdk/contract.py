@@ -262,6 +262,10 @@ def _compute_bip143_sighash(preimage_hex: str) -> str:
     return hashlib.sha256(hashlib.sha256(preimage_bytes).digest()).hexdigest()
 
 
+# D25 hidden state field (mirrors the compiler's TWIN_BINDING_FIELD).
+_TWIN_BINDING_FIELD = '_spentOutpointHash'
+
+
 class RunarContract:
     """Runtime wrapper for a compiled Runar contract.
 
@@ -923,6 +927,22 @@ class RunarContract:
                 "resulting tx would be invalid"
             )
 
+        # D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+        # continuation methods are all mutate-only) commits ONE output per
+        # input, at that input's index. A call that spends extra contract
+        # inputs into the one continuation (a many-to-one merge) is exactly the
+        # twin-input shape SINGLE refuses: every extra input would need its own
+        # continuation at its own index, so the tx cannot verify. Fail closed
+        # before building it.
+        if extra_contract_utxos and (self._method_sig_hash_type(method_name) & 0x1F) == 0x03:
+            raise ValueError(
+                f"RunarContract.call({method_name}): additionalContractInputs cannot be spent into one "
+                "continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation "
+                "methods are all mutate-only, D25): SINGLE commits each input to its own output at its own "
+                "index. Merge with an addOutput method instead (see FungibleToken.merge), or build each "
+                "input's continuation with assembleMultiContractCall"
+            )
+
         # Normalize outputs
         has_multi_output = opts.outputs is not None and len(opts.outputs) > 0
 
@@ -1056,6 +1076,27 @@ class RunarContract:
             if data_outs and not resolved_data_outputs:
                 resolved_data_outputs = data_outs
 
+        # D25: a bind-class contract's every continuation carries the hidden
+        # `_spentOutpointHash` = sha256(outpoint this input spends), which the
+        # covenant writes itself. A caller-supplied state (CallOptions.outputs /
+        # new_state) cannot be expected to know it -- left out, serialize_state
+        # refuses; copied from get_state(), it is the PREVIOUS outpoint's hash
+        # and the covenant rejects the spend. No other value can ever validate,
+        # so it is ALWAYS overwritten here, whatever the caller passed.
+        outpoint_binding = None
+        if is_stateful and self.artifact.state_fields and max(
+            self.artifact.state_fields, key=lambda f: f.index,
+        ).name == _TWIN_BINDING_FIELD:
+            outpoint_binding = hashlib.sha256(
+                bytes.fromhex(contract_utxo.txid)[::-1]
+                + int(contract_utxo.output_index).to_bytes(4, 'little')
+            ).hexdigest()
+
+        def _with_outpoint_binding(state: dict) -> dict:
+            if outpoint_binding is None:
+                return state
+            return {**state, _TWIN_BINDING_FIELD: outpoint_binding}
+
         if is_stateful and has_multi_output:
             # Multi-output: build a locking script for each output
             # N-075: _get_code_part_hex() carries the inscription envelope, as the
@@ -1071,7 +1112,7 @@ class RunarContract:
                     sats = out_spec.satoshis
                 else:
                     raise ValueError(f"Invalid output spec: {out_spec}")
-                state_hex = serialize_state(self.artifact.state_fields, state_dict)
+                state_hex = serialize_state(self.artifact.state_fields, _with_outpoint_binding(state_dict))
                 contract_outputs.append({
                     'script': code_script + '6a' + state_hex,
                     'satoshis': sats,
@@ -1108,7 +1149,7 @@ class RunarContract:
             else:
                 new_satoshis = self._current_utxo.satoshis
             if opts.new_state:
-                for k, v in opts.new_state.items():
+                for k, v in _with_outpoint_binding(opts.new_state).items():
                     self._state[k] = v
             elif method_has_continuation and anf_computed_state is not None:
                 self._state = {**self._state, **anf_computed_state}
@@ -1601,7 +1642,10 @@ class RunarContract:
 
         # Compute sighash from preimage (C19: the true BIP-143 digest external
         # signers must sign -- hash256(preimage), NOT sha256(preimage)).
-        sighash = _compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = self._user_sig_digest(
+            final_preimage, signed_tx, contract_utxo, code_sep_idx, method_sig_hash_type,
+        )
 
         return PreparedCall(
             sighash=sighash,
@@ -2184,7 +2228,10 @@ class RunarContract:
 
         # Compute sighash from preimage (C19: the true BIP-143 digest external
         # signers must sign -- hash256(preimage), NOT sha256(preimage)).
-        sighash = _compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = self._user_sig_digest(
+            final_preimage, term_tx, contract_utxo, term_code_sep_idx, term_sig_hash_type,
+        )
 
         return PreparedCall(
             sighash=sighash,
@@ -2427,6 +2474,31 @@ class RunarContract:
 
     def _get_public_methods(self):
         return [m for m in self.artifact.abi.methods if m.is_public]
+
+    def _user_sig_digest(
+        self,
+        covenant_preimage: str,
+        tx_hex: str,
+        utxo: Utxo,
+        code_sep_idx: int,
+        sig_hash_type: int,
+    ) -> str:
+        """D25: the digest an external signer signs for a user ``Sig``
+        argument (TS ``userSigDigest``). User signatures are ALL|FORKID (the
+        byte every signer appends), so when the method's covenant preimage is
+        built under another mode (SIGHASH_SINGLE is the default for a
+        mutate-only contract) the digest is recomputed over the same tx,
+        subscript and code separator under ALL|FORKID. The covenant's own
+        preimage (``PreparedCall.preimage``) is unchanged.
+        """
+        if not covenant_preimage:
+            return ''
+        if sig_hash_type == 0x41:
+            return _compute_bip143_sighash(covenant_preimage)
+        preimage = compute_op_push_tx_preimage(
+            tx_hex, 0, utxo.script, utxo.satoshis, code_sep_idx, 0x41,
+        )
+        return _compute_bip143_sighash(preimage)
 
     def _method_sig_hash_type(self, method_name: str) -> int:
         """Issue #123: resolve the BIP-143 sighash type for ``method_name`` from

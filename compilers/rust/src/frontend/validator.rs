@@ -55,6 +55,21 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     // pass emits both errors (unsound usages) and warnings (e.g. an explicit
     // single-output SINGLE covenant whose same-index value cannot be pinned
     // statically), so route each diagnostic to the matching bucket.
+    // D25: classify the contract's continuation binding and resolve the
+    // effective sighash of a mutate-only contract's continuation methods
+    // (SINGLE) BEFORE the field checks, so they and every later check see the
+    // effective mode. Pass 2 takes the AST by reference, so the resolution
+    // runs on a copy here; the source pipelines apply the same (idempotent)
+    // resolution to the contract they carry on (continuation_binding.rs).
+    let mut resolved = contract.clone();
+    for d in super::continuation_binding::resolve_continuation_binding(&mut resolved) {
+        match d.severity {
+            super::diagnostic::Severity::Warning => warnings.push(d),
+            _ => errors.push(d),
+        }
+    }
+    let contract = &resolved;
+
     for d in super::sighash_validate::validate_sighash_usage(contract) {
         match d.severity {
             super::diagnostic::Severity::Warning => warnings.push(d),

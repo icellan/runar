@@ -11,7 +11,8 @@
 //!   fixed-array expand  <name>__<digits>, __idx_<digits>, __val_<digits>
 //!   stack lowering      _codePart, __param_<name>, __shadowed_<n>_<name>, _pub_<digits>
 //!   auto-injected       _changePKH, _changeAmount, _newAmount, _serialisedOutputs,
-//!                       _prevOutScript_<digits>, txPreimage (StatefulSmartContract only)
+//!                       _prevOutScript_<digits>, _spentOutpointHash (D25's hidden
+//!                       state field), txPreimage (StatefulSmartContract only)
 //!
 //! Not reserved: `<name>@<n>` (no surface has `@` in identifiers), EC-optimizer
 //! names (F-086 allocates them collision-free), codegen-private tracker names.
@@ -52,6 +53,7 @@ fn is_source_only_reserved(name: &str) -> bool {
         || prefix_digits(name, "__val_")
         || matches!(name, "_changePKH" | "_changeAmount" | "_newAmount" | "_serialisedOutputs")
         || prefix_digits(name, "_prevOutScript_")
+        || name == "_spentOutpointHash"
 }
 
 /// True if a SOURCE program may not declare `name` (after name mapping).

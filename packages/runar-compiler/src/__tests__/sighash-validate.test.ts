@@ -105,7 +105,11 @@ describe('#123 field-usage validation — SINGLE', () => {
   // themselves. The covenant + OP_PUSH_TX binding still validate (they only see
   // the same-index continuation), so the protected funds are stolen. Conversely
   // an honest change>0 leaves the UTXO unspendable. The mode is unsound — reject.
-  it('REJECTS a mutate-only auto-continuation under SINGLE (value-skimmable)', () => {
+  // D25: the #123 (F1) refusal predated the F-024 `_newAmount` floor and
+  // N-038; SINGLE hashes the whole same-index output, value included, so a
+  // mutate-only SINGLE continuation is sound (and the default for a contract
+  // whose continuation methods are all mutate-only).
+  it('ACCEPTS a mutate-only auto-continuation under SINGLE (the F-024 floor pins its value)', () => {
     const src = `
       class Counter extends StatefulSmartContract {
         n: bigint;
@@ -113,10 +117,8 @@ describe('#123 field-usage validation — SINGLE', () => {
         /** @sighash SINGLE|FORKID */
         public bump(): void { this.n = this.n + 1n; }
       }`;
-    expect(errorsOf(src).some((e) =>
-      /mutate-only SINGLE continuation is unsound|sized by the caller-chosen _newAmount/.test(e),
-    )).toBe(true);
-    expect(compiles(src)).toBe(false);
+    expect(errorsOf(src)).toEqual([]);
+    expect(compiles(src)).toBe(true);
   });
 
   // F1 (P1): the legitimate pairwise input↔output covenant — exactly one

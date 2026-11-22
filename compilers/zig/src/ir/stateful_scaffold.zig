@@ -52,7 +52,7 @@ pub fn hasContinuation(alloc: std.mem.Allocator, methods: []const types.ANFMetho
 
 const Ref = union(enum) { local: usize, outside: []const u8 };
 
-const Kind = enum { load_param, load_const_int, load_const_str, check_preimage, assert, call, bin_op, deserialize_state, get_state_script, @"if" };
+const Kind = enum { load_param, load_const_int, load_const_str, check_preimage, assert, call, bin_op, deserialize_state, get_state_script, update_prop, @"if" };
 
 /// One expected scaffolding binding. Refs to other expected bindings are
 /// indices into the builder's arena; refs to the user's output bindings are
@@ -123,7 +123,10 @@ fn prologue(b: *Builder, seq: *std.ArrayListUnmanaged(usize), sighash_mode: i32,
     }
 }
 
-fn continuation(b: *Builder, seq: *std.ArrayListUnmanaged(usize), needs_change: bool, includes_change: bool, state_out: []const *const types.ANFBinding, data_out: []const *const types.ANFBinding) Error!void {
+/// D25: the hidden state field of a 'bind' contract (passes/continuation_binding.zig).
+pub const TWIN_BINDING_FIELD = "_spentOutpointHash";
+
+fn continuation(b: *Builder, seq: *std.ArrayListUnmanaged(usize), needs_change: bool, includes_change: bool, state_out: []const *const types.ANFBinding, data_out: []const *const types.ANFBinding, binds_outpoint: bool) Error!void {
     if (!needs_change) return;
     if (state_out.len == 0) {
         const p = try b.emit(seq, param("txPreimage"));
@@ -149,6 +152,14 @@ fn continuation(b: *Builder, seq: *std.ArrayListUnmanaged(usize), needs_change: 
         acc = .{ .outside = state_out[0].name };
         for (state_out[1..]) |o| acc = try b.emit(seq, call2("cat", acc, .{ .outside = o.name }));
     } else {
+        // D25: a 'bind' contract's auto-continuation records the spent outpoint
+        // (emitOutpointBinding + update_prop in stateful-scaffold.ts).
+        if (binds_outpoint) {
+            const op_pre = try b.emit(seq, param("txPreimage"));
+            const outpoint = try b.emit(seq, call1("extractOutpoint", op_pre));
+            const h = try b.emit(seq, call1("sha256", outpoint));
+            _ = try b.emit(seq, .{ .kind = .update_prop, .text = TWIN_BINDING_FIELD, .refs = refs1(h), .nrefs = 1 });
+        }
         const script = try b.emit(seq, .{ .kind = .get_state_script });
         const p = try b.emit(seq, param("txPreimage"));
         const na = try b.emit(seq, param("_newAmount"));
@@ -253,6 +264,8 @@ const Matcher = struct {
                 (if (e.bytes_result) hasResultType(act.value.bin_op.result_type) and std.mem.eql(u8, act.value.bin_op.result_type.?, "bytes") else !hasResultType(act.value.bin_op.result_type)),
             .deserialize_state => act.value == .deserialize_state and self.ref(e.refs[0], act.value.deserialize_state.preimage),
             .get_state_script => act.value == .get_state_script,
+            .update_prop => act.value == .update_prop and std.mem.eql(u8, act.value.update_prop.name, e.text) and
+                self.ref(e.refs[0], act.value.update_prop.value),
             .@"if" => blk: {
                 if (act.value != .@"if") break :blk false;
                 const v = act.value.@"if";
@@ -288,6 +301,7 @@ fn describe(e: Exp) []const u8 {
         .assert => "assert",
         .deserialize_state => "deserialize_state",
         .get_state_script => "get_state_script",
+        .update_prop => "update_prop",
         .@"if" => "if",
     };
 }
@@ -346,8 +360,10 @@ fn mismatch(method: []const u8, section: []const u8, index: usize, e: Exp) Error
 
 pub fn check(alloc: std.mem.Allocator, properties: []const types.ANFProperty, methods: []const types.ANFMethod) Error!void {
     var has_mutable = false;
+    var binds_outpoint = false;
     for (properties) |p| {
         if (!p.readonly) has_mutable = true;
+        if (std.mem.eql(u8, p.name, TWIN_BINDING_FIELD)) binds_outpoint = true;
     }
     for (methods) |m| {
         if (!m.is_public or std.mem.eql(u8, m.name, "constructor")) continue;
@@ -440,7 +456,7 @@ pub fn check(alloc: std.mem.Allocator, properties: []const types.ANFProperty, me
                 else => {},
             }
         }
-        try continuation(&builder, &tail, needs_change, includes_change, state_out.items, data_out.items);
+        try continuation(&builder, &tail, needs_change, includes_change, state_out.items, data_out.items, binds_outpoint);
 
         const names = try alloc.alloc(?[]const u8, builder.arena.items.len);
         defer alloc.free(names);
@@ -483,4 +499,125 @@ pub fn check(alloc: std.mem.Allocator, properties: []const types.ANFProperty, me
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// D25: the --ir check of the contract-level continuation binding
+// ---------------------------------------------------------------------------
+
+pub const BindingError = error{ ContinuationUnbound, OutOfMemory };
+
+const UNBOUND_PREFIX = "IR validation: StatefulSmartContract continuation is not bound to its input (twin-input theft): ";
+
+fn findValue(bindings: []const types.ANFBinding, name: []const u8) ?*const types.ANFValue {
+    for (bindings) |*b| {
+        if (std.mem.eql(u8, b.name, name)) return &b.value;
+        switch (b.value) {
+            .@"if" => |v| {
+                if (findValue(v.then, name)) |x| return x;
+                if (findValue(v.@"else", name)) |x| return x;
+            },
+            .loop => |v| if (findValue(v.body, name)) |x| return x,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// The single argument of `r` when `r` names a `call func(x)`, else null.
+fn callArg(body: []const types.ANFBinding, r: ?[]const u8, func: []const u8) ?[]const u8 {
+    const name = r orelse return null;
+    const v = findValue(body, name) orelse return null;
+    if (v.* != .call) return null;
+    const c = v.call;
+    if (!std.mem.eql(u8, c.func, func) or c.args.len != 1) return null;
+    return c.args[0];
+}
+
+fn addOutputsBound(body: []const types.ANFBinding, bindings: []const types.ANFBinding) bool {
+    for (bindings) |b| {
+        switch (b.value) {
+            .add_output => |ao| {
+                const last: ?[]const u8 = if (ao.state_values.len > 0) ao.state_values[ao.state_values.len - 1] else null;
+                const pre = callArg(body, callArg(body, last, "sha256"), "extractOutpoint");
+                const v = if (pre) |p| findValue(body, p) else null;
+                const ok = if (v) |x| x.* == .load_param and std.mem.eql(u8, x.load_param.name, "txPreimage") else false;
+                if (!ok) return false;
+            },
+            .@"if" => |v| if (!addOutputsBound(body, v.then) or !addOutputsBound(body, v.@"else")) return false,
+            .loop => |v| if (!addOutputsBound(body, v.body)) return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
+fn isZeroHash(v: ?types.ConstValue) bool {
+    const cv = v orelse return false;
+    return switch (cv) {
+        .string => |s| std.mem.eql(u8, s, "00" ** 32),
+        else => false,
+    };
+}
+
+/// D25 (`assertIrContinuationBinding`): an `--ir` program must carry the
+/// binding the frontend would give it. Without the hidden `_spentOutpointHash`
+/// field, a program with an auto-continuation method must commit every
+/// continuation under a SIGHASH_SINGLE base, from auto-continuation methods
+/// only. With the field, it must be the LAST property, mutable, `Sha256`, zero
+/// at deploy, and every `add_output` must carry
+/// `sha256(extractOutpoint(txPreimage))` as its last state value (the
+/// auto-continuation's write is checked by `check` above). Message in the
+/// required_fields diagnostic channel. Run for StatefulSmartContract programs
+/// only, after every other IR rule.
+pub fn checkContinuationBinding(alloc: std.mem.Allocator, properties: []const types.ANFProperty, methods: []const types.ANFMethod) BindingError!void {
+    var binds = false;
+    for (properties) |p| {
+        if (std.mem.eql(u8, p.name, TWIN_BINDING_FIELD)) binds = true;
+    }
+    if (binds) {
+        const field = properties[properties.len - 1];
+        if (!std.mem.eql(u8, field.name, TWIN_BINDING_FIELD) or field.readonly or
+            !std.mem.eql(u8, field.type_name, "Sha256") or !isZeroHash(field.initial_value))
+        {
+            required_fields.setDiag(UNBOUND_PREFIX ++ "'{s}' must be the last property, mutable, of type Sha256, with initial value 32 zero bytes", .{TWIN_BINDING_FIELD});
+            return error.ContinuationUnbound;
+        }
+        for (methods) |m| {
+            if (!addOutputsBound(m.body, m.body)) {
+                required_fields.setDiag(UNBOUND_PREFIX ++ "method '{s}': every add_output must carry sha256(extractOutpoint(txPreimage)) as its last state value", .{m.name});
+                return error.ContinuationUnbound;
+            }
+        }
+        return;
+    }
+    var any_auto = false;
+    for (methods) |m| {
+        if (!m.is_public or std.mem.eql(u8, m.name, "constructor")) continue;
+        const fx = try methodEffects(alloc, methods, m);
+        if ((fx.mutates or fx.state or fx.data) and (fx.mutates or fx.data) and !fx.state) any_auto = true;
+    }
+    if (!any_auto) return;
+    for (methods) |m| {
+        if (!m.is_public or std.mem.eql(u8, m.name, "constructor")) continue;
+        const fx = try methodEffects(alloc, methods, m);
+        if (!(fx.mutates or fx.state or fx.data)) continue;
+        const needs_new_amount = (fx.mutates or fx.data) and !fx.state;
+        const single = ((m.sighash_type orelse sighash_default) & 0x1f) == 0x03;
+        if (!needs_new_amount or !single) {
+            required_fields.setDiag(UNBOUND_PREFIX ++ "method '{s}': a program with an auto-continuation method and no '{s}' field must commit every continuation under a SIGHASH_SINGLE base, from auto-continuation methods only", .{ m.name, TWIN_BINDING_FIELD });
+            return error.ContinuationUnbound;
+        }
+    }
+}
+
+fn methodEffects(alloc: std.mem.Allocator, methods: []const types.ANFMethod, m: types.ANFMethod) error{OutOfMemory}!Effects {
+    var fx: Effects = .{};
+    var visited: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer visited.deinit(alloc);
+    walkEffects(alloc, methods, m.body, &fx, &visited) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+    return fx;
 }

@@ -17,12 +17,14 @@ class TestBindingVariant < Minitest::Test
   # 376 bytes: s = z+1, no mod-n, no low-S (nVersion > 1 only).
   ALL_HEX = "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8b82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad"
 
+  # D25: an addOutput body keeps the method on ALL|FORKID (a mutate-only
+  # contract defaults to SINGLE, whose flag byte sits inside the blob).
   def counter(directive)
     "class C extends StatefulSmartContract {\n" \
       "  count: bigint;\n" \
       "  constructor(count: bigint) { super(count); this.count = count; }\n" \
       "  #{directive}\n" \
-      "  public bump() { this.count++; }\n" \
+      "  public bump() { this.addOutput(1n, this.count + 1n); }\n" \
       "}\n"
   end
 

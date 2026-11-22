@@ -22,6 +22,12 @@
  * substring and requires it to be present, so a tier that agreed on a
  * DIFFERENT-but-identical-looking blob would still fail here.
  *
+ * D25: the blob bakes the method's sighash flag, and a mutate-only stateful
+ * contract now commits under SINGLE|FORKID (0x43). The proof therefore runs
+ * over every (variant, flag) in PROVEN_BINDING_FLAGS x PROVEN_BINDING_VARIANTS
+ * (runar-testing/src/oracle/proven-binding-blobs.ts), and each probe below
+ * names the one blob from that set it must carry.
+ *
  * What this deliberately does NOT do is re-execute the sweep in six tiers.
  * Three of them ship no Script VM at all (CLAUDE.md: Zig, Ruby and Java have no
  * canonical upstream interpreter), so that is not available; the byte-identity
@@ -31,7 +37,14 @@ import { describe, it, expect } from 'vitest';
 import {
   CHECK_PREIMAGE_BINDING_HEX,
   CHECK_PREIMAGE_BINDING_ALL_HEX,
+  checkPreimageBindingBytes,
 } from '../../packages/runar-compiler/src/index.js';
+import {
+  PROVEN_BINDING_FLAGS,
+  PROVEN_BINDING_VARIANTS,
+  type ProvenBindingFlag,
+  type ProvenBindingVariant,
+} from '../../packages/runar-testing/src/oracle/proven-binding-blobs.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -290,7 +303,24 @@ function verdict(tier: Tier, src: string): Verdict {
 }
 
 
-const PROBE = 'StatefulBinding.runar.ts';
+/**
+ * D25: the probes and the exact blob each must carry. A mutate-only stateful
+ * contract commits under SIGHASH_SINGLE|FORKID, so its blob bakes flag 0x43;
+ * an explicit-addOutput contract keeps the default 0x41. Every expected blob is
+ * drawn from PROVEN_BINDING_FLAGS x PROVEN_BINDING_VARIANTS — the exact set
+ * oppushtx-binding.test.ts executes the genuine / decoupled / zeroed /
+ * wrong-scope / forged-hashOutputs proof over — so a tier that emits a blob
+ * outside it fails here instead of being argued safe by resemblance.
+ */
+const PROBES: { file: string; flag: ProvenBindingFlag; variant: ProvenBindingVariant }[] = [
+  { file: 'StatefulBinding.runar.ts', flag: 0x43, variant: 'lowS' },
+  { file: 'StatefulBindingAll.runar.ts', flag: 0x43, variant: 'all' },
+  { file: 'StatefulBindingExplicit.runar.ts', flag: 0x41, variant: 'lowS' },
+];
+const blobHex = (flag: number, variant: ProvenBindingVariant) =>
+  Buffer.from(checkPreimageBindingBytes(flag, variant)).toString('hex');
+const PROVEN_BLOBS = PROVEN_BINDING_VARIANTS.flatMap((v) =>
+  PROVEN_BINDING_FLAGS.map((f) => ({ flag: f, variant: v, hex: blobHex(f, v) })));
 const available = TIERS.filter((t) => t.cmd !== null);
 
 describe('R-105: every tier emits the exact preimage-binding blob that was exploit-tested', () => {
@@ -315,52 +345,44 @@ describe('R-105: every tier emits the exact preimage-binding blob that was explo
         'oppushtx-binding.test.ts exploit-tested',
     ).toBe(422);
     expect(/^[0-9a-f]+$/.test(CHECK_PREIMAGE_BINDING_HEX)).toBe(true);
+    expect(blobHex(0x41, 'lowS')).toBe(CHECK_PREIMAGE_BINDING_HEX);
+    expect(blobHex(0x41, 'all')).toBe(CHECK_PREIMAGE_BINDING_ALL_HEX);
   });
 
-  for (const tier of available) {
-    it(`${tier.id} emits the blob verbatim`, () => {
-      const v = verdict(tier, join(__dirname, PROBE));
-      expect(v.ok, v.ok ? '' : `${tier.id} refused the probe contract:\n${v.diag.slice(0, 600)}`).toBe(true);
-
-      const hex = (v as { ok: true; hex: string }).hex;
-      expect(
-        hex.includes(CHECK_PREIMAGE_BINDING_HEX),
-        `${tier.id}'s stateful contract does NOT contain the exact binding blob that ` +
-          `oppushtx-binding.test.ts proved rejects forged, decoupled and zeroed ` +
-          `preimages. Whatever this tier emits for checkPreimage, the BUG-100 exploit ` +
-          `proof does not cover it.\n` +
-          `  tier script: ${hex.length / 2} bytes\n` +
-          `  blob:        ${CHECK_PREIMAGE_BINDING_HEX.length / 2} bytes`,
-      ).toBe(true);
-    });
-  }
-
-  it('the blob appears exactly once — a second copy would mean two bindings to reason about', () => {
-    for (const tier of available) {
-      const v = verdict(tier, join(__dirname, PROBE));
-      expect(v.ok).toBe(true);
-      const hex = (v as { ok: true; hex: string }).hex;
-      const count = hex.split(CHECK_PREIMAGE_BINDING_HEX).length - 1;
-      expect(count, `${tier.id} emits the binding blob ${count} times`).toBe(1);
-    }
-  });
-});
-
-const PROBE_ALL = 'StatefulBindingAll.runar.ts';
-
-describe("R-105 (ports #170): every tier emits the @bindingVariant all blob verbatim", () => {
   it('the all blob is 376 bytes and differs from the default', () => {
     expect(CHECK_PREIMAGE_BINDING_ALL_HEX.length / 2).toBe(376);
     expect(CHECK_PREIMAGE_BINDING_ALL_HEX).not.toBe(CHECK_PREIMAGE_BINDING_HEX);
   });
 
-  for (const tier of available) {
-    it(`${tier.id} emits the all blob exactly once and not the default blob`, () => {
-      const v = verdict(tier, join(__dirname, PROBE_ALL));
-      expect(v.ok, v.ok ? '' : `${tier.id} refused the all probe:\n${v.diag.slice(0, 600)}`).toBe(true);
-      const hex = (v as { ok: true; hex: string }).hex;
-      expect(hex.split(CHECK_PREIMAGE_BINDING_ALL_HEX).length - 1, `${tier.id}: all-blob count`).toBe(1);
-      expect(hex.includes(CHECK_PREIMAGE_BINDING_HEX), `${tier.id} emitted the default blob`).toBe(false);
-    });
+  it('every probe expects a blob from the exploit-proven set, and the set has no duplicates', () => {
+    for (const p of PROBES) {
+      expect(PROVEN_BINDING_FLAGS as readonly number[], p.file).toContain(p.flag);
+      expect(PROVEN_BINDING_VARIANTS as readonly string[], p.file).toContain(p.variant);
+    }
+    expect(new Set(PROVEN_BLOBS.map((b) => b.hex)).size).toBe(PROVEN_BLOBS.length);
+  });
+
+  for (const probe of PROBES) {
+    const want = blobHex(probe.flag, probe.variant);
+    for (const tier of available) {
+      it(`${tier.id}: ${probe.file} carries the ${probe.variant}/0x${probe.flag.toString(16)} blob exactly once and no other binding`, () => {
+        const v = verdict(tier, join(__dirname, probe.file));
+        expect(v.ok, v.ok ? '' : `${tier.id} refused ${probe.file}:\n${v.diag.slice(0, 600)}`).toBe(true);
+        const hex = (v as { ok: true; hex: string }).hex;
+        const count = hex.split(want).length - 1;
+        expect(
+          count,
+          `${tier.id}'s ${probe.file} carries the exact ${probe.variant}/0x${probe.flag.toString(16)} ` +
+            `binding blob that oppushtx-binding.test.ts proved rejects forged, decoupled, zeroed and ` +
+            `wrong-scope preimages ${count} times (want exactly 1: zero means the BUG-100 proof does ` +
+            `not cover what this tier emits, two means two bindings to reason about).\n` +
+            `  tier script: ${hex.length / 2} bytes`,
+        ).toBe(1);
+        for (const other of PROVEN_BLOBS) {
+          if (other.hex === want) continue;
+          expect(hex.includes(other.hex), `${tier.id} also emitted the ${other.variant}/0x${other.flag.toString(16)} blob`).toBe(false);
+        }
+      });
+    }
   }
 });

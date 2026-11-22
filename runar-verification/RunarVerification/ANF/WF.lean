@@ -353,20 +353,34 @@ def propertyIsWF (p : ANFProperty) : Bool :=
 The full method-level WF check: build the initial scope from contract
 properties + method parameters, then recurse over the body.
 -/
-def methodIsWF (props : List ANFProperty) (m : ANFMethod) : Bool :=
+def methodIsWF (props : List ANFProperty) (m : ANFMethod) (implicitParams : List String := []) : Bool :=
   let propNames := props.map ANFProperty.name
   let readonlyProps := (props.filter (·.readonly)).map ANFProperty.name
   let env : ScopeEnv :=
-    { params := m.params.map (·.name)
+    { params := m.params.map (·.name) ++ implicitParams
       props := propNames
       defined := []
       readonlyProps := readonlyProps }
   bindingsAreWF env m.body && methodSSAUnique m
 
+/--
+Implicit parameters a method may reference without declaring them. A
+private helper of a StatefulSmartContract is inlined into its public
+callers, and `this.txPreimage` in it lowers to `load_param txPreimage`, the
+caller's implicit preimage (D25: an `addOutput` in a helper appends
+`sha256(extractOutpoint(txPreimage))`). The program is stateful exactly
+when some public method declares `txPreimage`; a public method and the
+constructor get nothing implicit.
+-/
+def privateImplicitParams (p : ANFProgram) (m : ANFMethod) : List String :=
+  if !m.isPublic && m.name != "constructor"
+      && p.methods.any (fun q => q.isPublic && q.params.any (·.name == "txPreimage"))
+  then ["txPreimage"] else []
+
 /-- Top-level well-formedness for an entire ANF program. -/
 def programIsWF (p : ANFProgram) : Bool :=
   p.properties.all propertyIsWF
-    && p.methods.all (fun m => methodIsWF p.properties m)
+    && p.methods.all (fun m => methodIsWF p.properties m (privateImplicitParams p m))
 
 /-! ## Predicate form
 
@@ -392,11 +406,11 @@ proof is by definitional unfolding — the recursive Boolean checker
 -/
 theorem wf_implies_def_before_use
     (p : ANFProgram) (h : ANF p) :
-    ∀ m, m ∈ p.methods → methodIsWF p.properties m = true := by
+    ∀ m, m ∈ p.methods → methodIsWF p.properties m (privateImplicitParams p m) = true := by
   intro m hm
   unfold ANF programIsWF at h
   -- Decompose the conjunction; the second conjunct says all methods are WF.
-  have hMethods : p.methods.all (fun m => methodIsWF p.properties m) = true :=
+  have hMethods : p.methods.all (fun m => methodIsWF p.properties m (privateImplicitParams p m)) = true :=
     (Bool.and_eq_true _ _).mp h |>.2
   exact (List.all_eq_true.mp hMethods) m hm
 

@@ -39,7 +39,8 @@ func (r *ValidationResult) WarningStrings() []string {
 }
 
 // Validate checks the Rúnar AST against language subset constraints.
-// It does NOT modify the AST; it only reports errors and warnings.
+// It does not modify the AST except D25's effective-sighash resolution
+// (ResolveContinuationBinding); otherwise it only reports errors and warnings.
 func Validate(contract *ContractNode) *ValidationResult {
 	ctx := &validationContext{
 		contract: contract,
@@ -69,6 +70,18 @@ func Validate(contract *ContractNode) *ValidationResult {
 	// pass emits both errors (unsound usages) and warnings (e.g. an explicit
 	// single-output SINGLE covenant whose same-index value cannot be pinned
 	// statically), so route each diagnostic to the matching bucket.
+	// D25: classify the contract's continuation binding and set the effective
+	// sighash of a mutate-only contract's continuation methods (SINGLE) BEFORE
+	// the field checks, so they and every later pass see the effective mode.
+	// The one place pass 2 writes the AST (method SighashType only; idempotent).
+	for _, d := range ResolveContinuationBinding(contract) {
+		if d.Severity == SeverityWarning {
+			ctx.warnings = append(ctx.warnings, d)
+		} else {
+			ctx.errors = append(ctx.errors, d)
+		}
+	}
+
 	for _, d := range ValidateSighashUsage(contract) {
 		if d.Severity == SeverityWarning {
 			ctx.warnings = append(ctx.warnings, d)

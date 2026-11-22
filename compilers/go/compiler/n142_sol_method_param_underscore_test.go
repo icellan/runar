@@ -149,14 +149,17 @@ func TestN142_SolSilentShapeWritesState(t *testing.T) {
 	if _, ok := ie.Operand.(frontend.PropertyAccessExpr); !ok {
 		t.Fatalf("operand = %T, want PropertyAccessExpr", ie.Operand)
 	}
-	const want = "6001736ca0dd06f9b6b772cf09952c98d042fdfb65dd4a2f46be69b9d5de3feb"
+	// D25 re-pin (TS dist output): the mutate-only contract now commits under
+	// SIGHASH_SINGLE|FORKID.
+	const want = "329bf55d7e561725b56f607ca0310a249fd1b6708f488cb26011d3a54888d47d"
 	if got := n142HexSha(t, n142Silent, "F200Silent.runar.sol"); got != want {
 		t.Fatalf("sha256(hex) = %s, want %s", got, want)
 	}
 }
 
 func TestN142_SolInterShapeCompilesToTSBytes(t *testing.T) {
-	const want = "18b2efad1bff573669e7aaa7cfa5f5bcd65a1cca23e78672d29f88789a584da9"
+	// D25 re-pin (TS dist output): SIGHASH_SINGLE|FORKID default.
+	const want = "ebeabdca9b7e3f2b465cd255dcb68534b6a613317e49226a8ed68ccdb5063ad6"
 	if got := n142HexSha(t, n142Inter, "F200Inter.runar.sol"); got != want {
 		t.Fatalf("sha256(hex) = %s, want %s", got, want)
 	}

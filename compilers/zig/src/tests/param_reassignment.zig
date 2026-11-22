@@ -53,8 +53,11 @@ const compiler_api = @import("../compiler_api.zig");
 /// sha256 of the TS reference hex for PR, fold OFF (1416 hex chars; 1402
 /// before the #180 / #213 `_changePKH` entry width gate, 1414 at N-360, before
 /// the C=1 binding blob of ports #170).
-const PR_TS_SHA256 = "3cc2f9bb26cc8e75f02c7b539eb2d3cc2b8f428a59d2229f88b3545af448741a";
-const PR_TS_LEN: usize = 1416;
+// D25 re-pin (was 3cc2f9bb..., 1416): PR's continuation methods are all
+// mutate-only, so they default to SIGHASH_SINGLE|FORKID and drop the change
+// segment; TS reference, same source, fold OFF.
+const PR_TS_SHA256 = "b852e3479547a5ddca06a4348167ade11210695690a740496e76fea21f323fe8";
+const PR_TS_LEN: usize = 1330;
 
 /// TS reference hex for SL, fold OFF.
 const SL_TS_HEX = "788b7852937c9d0000a07777";

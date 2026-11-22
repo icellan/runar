@@ -18,8 +18,9 @@ require 'runar/sdk'
 # taken from the spent UTXO. The on-chain verdict for the same flow is proven
 # by the TS/Go F-045 tests.
 #
-# Proves: each token-input signature covers the broadcast tx; #merge spends both
-# token outpoints exactly once into one continuation holding the summed supply.
+# Proves: each token-input signature covers the broadcast tx; #merge of this
+# mutate-only (D25: SIGHASH_SINGLE) token is refused before anything is
+# broadcast, since two inputs cannot share one SINGLE continuation.
 # Does NOT prove: script execution in this tier, node acceptance, or token
 # semantics beyond this fixture (its transfer does not reassign the holder).
 # rubocop:disable RSpec/DescribeClass, RSpec/MultipleExpectations, RSpec/ExampleLength
@@ -140,24 +141,22 @@ RSpec.describe 'F-045 TokenWallet signs the transaction it broadcasts' do
     end
   end
 
-  it 'merge: spends BOTH token outpoints exactly once, signed over the broadcast tx, supply summed' do
-    # Second case: token UTXOs larger than the funding coin -- funding
-    # selection must not also pick the second token UTXO as a P2PKH input.
+  # D25: this token's continuation method (merge) is mutate-only, so it commits
+  # under SIGHASH_SINGLE, one output per input. merge spends two token UTXOs
+  # into ONE continuation, which is exactly the twin-input shape SINGLE closes:
+  # the second input would need its own continuation at its own index. The SDK
+  # refuses before building or broadcasting the tx. (A merge needs an addOutput
+  # method; see FungibleToken.merge.)
+  it 'merge: a SIGHASH_SINGLE (mutate-only) token merge is refused before broadcast' do
     [[5_000, 200_000], [300_000, 50_000]].each do |token_sats, funding_sats|
-      provider, wallet, tokens, signer = setup_wallet(recording, holder_key, [100, 250],
-                                                      token_sats: token_sats, funding_sats: funding_sats)
-      wallet.merge
-      broadcast = provider.get_broadcasted_txs.last
-      spent = outpoints(broadcast)
-      tokens.each { |u| expect(spent.count("#{u.txid}:0")).to eq(1), spent.inspect }
-      expect(spent.uniq.length).to eq(spent.length)
-      expect_token_sigs_cover(signer, tokens, broadcast)
-      out0 = parse(broadcast)[:outputs][0]
-      merged = Runar::SDK::RunarContract.from_utxo(
-        artifact, Runar::SDK::Utxo.new(txid: '00' * 32, output_index: 0, satoshis: out0[:satoshis],
-                                       script: out0[:script].unpack1('H*'))
+      provider, wallet, = setup_wallet(recording, holder_key, [100, 250],
+                                       token_sats: token_sats, funding_sats: funding_sats)
+      expect(artifact.abi.methods.find { |m| m.name == 'merge' }.sig_hash_type).to eq(0x43)
+      before = provider.get_broadcasted_txs.length
+      expect { wallet.merge }.to raise_error(
+        ArgumentError, /additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method/
       )
-      expect(merged.get_state['supply']).to eq(350)
+      expect(provider.get_broadcasted_txs.length).to eq(before)
     end
   end
 
@@ -166,7 +165,8 @@ RSpec.describe 'F-045 TokenWallet signs the transaction it broadcasts' do
   # this tier's compiler. Same oracle as above (signature coverage; Ruby has no
   # ScriptVM -- the TS and Go N-042 tests script-execute it).
   # Proves: the shipped example compiles in the Ruby tier and TokenWallet's
-  # transfer / merge drive it, signing the tx they broadcast. Does NOT prove
+  # transfer drives it, signing the tx it broadcasts, and merge (mutate-only,
+  # so SIGHASH_SINGLE under D25) is refused up front. Does NOT prove
   # script execution here, or that the example is a sound token (see its header).
   context 'with the shipped WalletToken example (N-042)' do
     let(:artifact) do
@@ -188,19 +188,18 @@ RSpec.describe 'F-045 TokenWallet signs the transaction it broadcasts' do
       expect_token_sigs_cover(signer, tokens, broadcast)
     end
 
-    it 'merge drives the shipped example and sums the supply' do
-      provider, wallet, tokens, signer = setup_wallet(recording, holder_key, [100, 250])
-      wallet.merge
-      broadcast = provider.get_broadcasted_txs.last
-      spent = outpoints(broadcast)
-      tokens.each { |u| expect(spent.count("#{u.txid}:0")).to eq(1), spent.inspect }
-      expect_token_sigs_cover(signer, tokens, broadcast)
-      out0 = parse(broadcast)[:outputs][0]
-      merged = Runar::SDK::RunarContract.from_utxo(
-        artifact, Runar::SDK::Utxo.new(txid: '00' * 32, output_index: 0, satoshis: out0[:satoshis],
-                                       script: out0[:script].unpack1('H*'))
+    # D25: WalletToken's continuation method (merge) is mutate-only, so it
+    # commits under SIGHASH_SINGLE, one output per input; a two-input merge
+    # into one continuation is the twin-input shape SINGLE closes, refused up
+    # front.
+    it 'merge of the shipped example is refused before broadcast' do
+      provider, wallet, = setup_wallet(recording, holder_key, [100, 250])
+      expect(wallet.get_balance).to eq(350)
+      before = provider.get_broadcasted_txs.length
+      expect { wallet.merge }.to raise_error(
+        ArgumentError, /additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method/
       )
-      expect(merged.get_state['supply']).to eq(350)
+      expect(provider.get_broadcasted_txs.length).to eq(before)
     end
   end
 end

@@ -618,6 +618,27 @@ module Runar
         new_locking_script = ''
         new_satoshis = 0
 
+        # D25: a bind-class contract's every continuation carries the hidden
+        # _spentOutpointHash = sha256(outpoint this input spends), written by
+        # the covenant itself. A caller-supplied state (outputs / new_state)
+        # cannot be expected to know it -- left out, serialize_state has no
+        # value; copied from get_state, it is the PREVIOUS outpoint's hash and
+        # the covenant rejects the spend. No other value can ever validate, so
+        # it is always overwritten.
+        outpoint_binding =
+          if is_stateful && @artifact.state_fields.any? { |f| f.name == TWIN_BINDING_FIELD }
+            Digest::SHA256.hexdigest(
+              [contract_utxo.txid].pack('H*').reverse + [contract_utxo.output_index.to_i].pack('V')
+            )
+          end
+        with_outpoint_binding = lambda do |st|
+          outpoint_binding ? (st || {}).merge(TWIN_BINDING_FIELD => outpoint_binding) : st
+        end
+        if opts.new_state
+          opts = opts.dup
+          opts.new_state = with_outpoint_binding.call(opts.new_state)
+        end
+
         if has_multi_output
           # N-075: get_code_part_hex carries the inscription envelope, as the
           # single-output path's get_locking_script does.
@@ -625,7 +646,7 @@ module Runar
           contract_outputs = Array(opts.outputs).map do |out_spec|
             state_dict = out_spec.is_a?(OutputSpec) ? out_spec.state : (out_spec['state'] || out_spec[:state])
             sats = out_spec.is_a?(OutputSpec) ? out_spec.satoshis : (out_spec['satoshis'] || out_spec[:satoshis] || 1)
-            state_hex = State.serialize_state(@artifact.state_fields, state_dict)
+            state_hex = State.serialize_state(@artifact.state_fields, with_outpoint_binding.call(state_dict))
             { script: "#{code_script}6a#{state_hex}", satoshis: sats }
           end
         else
@@ -708,6 +729,22 @@ module Runar
                 'SDK-derived preimage) builds a real unlock for each extra contract ' \
                 'input; any other path would ship a placeholder unlock and the ' \
                 'resulting tx would be invalid'
+        end
+
+        # D25: a SIGHASH_SINGLE continuation (the default for a contract whose
+        # continuation methods are all mutate-only) commits ONE output per
+        # input, at that input's index. A call that spends extra contract
+        # inputs into the one continuation (a many-to-one merge) is exactly the
+        # twin-input shape SINGLE refuses: every extra input would need its own
+        # continuation at its own index, so the tx cannot verify. Fail closed
+        # before building it.
+        if !extra_contract_utxos.empty? && (resolve_sighash_type(method_name) & 0x1F) == 0x03
+          raise ArgumentError,
+                "RunarContract.call(#{method_name}): additionalContractInputs cannot be spent into one " \
+                'continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation ' \
+                'methods are all mutate-only, D25): SINGLE commits each input to its own output at its own ' \
+                'index. Merge with an addOutput method instead (see FungibleToken.merge), or build each ' \
+                "input's continuation with assembleMultiContractCall"
         end
 
         # Resolve per-input args for additional contract inputs.
@@ -900,7 +937,8 @@ module Runar
             method_uses_code_part: method_uses_code_part
           )
 
-        sighash = compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = user_sig_digest(final_preimage, signed_tx, contract_utxo, code_sep_idx, method_name)
 
         prepared = build_prepared_call(
           sighash, final_preimage, signed_tx,
@@ -1352,6 +1390,23 @@ module Runar
         Digest::SHA256.hexdigest(Digest::SHA256.digest(bytes))
       end
 
+      # D25: the digest an external signer signs for a user +Sig+ argument
+      # (TS +userSigDigest+). User signatures are ALL|FORKID (the byte every
+      # signer appends), so when the method's covenant preimage is built under
+      # another mode (SIGHASH_SINGLE is the default for a mutate-only contract)
+      # the digest is recomputed over the same tx, subscript and code separator
+      # under ALL|FORKID. The covenant's own preimage (+PreparedCall#preimage+)
+      # is unchanged.
+      def user_sig_digest(covenant_preimage, tx_hex, utxo, code_sep_idx, method_name)
+        return '' if covenant_preimage.nil? || covenant_preimage.empty?
+        return compute_bip143_sighash(covenant_preimage) if resolve_sighash_type(method_name) == SDK::SIGHASH_ALL_FORKID
+
+        compute_bip143_sighash(
+          SDK.compute_op_push_tx_preimage(tx_hex, 0, utxo.script, utxo.satoshis, code_sep_idx,
+                                          SDK::SIGHASH_ALL_FORKID)
+        )
+      end
+
       # ---------------------------------------------------------------------------
       # Initialisation helpers
       # ---------------------------------------------------------------------------
@@ -1560,7 +1615,8 @@ module Runar
           term_tx    = SDK.insert_unlocking_script(term_tx, 1, fee_unlock)
         end
 
-        sighash = compute_bip143_sighash(final_preimage)
+        # D25: the ALL|FORKID digest when the covenant mode differs.
+        sighash = user_sig_digest(final_preimage, term_tx, contract_utxo, code_sep_idx, method_name)
 
         PreparedCall.new(
           sighash: sighash,
@@ -1755,6 +1811,8 @@ module Runar
       # list has converged. It is the ONLY ByteString slot for which a nil call
       # arg is a request rather than a mistake.
       AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts'
+      # D25 hidden state field (mirrors the compiler's TWIN_BINDING_FIELD).
+      TWIN_BINDING_FIELD = '_spentOutpointHash'
 
       # Is a nil arg for +param+ the SDK's auto-compute sentinel? Mirrors the Zig
       # SDK's name gate (sdk_contract.zig): nil for any other ByteString param is

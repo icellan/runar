@@ -155,8 +155,11 @@ class TestR021VarDeclSideEffectDescent < Minitest::Test
   # Shape 2 -- state mutation behind a var-decl initialiser.
   # --------------------------------------------------------------------
 
+  # D25: the contract's only continuation method is mutate-only, so it commits
+  # under SIGHASH_SINGLE|FORKID and takes no change params; _newAmount (the
+  # auto-continuation) is what marks it non-terminal.
   def test_vardecl_mutation_is_not_terminal
-    assert_equal %w[amount _changePKH _changeAmount _newAmount txPreimage],
+    assert_equal %w[amount _newAmount txPreimage],
                  settle_params(VARDECL_MUTATION, "VarDeclMutation.runar.ts"),
                  "a state mutation reached through a var-decl initialiser was " \
                  "classified TERMINAL: the deployed script carries no continuation " \

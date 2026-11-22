@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { computeNewStateAndDataOutputs } from '../../packages/runar-sdk/src/index.js';
 import type { ANFProgram } from '../../packages/runar-ir-schema/src/index.js';
 import { enforceDriverGate } from './driver-gate.js';
@@ -13,6 +14,8 @@ const CONFORMANCE_TESTS_DIR = join(__dirname, '../tests');
 const INPUTS_DIR = join(__dirname, 'inputs');
 const EXPECTED_DIR = join(__dirname, 'expected');
 const DRIVERS_DIR = join(__dirname, 'drivers');
+/** D25 hidden state field (runar-compiler TWIN_BINDING_FIELD). */
+const TWIN_BINDING_FIELD = '_spentOutpointHash';
 
 interface CaseInput {
   /**
@@ -400,6 +403,20 @@ describe('ANF interpreter vs SCRIPT semantics (independent oracle)', () => {
       // may also pin dataOutputs/rawOutputs, which the continuation script
       // does not carry.
       for (const [key, value] of Object.entries(onChain)) {
+        if (key === TWIN_BINDING_FIELD) {
+          // D25: the covenant writes sha256(the outpoint it spends). The golden
+          // was derived with no outpoint (the 36-zero-byte dummy every
+          // interpreter uses), the oracle spends a real deploy output, so the
+          // two values legitimately differ: the golden must still CARRY the
+          // field, and the on-chain value is checked against the outpoint the
+          // call tx really spends, computed here (not by the SDK).
+          expect(golden.state, `golden must carry ${key}`).toHaveProperty(key);
+          expect(result.deployTxid, 'oracle reported no deploy txid').toMatch(/^[0-9a-f]{64}$/);
+          const wire = Buffer.concat([Buffer.from(result.deployTxid!, 'hex').reverse(), Buffer.alloc(4)]);
+          expect(value, `${key} on chain is not sha256(spent outpoint)`).toBe(
+            createHash('sha256').update(wire).digest('hex'));
+          continue;
+        }
         expect(golden.state[key], `state.${key} disagrees with the deployed script`).toEqual(value);
       }
       expect(Object.keys(onChain).length).toBeGreaterThan(0);

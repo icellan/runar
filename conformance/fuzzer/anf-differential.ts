@@ -86,6 +86,7 @@ import {
 } from '../../packages/runar-compiler/src/passes/stateful-scaffold.js';
 import { continuationShape } from '../../packages/runar-compiler/src/passes/side-effect-summary.js';
 import { SIGHASH_DEFAULT } from '../../packages/runar-compiler/src/passes/sighash-directive.js';
+import { SIGHASH_SINGLE_FORKID } from '../../packages/runar-compiler/src/passes/continuation-binding.js';
 import type { ANFBinding as CompilerAnfBinding, ANFValue as CompilerAnfValue } from '../../packages/runar-compiler/src/ir/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -708,7 +709,7 @@ export interface IrProgram {
   contractName: string;
   parentClass: 'SmartContract' | 'StatefulSmartContract';
   properties: AnfProperty[];
-  methods: Array<{ name: string; params: AnfParam[]; body: CompilerAnfBinding[]; isPublic: boolean }>;
+  methods: Array<{ name: string; params: AnfParam[]; body: CompilerAnfBinding[]; isPublic: boolean; sigHashType?: number }>;
 }
 
 class ScaffoldBuilder implements ScaffoldContext<ScaffoldBuilder> {
@@ -739,16 +740,24 @@ function renameRefs(v: AnfValue, to: (ref: string) => string): AnfValue {
 
 function scaffoldMethod(m: AnfMethod): IrProgram['methods'][number] {
   const mutatesState = m.body.some((b) => b.value.kind === 'update_prop');
-  const shape = continuationShape(
+  const shapeUnder = (mode: number) => continuationShape(
     {
       mutatesState, hasStateOutput: false, hasDataOutput: false, usesPreimage: false,
       callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false, callsExtractPrevOutputScript: false,
     },
-    SIGHASH_DEFAULT,
+    mode,
   );
+  // D25: the generator draws no output intrinsic and no preimage extractor, so
+  // every continuation it produces is mutate-only and the contract is in the
+  // 'single' class — the frontend commits each continuation under
+  // SIGHASH_SINGLE|FORKID (no change output, no change params), and every
+  // tier's --ir path refuses a mutate-only ALL continuation without the
+  // `_spentOutpointHash` field. Terminal methods keep the default.
+  const sighash = shapeUnder(SIGHASH_DEFAULT).needsChange ? SIGHASH_SINGLE_FORKID : SIGHASH_DEFAULT;
+  const shape = shapeUnder(sighash);
   const ctx = new ScaffoldBuilder({ next: 0 });
   // Only called for a program with a write, so the contract has mutable state.
-  emitStatefulPrologue(ctx, SIGHASH_DEFAULT, true);
+  emitStatefulPrologue(ctx, sighash, true);
   const renamed = new Map<string, string>();
   for (const b of m.body) {
     const value = renameRefs(b.value, (r) => renamed.get(r) ?? r);
@@ -759,7 +768,10 @@ function scaffoldMethod(m: AnfMethod): IrProgram['methods'][number] {
   if (shape.includesChange) params.push({ name: '_changePKH', type: 'Ripemd160' }, { name: '_changeAmount', type: 'bigint' });
   if (shape.needsNewAmount) params.push({ name: '_newAmount', type: 'bigint' });
   params.push({ name: 'txPreimage', type: 'SigHashPreimage' });
-  return { name: m.name, params, body: ctx.bindings, isPublic: m.isPublic };
+  return {
+    name: m.name, params, body: ctx.bindings, isPublic: m.isPublic,
+    ...(sighash === SIGHASH_DEFAULT ? {} : { sigHashType: sighash }),
+  };
 }
 
 export function toIrProgram(program: AnfProgram): IrProgram {

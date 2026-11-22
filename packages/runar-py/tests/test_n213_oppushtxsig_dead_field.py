@@ -119,6 +119,7 @@ def test_external_sign_hash_wallet_flow_still_works_without_the_field():
     removing op_push_tx_sig -- nothing in that path ever needed it."""
     contract, provider, signer = _deploy()
 
+    utxo = contract.get_utxo()
     prepared = contract.prepare_call("inc", [None], provider, signer)
     assert len(prepared.sig_indices) == 1, (
         f"expected exactly one external Sig slot, got {prepared.sig_indices}"
@@ -129,7 +130,15 @@ def test_external_sign_hash_wallet_flow_still_works_without_the_field():
     der = ecdsa_sign(int(SIGNER_KEY, 16), digest)
     sig_hex = der.hex() + "41"  # ALL | FORKID
 
-    on_chain_digest = _sha256d(bytes.fromhex(prepared.preimage))
+    # D25: the contract is mutate-only, so its covenant preimage is
+    # SIGHASH_SINGLE; the user Sig (ALL|FORKID) is verified on-chain against
+    # the ALL|FORKID preimage of the same tx, subscript and code separator.
+    from runar.sdk.oppushtx import compute_op_push_tx_preimage
+
+    code_sep = contract._get_code_sep_index(contract._find_method_index("inc"))
+    on_chain_digest = _sha256d(bytes.fromhex(compute_op_push_tx_preimage(
+        prepared.tx_hex, 0, utxo.script, utxo.satoshis, code_sep, 0x41,
+    )))
     pub_key = bytes.fromhex(signer.get_public_key())
     assert ecdsa_verify(der, pub_key, on_chain_digest), (
         "the external wallet's signature over PreparedCall.sighash does NOT verify "

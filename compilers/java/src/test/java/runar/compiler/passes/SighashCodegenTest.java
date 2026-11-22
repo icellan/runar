@@ -29,7 +29,9 @@ class SighashCodegenTest {
             + "  raised: bigint;\n"
             + "  constructor(raised: bigint) { super(raised); this.raised = raised; }\n"
             + "  " + directive + "\n"
-            + "  public pledge(amount: bigint): void { this.raised = this.raised + amount; }\n"
+            // D25: an addOutput body keeps ALL|ANYONECANPAY (a mutate-only
+            // contract maps it to SINGLE|ANYONECANPAY).
+            + "  public pledge(amount: bigint): void { this.addOutput(1000n, this.raised + amount); }\n"
             + "}\n";
     }
 

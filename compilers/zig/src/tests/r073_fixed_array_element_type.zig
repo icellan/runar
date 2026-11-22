@@ -391,8 +391,11 @@ test "R-073 control: correct element writes and an element read still compile" {
     // Byte-for-byte pin, captured from the pre-fix binary.
     // F-024 (R14): +34 hex for the injected _newAmount >= extractAmount(txPreimage) check (check-stripped ANF re-emits 2560).
     // #180 / #213: +14 hex, the `_changePKH` entry width gate (equals the TS reference, both fold modes).
-    try std.testing.expectEqual(@as(usize, 2584), hex.len); // W1: +12, four zero-pad sites; ports #170: -24, two C=1 binding blobs
-    try std.testing.expect(std.mem.startsWith(u8, hex, "61ab76009c637553798201149d757676aa517f"));
+    // W1: +12, four zero-pad sites; ports #170: -24, two C=1 binding blobs.
+    // D25: 2584 -> 2502, the mutate-only contract defaults to SIGHASH_SINGLE|FORKID
+    // (no change segment, no `_changePKH` gate); equals the TS reference, both fold modes.
+    try std.testing.expectEqual(@as(usize, 2502), hex.len);
+    try std.testing.expect(std.mem.startsWith(u8, hex, "61ab76009c63757676aa517f"));
 }
 
 test "R-073 control: FixedArray<ByteString,2> written with a ByteString still compiles" {
@@ -404,8 +407,11 @@ test "R-073 control: FixedArray<ByteString,2> written with a ByteString still co
     // N-044: +134 hex for the two ByteString slots' PUSHDATA4 writer arm and the unsigned-length reader.
     // N-216: -2 hex, one branch-reconcile `OP_2 OP_ROLL` now folds to OP_ROT (code-part length literal follows).
     // #180 / #213: +14 hex, the `_changePKH` entry width gate (equals the TS reference, both fold modes).
-    try std.testing.expectEqual(@as(usize, 1952), hex.len); // W1: +6, two zero-pad sites; ports #170: -12, one C=1 binding blob
-    try std.testing.expect(std.mem.startsWith(u8, hex, "61ab53798201149d757676aa517f517f"));
+    // W1: +6, two zero-pad sites; ports #170: -12, one C=1 binding blob.
+    // D25: 1952 -> 1866, the mutate-only contract defaults to SIGHASH_SINGLE|FORKID
+    // (no change segment, no `_changePKH` gate); equals the TS reference, both fold modes.
+    try std.testing.expectEqual(@as(usize, 1866), hex.len);
+    try std.testing.expect(std.mem.startsWith(u8, hex, "61ab7676aa517f517f"));
 }
 
 test "R-073: a parameter sharing the array's name does not disarm the check" {

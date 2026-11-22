@@ -292,3 +292,34 @@ pub fn raiseCodePartLengthPinViolated(
 // only diagnostic. Zig errors carry no payload, so this is a message literal
 // pointer (not a formatted/owned buffer like the other side channels above).
 pub var last_broadcast_refusal: ?[]const u8 = null;
+
+// ---------------------------------------------------------------------------
+// D25 -- additional contract inputs into one SIGHASH_SINGLE continuation
+// ---------------------------------------------------------------------------
+//
+// Same side-channel rationale as `last_error` above: Zig errors carry no
+// payload, so the TS reference's refusal text is recorded here when
+// `RunarContract.call` / `prepareCall` return
+// `error.SingleContinuationMergeUnsupported`.
+pub var last_single_merge_buf: [640]u8 = undefined;
+pub var last_single_merge_len: usize = 0;
+
+/// The recorded D25 refusal text (empty when none was recorded).
+pub fn lastSingleMergeMessage() []const u8 {
+    return last_single_merge_buf[0..last_single_merge_len];
+}
+
+/// Record the TS `RunarContract.call` D25 refusal text for `method_name`.
+pub fn recordSingleMergeRefusal(method_name: []const u8) void {
+    const std = @import("std");
+    const s = std.fmt.bufPrint(
+        &last_single_merge_buf,
+        "RunarContract.call({s}): additionalContractInputs cannot be spent into one " ++
+            "continuation by a SIGHASH_SINGLE method (the default for a contract whose continuation " ++
+            "methods are all mutate-only, D25): SINGLE commits each input to its own output at its own " ++
+            "index. Merge with an addOutput method instead (see FungibleToken.merge), or build each " ++
+            "input's continuation with assembleMultiContractCall",
+        .{method_name},
+    ) catch last_single_merge_buf[0..0];
+    last_single_merge_len = s.len;
+}

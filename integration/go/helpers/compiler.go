@@ -3,6 +3,7 @@ package helpers
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
@@ -260,17 +261,12 @@ func compileToSDKArtifactWithOptions(absPath, groth16WAVKey string) (*runar.Runa
 	// Build ABI from ANF program (post-lowering) — includes compiler-injected params
 	// like SigHashPreimage, _changePKH, _changeAmount for stateful contracts.
 	contract := parseResult.Contract
-	var abiMethods []runar.ABIMethod
-	for _, m := range program.Methods {
-		var params []runar.ABIParam
-		for _, p := range m.Params {
-			params = append(params, runar.ABIParam{Name: p.Name, Type: p.Type})
-		}
-		abiMethods = append(abiMethods, runar.ABIMethod{
-			Name:     m.Name,
-			Params:   params,
-			IsPublic: m.IsPublic,
-		})
+	// ABI from the compiler's own rule (params, sighash mode, isTerminal,
+	// usesCodePart), not a local copy: the copy drifted when D25 made
+	// SIGHASH_SINGLE the default and every mutate-only call was rejected.
+	abiMethods, err := sdkABIMethods(program, stackMethods)
+	if err != nil {
+		return nil, err
 	}
 
 	var ctorParams []runar.ABIParam
@@ -307,6 +303,7 @@ func compileToSDKArtifactWithOptions(absPath, groth16WAVKey string) (*runar.Runa
 			}
 			stateFields = append(stateFields, field)
 		}
+		stateFields = appendHiddenStateFields(stateFields, program)
 	}
 
 	// Build constructor slots
@@ -445,18 +442,12 @@ func CompileSourceStringToSDKArtifact(source, fileName string, constructorArgs m
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	// Build ABI from ANF program (post-lowering) — includes compiler-injected params
-	var abiMethods []runar.ABIMethod
-	for _, m := range program.Methods {
-		var params []runar.ABIParam
-		for _, p := range m.Params {
-			params = append(params, runar.ABIParam{Name: p.Name, Type: p.Type})
-		}
-		abiMethods = append(abiMethods, runar.ABIMethod{
-			Name:     m.Name,
-			Params:   params,
-			IsPublic: m.IsPublic,
-		})
+	// ABI from the compiler's own rule (params, sighash mode, isTerminal,
+	// usesCodePart), not a local copy: the copy drifted when D25 made
+	// SIGHASH_SINGLE the default and every mutate-only call was rejected.
+	abiMethods, err := sdkABIMethods(program, stackMethods)
+	if err != nil {
+		return nil, err
 	}
 
 	contract := parseResult.Contract
@@ -493,6 +484,7 @@ func CompileSourceStringToSDKArtifact(source, fileName string, constructorArgs m
 			}
 			stateFields = append(stateFields, field)
 		}
+		stateFields = appendHiddenStateFields(stateFields, program)
 	}
 
 	var cSlots []runar.ConstructorSlot
@@ -542,6 +534,37 @@ func CompileSourceStringToSDKArtifact(source, fileName string, constructorArgs m
 }
 
 // AstTypeName extracts the type name string from a frontend.TypeNode.
+// sdkABIMethods converts compiler.BuildABIMethods' result to the SDK type.
+func sdkABIMethods(program *ir.ANFProgram, stackMethods []codegen.StackMethod) ([]runar.ABIMethod, error) {
+	isStateful := program.ParentClass == "StatefulSmartContract"
+	raw, err := json.Marshal(compiler.BuildABIMethods(program, stackMethods, isStateful))
+	if err != nil {
+		return nil, fmt.Errorf("abi: %w", err)
+	}
+	var out []runar.ABIMethod
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("abi: %w", err)
+	}
+	return out, nil
+}
+
+// appendHiddenStateFields adds the mutable ANF properties the AST walk cannot
+// see: the D25 _spentOutpointHash that LowerToANF injects for a mixed
+// contract. Index is the property position, as for every other state field.
+func appendHiddenStateFields(fields []runar.StateField, program *ir.ANFProgram) []runar.StateField {
+	have := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		have[f.Name] = true
+	}
+	for i, p := range program.Properties {
+		if p.Readonly || have[p.Name] || p.Name != frontend.TwinBindingField {
+			continue
+		}
+		fields = append(fields, runar.StateField{Name: p.Name, Type: p.Type, Index: i, InitialValue: p.InitialValue})
+	}
+	return fields
+}
+
 func AstTypeName(t frontend.TypeNode) string {
 	switch v := t.(type) {
 	case frontend.PrimitiveType:

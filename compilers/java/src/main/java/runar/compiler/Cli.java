@@ -26,6 +26,7 @@ import runar.compiler.passes.SighashDirective;
 import runar.compiler.passes.Peephole;
 import runar.compiler.passes.PassLocation;
 import runar.compiler.passes.StackLower;
+import runar.compiler.passes.ContinuationBinding;
 import runar.compiler.passes.StatefulScaffold;
 import runar.compiler.passes.Typecheck;
 import runar.compiler.passes.Validate;
@@ -184,7 +185,11 @@ public final class Cli {
         }
 
         try {
-            contract = ExpandFixedArrays.run(contract);
+            // D25: a 'bind' contract gains its hidden spent-outpoint state
+            // field here (after typecheck, so user-facing arity rules never see
+            // it), and a mutate-only contract's continuation methods their
+            // effective SINGLE sighash. See ContinuationBinding.
+            contract = ExpandFixedArrays.run(ContinuationBinding.apply(contract));
         } catch (ExpandFixedArrays.ExpandException e) {
             for (String msg : e.errors()) {
                 err.println("runar-java: " + msg);
@@ -865,7 +870,7 @@ public final class Cli {
             // pipeline, and a daemon that type-checks a different tree from the
             // CLI is its own divergence.
             Typecheck.run(contract);
-            contract = ExpandFixedArrays.run(contract);
+            contract = ExpandFixedArrays.run(ContinuationBinding.apply(contract));
             AnfProgram anf = AnfLower.run(contract);
             anf = optimizeAnf(anf, req.disableConstantFolding);
 

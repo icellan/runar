@@ -316,40 +316,75 @@
         {
           "name": "t33",
           "value": {
-            "kind": "get_state_script"
+            "kind": "load_param",
+            "name": "txPreimage"
           }
         },
         {
           "name": "t34",
+          "value": {
+            "args": [
+              "t33"
+            ],
+            "func": "extractOutpoint",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t35",
+          "value": {
+            "args": [
+              "t34"
+            ],
+            "func": "sha256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t36",
+          "value": {
+            "kind": "update_prop",
+            "name": "_spentOutpointHash",
+            "value": "t35"
+          }
+        },
+        {
+          "name": "t37",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t38",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t35",
+          "name": "t39",
           "value": {
             "kind": "load_param",
             "name": "_newAmount"
           }
         },
         {
-          "name": "t36",
+          "name": "t40",
           "value": {
             "args": [
-              "t34",
-              "t33",
-              "t35"
+              "t38",
+              "t37",
+              "t39"
             ],
             "func": "computeStateOutput",
             "kind": "call"
           }
         },
         {
-          "name": "t37",
+          "name": "t41",
           "value": {
             "args": [
-              "t36",
+              "t40",
               "t18"
             ],
             "func": "cat",
@@ -357,10 +392,10 @@
           }
         },
         {
-          "name": "t38",
+          "name": "t42",
           "value": {
             "args": [
-              "t37",
+              "t41",
               "t32"
             ],
             "func": "cat",
@@ -368,48 +403,48 @@
           }
         },
         {
-          "name": "t39",
+          "name": "t43",
           "value": {
             "args": [
-              "t38"
+              "t42"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t40",
+          "name": "t44",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t41",
+          "name": "t45",
           "value": {
             "args": [
-              "t40"
+              "t44"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t42",
+          "name": "t46",
           "value": {
             "kind": "bin_op",
-            "left": "t39",
+            "left": "t43",
             "op": "===",
             "result_type": "bytes",
-            "right": "t41"
+            "right": "t45"
           }
         },
         {
-          "name": "t43",
+          "name": "t47",
           "value": {
             "isAutoInjectedStateCheck": true,
             "kind": "assert",
-            "value": "t42"
+            "value": "t46"
           }
         }
       ],
@@ -449,6 +484,12 @@
       "name": "amount",
       "readonly": false,
       "type": "bigint"
+    },
+    {
+      "initialValue": "0000000000000000000000000000000000000000000000000000000000000000",
+      "name": "_spentOutpointHash",
+      "readonly": false,
+      "type": "Sha256"
     }
   ]
 }

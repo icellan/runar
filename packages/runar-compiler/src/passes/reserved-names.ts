@@ -26,7 +26,8 @@
  *                        __shadowed_<n>_<name>    caller slot shadowed by an inlined param
  *                        _pub_<digits>            Groth16 public-input slots (Go tier)
  *   auto-injected params _changePKH, _changeAmount, _newAmount, _serialisedOutputs,
- *                        _prevOutScript_<digits>, and txPreimage in a
+ *                        _prevOutScript_<digits>, _spentOutpointHash (D25's hidden
+ *                        state field), and txPreimage in a
  *                        StatefulSmartContract (a stateless contract declares its
  *                        own txPreimage parameter, so it stays legal there)
  *
@@ -68,6 +69,7 @@ const SOURCE_ONLY_RESERVED: readonly RegExp[] = [
   /^_newAmount$/,
   /^_serialisedOutputs$/,
   /^_prevOutScript_[0-9]+$/,
+  /^_spentOutpointHash$/,
 ];
 
 const matchesAny = (name: string, res: readonly RegExp[]): boolean => res.some((r) => r.test(name));
