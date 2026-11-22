@@ -126,6 +126,7 @@ test {
     _ = @import("tests/n095_synthetic_array_chain.zig");
     _ = @import("tests/n097_fixed_array_element_read.zig");
     _ = @import("tests/n124_fixed_array_increment.zig");
+    _ = @import("tests/nested_fixed_array_increment.zig");
     _ = @import("tests/n129_loop_start_surfaces.zig");
     _ = @import("tests/n134_oversize_hex_literal.zig");
     _ = @import("tests/n119_asm_push_oversize_literal.zig");
