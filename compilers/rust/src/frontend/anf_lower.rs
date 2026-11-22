@@ -19,6 +19,7 @@
 //! - Local variables are tracked via localNames set
 //! - Properties are checked against the contract
 
+use super::continuation_binding::TWIN_BINDING_FIELD;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -52,6 +53,13 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     if has_untyped_operator(contract) {
         let _ = super::typecheck::typecheck(contract);
     }
+    // D25: the same for the twin-input binding. A caller that assembles its
+    // own pipeline and skips inject_continuation_binding would otherwise lower
+    // a mixed contract with no _spentOutpointHash, leaving its continuations
+    // unbound. Idempotent: a contract that already carries the field is
+    // returned unchanged, so the compiler's own path is unaffected.
+    let injected = super::continuation_binding::inject_continuation_binding(contract);
+    let contract = &injected;
     let properties = lower_properties(contract);
     let mut methods = lower_methods(contract);
 
@@ -712,6 +720,17 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                     // Single-output continuation: build raw state output bytes,
                     // then splice in any declared data outputs, then concat
                     // with change, then hash.
+                    // D25: a 'bind' contract first records the spent outpoint
+                    // in its hidden last state field, so this continuation
+                    // differs from every other input's and no two inputs can
+                    // share one output list.
+                    if method_ctx.binds_outpoint() {
+                        let binding_ref = emit_outpoint_binding(&mut method_ctx);
+                        method_ctx.emit(ANFValue::UpdateProp {
+                            name: TWIN_BINDING_FIELD.to_string(),
+                            value: binding_ref,
+                        });
+                    }
                     let state_script_ref = method_ctx.emit(ANFValue::GetStateScript {});
                     let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
                         name: "txPreimage".to_string(),
@@ -1026,7 +1045,23 @@ struct LoweringContext<'a> {
     enclosing_loop_count: usize,
 }
 
+/// D25: `sha256(extractOutpoint(txPreimage))`, the value a 'bind' contract
+/// stores in its hidden last state field (`TWIN_BINDING_FIELD`) in every
+/// continuation it makes: written by the auto-continuation, appended to every
+/// `addOutput`. Returns the hash's binding name (stateful-scaffold.ts
+/// `emitOutpointBinding`).
+fn emit_outpoint_binding(ctx: &mut LoweringContext) -> String {
+    let preimage_ref = ctx.emit(ANFValue::LoadParam { name: "txPreimage".to_string() });
+    let outpoint_ref = ctx.emit(ANFValue::Call { func: "extractOutpoint".to_string(), args: vec![preimage_ref] });
+    ctx.emit(ANFValue::Call { func: "sha256".to_string(), args: vec![outpoint_ref] })
+}
+
 impl<'a> LoweringContext<'a> {
+    /// D25: the contract carries the hidden spent-outpoint field ('bind' class).
+    fn binds_outpoint(&self) -> bool {
+        self.contract.properties.iter().any(|p| p.name == TWIN_BINDING_FIELD)
+    }
+
     fn new(contract: &'a ContractNode) -> Self {
         Self::with_effects(contract, None)
     }
@@ -3132,7 +3167,11 @@ fn lower_call_expr(
             let flat_args = flatten_add_output_args(args);
             let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             let satoshis = arg_refs.first().cloned().unwrap_or_default();
-            let state_values = if arg_refs.len() > 1 { arg_refs[1..].to_vec() } else { Vec::new() };
+            let mut state_values = if arg_refs.len() > 1 { arg_refs[1..].to_vec() } else { Vec::new() };
+            // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+            if ctx.binds_outpoint() {
+                state_values.push(emit_outpoint_binding(ctx));
+            }
             let r = ctx.emit(ANFValue::AddOutput { satoshis, state_values, preimage: String::new() });
             ctx.add_output_refs.push(r.clone());
             return r;
@@ -3145,7 +3184,11 @@ fn lower_call_expr(
                 let flat_args = flatten_add_output_args(args);
                 let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
                 let satoshis = arg_refs.first().cloned().unwrap_or_default();
-                let state_values = if arg_refs.len() > 1 { arg_refs[1..].to_vec() } else { Vec::new() };
+                let mut state_values = if arg_refs.len() > 1 { arg_refs[1..].to_vec() } else { Vec::new() };
+                // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+                if ctx.binds_outpoint() {
+                    state_values.push(emit_outpoint_binding(ctx));
+                }
                 let r = ctx.emit(ANFValue::AddOutput { satoshis, state_values, preimage: String::new() });
                 ctx.add_output_refs.push(r.clone());
                 return r;

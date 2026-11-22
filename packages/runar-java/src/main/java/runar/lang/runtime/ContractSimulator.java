@@ -57,10 +57,29 @@ public final class ContractSimulator {
     private final List<Output> outputs = new ArrayList<>();
     private Preimage lastPreimage;
 
+    /**
+     * D25: the compiler-injected {@code _spentOutpointHash} state field of a
+     * contract that binds each continuation to its input. The Java contract
+     * class has no such field, so the simulator tracks it: its deploy value is
+     * the artifact's initial value (32 zero bytes), and every continuation
+     * carries {@code sha256} of the outpoint the call spends.
+     */
+    static final String TWIN_BINDING_FIELD = "_spentOutpointHash";
+
+    /** D25: the current value (hex) of {@link #TWIN_BINDING_FIELD}; null when the artifact has none. */
+    private String spentOutpointHash;
+
     private ContractSimulator(SmartContract contract, boolean stateful, RunarArtifact artifact) {
         this.contract = contract;
         this.stateful = stateful;
         this.artifact = artifact;
+        if (artifact != null) {
+            for (RunarArtifact.StateField f : artifact.stateFields()) {
+                if (TWIN_BINDING_FIELD.equals(f.name())) {
+                    this.spentOutpointHash = f.initialValue() == null ? "00".repeat(32) : f.initialValue().toString();
+                }
+            }
+        }
     }
 
     /**
@@ -173,6 +192,7 @@ public final class ContractSimulator {
      */
     public Object callStateful(String methodName, Preimage preimage, Object... args) {
         Spend spend = beginSpend(methodName, preimage);
+        requireCovenantMode(spend, preimage);
         requireMatches(spend.honest(preimage, null), preimage);
         this.lastPreimage = preimage;
         int mark = outputs.size();
@@ -184,7 +204,10 @@ public final class ContractSimulator {
             SimulatorContext.clearCurrentPreimage();
         }
         List<Output> produced = new ArrayList<>(outputs.subList(mark, outputs.size()));
-        requireMatches(spend.honest(preimage, spend.outputsOf(produced)), preimage);
+        List<SimulatedSpend.Out> committed = spend.outputsOf(produced, preimage);
+        requireMatches(spend.honest(preimage, committed), preimage);
+        // D25: the continuation now holds sha256 of the outpoint this call spent.
+        if (spentOutpointHash != null && committed != null) spentOutpointHash = outpointHash(preimage);
         return result;
     }
 
@@ -207,7 +230,7 @@ public final class ContractSimulator {
         SimulatorContext.setCurrentPreimage(inputSide);
         try {
             invokeInto(sink, methodName, args);
-            return spend.honest(template, spend.outputsOf(sink));
+            return spend.honest(template, spend.outputsOf(sink, inputSide));
         } catch (AssertionError ae) {
             return inputSide;
         } finally {
@@ -285,6 +308,25 @@ public final class ContractSimulator {
         return spendFor(methodName);
     }
 
+    /**
+     * GAP-302 / D25: the stateful prologue pins the preimage's sighash type to
+     * the method's covenant mode (SIGHASH_SINGLE|FORKID by default for a
+     * contract whose continuation methods are all mutate-only).
+     */
+    private static void requireCovenantMode(Spend spend, Preimage preimage) {
+        int mode = spend.abi.sigHashType() == null ? 0x41 : spend.abi.sigHashType();
+        if (preimage.sighashType() != mode) {
+            throw new AssertionError("checkPreimage failed: the preimage's sighash type 0x"
+                + Long.toHexString(preimage.sighashType()) + " is not the method's covenant mode 0x"
+                + Integer.toHexString(mode) + " (the stateful prologue asserts extractSigHashType == mode)");
+        }
+    }
+
+    /** D25: sha256 of the 36-byte outpoint a preimage spends, hex. */
+    private static String outpointHash(Preimage p) {
+        return hex(MockCrypto.sha256(p.outpoint()));
+    }
+
     /** The spend of the contract's current locking script through public method {@code methodName}. */
     private Spend spendFor(String methodName) {
         RunarArtifact.ABIMethod abi = null;
@@ -324,13 +366,16 @@ public final class ContractSimulator {
          * state / raw outputs in source order, then data outputs (no change).
          * {@code null} for a terminal method, whose outputs the spender picks.
          */
-        List<SimulatedSpend.Out> outputsOf(List<Output> produced) {
+        List<SimulatedSpend.Out> outputsOf(List<Output> produced, Preimage spending) {
             List<SimulatedSpend.Out> outs = new ArrayList<>();
             if (hasParam("_newAmount")) {
                 // Single-output continuation: the post-call state at _newAmount,
-                // which off-chain is continuationAmount().
+                // which off-chain is continuationAmount(). D25: with the spent
+                // outpoint's hash in the binding field.
+                Map<String, Object> post = currentState();
+                if (spentOutpointHash != null) post.put(TWIN_BINDING_FIELD, outpointHash(spending));
                 outs.add(new SimulatedSpend.Out(Builtins.continuationAmount().longValueExact(),
-                    SimulatedSpend.continuationScript(artifact, lockingScript, currentState())));
+                    SimulatedSpend.continuationScript(artifact, lockingScript, post)));
             } else if (abi.hasContinuation()) {
                 // `_changePKH`, or (N-038) a SIGHASH_SINGLE continuation, which
                 // takes no change params.
@@ -341,12 +386,16 @@ public final class ContractSimulator {
                         outs.add(new SimulatedSpend.Out(o.satoshis.longValueExact(), hex(o.rawScriptBytes)));
                         continue;
                     }
-                    if (o.values.length != names.size()) {
+                    // D25: the compiler appends the spent outpoint's hash as
+                    // the last value of every addOutput of a binding contract.
+                    int bound = spentOutpointHash != null ? 1 : 0;
+                    if (o.values.length + bound != names.size()) {
                         throw new IllegalStateException("addOutput passed " + o.values.length
-                            + " values for " + names.size() + " state fields");
+                            + " values for " + (names.size() - bound) + " state fields");
                     }
                     Map<String, Object> st = new HashMap<>();
-                    for (int i = 0; i < names.size(); i++) st.put(names.get(i), sdkValue(o.values[i], names.get(i)));
+                    for (int i = 0; i < o.values.length; i++) st.put(names.get(i), sdkValue(o.values[i], names.get(i)));
+                    if (bound == 1) st.put(TWIN_BINDING_FIELD, outpointHash(spending));
                     outs.add(new SimulatedSpend.Out(o.satoshis.longValueExact(),
                         SimulatedSpend.continuationScript(artifact, lockingScript, st)));
                 }
@@ -403,6 +452,10 @@ public final class ContractSimulator {
     private Map<String, Object> currentState() {
         Map<String, Object> st = new HashMap<>();
         for (RunarArtifact.StateField f : artifact.stateFields()) {
+            if (TWIN_BINDING_FIELD.equals(f.name()) && spentOutpointHash != null) {
+                st.put(f.name(), spentOutpointHash);
+                continue;
+            }
             st.put(f.name(), sdkValue(readField(f.name()), f.name()));
         }
         return st;

@@ -247,6 +247,14 @@ class AnfLowerTest {
             public void increment() {
                 this.count++;
             }
+
+            // D25: an addOutput sibling keeps increment on ALL|FORKID (with
+            // the change output these tests inspect); a mutate-only contract
+            // defaults to SIGHASH_SINGLE, which commits no change.
+            @Public
+            public void settle() {
+                this.addOutput(1L, this.count);
+            }
         }
         """;
 

@@ -218,47 +218,16 @@ describe('F-045 TokenWallet signs the transaction it broadcasts', () => {
       .rejects.toThrow(/refusing to broadcast invalid transaction/);
   });
 
-  it('merge: spends BOTH token outpoints, every input validates, supply is summed', async () => {
-    const { provider, wallet, tokenUtxos, known } = await setup([100n, 250n]);
-
-    const txid = await wallet.merge();
-
-    const txHex = lastBroadcast(provider);
-    const tx = Transaction.fromHex(txHex);
-    expect(tx.id('hex')).toBe(txid);
-    const spent = tx.inputs.map((inp) => `${inp.sourceTXID}:${inp.sourceOutputIndex}`);
-    for (const u of tokenUtxos) {
-      expect(spent).toContain(`${u.txid}:${u.outputIndex}`);
-    }
-    // Each outpoint exactly once — a token UTXO must not double as a funding input.
-    expect(new Set(spent).size).toBe(spent.length);
-    for (let i = 0; i < tx.inputs.length; i++) {
-      expect(spendValidate(txHex, i, known)).toBe(true);
-    }
-    const merged = await RunarContract.fromTxId(artifact, txid, 0, provider);
-    expect(merged.state['supply']).toBe(350n);
-  });
-
-  it('merge: a token UTXO larger than the funding coin is still spent as a contract input, not as funding', async () => {
-    // Largest-first funding selection would otherwise pick the second token
-    // UTXO (listed at the same address) as a P2PKH funding input as well.
-    const { provider, wallet, tokenUtxos, known } = await setup([100n, 250n], {
-      tokenSats: 300_000,
-      fundingSats: 50_000,
-    });
-
-    const txid = await wallet.merge();
-
-    const txHex = lastBroadcast(provider);
-    const tx = Transaction.fromHex(txHex);
-    expect(tx.id('hex')).toBe(txid);
-    const spent = tx.inputs.map((inp) => `${inp.sourceTXID}:${inp.sourceOutputIndex}`);
-    for (const u of tokenUtxos) {
-      expect(spent).toContain(`${u.txid}:${u.outputIndex}`);
-    }
-    expect(new Set(spent).size).toBe(spent.length);
-    for (let i = 0; i < tx.inputs.length; i++) {
-      expect(spendValidate(txHex, i, known)).toBe(true);
-    }
+  // D25: this token's continuation methods are all mutate-only, so they
+  // commit under SIGHASH_SINGLE, one output per input. merge spends two token
+  // UTXOs into ONE continuation, which is exactly the twin-input shape SINGLE
+  // closes: the second input would need its own continuation at its own
+  // index. The SDK refuses before building or broadcasting the tx. (A merge
+  // needs an addOutput method; see FungibleToken.merge.)
+  it('merge of a mutate-only (SIGHASH_SINGLE) token is refused before anything is broadcast', async () => {
+    const { provider, wallet } = await setup([100n, 250n]);
+    const before = provider.getBroadcastedTxs().length;
+    await expect(wallet.merge()).rejects.toThrow(/additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method/);
+    expect(provider.getBroadcastedTxs().length).toBe(before);
   });
 });

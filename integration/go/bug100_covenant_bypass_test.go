@@ -34,13 +34,26 @@ func deployFreshCounter(t *testing.T, sats int64) (*runar.RunarContract, *helper
 	return contract, provider, signer
 }
 
+// methodSigHashType is the BIP-143 sighash mode the artifact declares for a
+// method: 0x41 (ALL|FORKID) unless the ABI says otherwise. D25 makes
+// SIGHASH_SINGLE|FORKID (0x43) the default for a mutate-only contract such as
+// Counter, so the preimage must be rebuilt under the method's own mode.
+func methodSigHashType(art *runar.RunarArtifact, name string) int {
+	for _, m := range art.ABI.Methods {
+		if m.Name == name && m.SigHashType != nil {
+			return *m.SigHashType
+		}
+	}
+	return 0x41
+}
+
 // recoverCodeSep finds the adjusted OP_CODESEPARATOR offset the SDK used for a
 // stateful spend, by matching the deterministic BIP-143 preimage it produced.
 // Uses only exported SDK functions — no reliance on internal codesep math.
-func recoverCodeSep(t *testing.T, txHex, subscript string, sats int64, wantPreimageHex string) int {
+func recoverCodeSep(t *testing.T, txHex, subscript string, sats int64, wantPreimageHex string, sigHashType int) int {
 	t.Helper()
 	for cand := -1; cand <= len(subscript)/2; cand++ {
-		_, pre, err := runar.ComputeOpPushTxWithCodeSep(txHex, 0, subscript, sats, cand)
+		_, pre, err := runar.ComputeOpPushTxWithSigHash(txHex, 0, subscript, sats, cand, sigHashType)
 		if err == nil && hex.EncodeToString(pre) == wantPreimageHex {
 			return cand
 		}
@@ -97,7 +110,8 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 		if err != nil {
 			t.Fatalf("continuation PrepareCall: %v", err)
 		}
-		codesep := recoverCodeSep(t, pCont.TxHex, utxo.Script, utxo.Satoshis, pCont.Preimage)
+		sigHashType := methodSigHashType(contract.Artifact, "increment")
+		codesep := recoverCodeSep(t, pCont.TxHex, utxo.Script, utxo.Satoshis, pCont.Preimage, sigHashType)
 
 		// Clean 1-in/1-out attacker-paying tx (no funding input to re-sign).
 		attackTx, err := helpers.BuildSpendTx(helpers.SDKUtxoToHelper(utxo), attacker.P2PKHScript(), 4000)
@@ -108,7 +122,7 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 		// PreparedCall has no field for it (post-BUG-100 the OP_PUSH_TX
 		// signature is derived on-chain from the preimage, not spender-supplied)
 		// — only the preimage below is wired into the hand-mutated PreparedCall.
-		_, preAttack, err := runar.ComputeOpPushTxWithCodeSep(attackTx.Hex(), 0, utxo.Script, utxo.Satoshis, codesep)
+		_, preAttack, err := runar.ComputeOpPushTxWithSigHash(attackTx.Hex(), 0, utxo.Script, utxo.Satoshis, codesep, sigHashType)
 		if err != nil {
 			t.Fatalf("attack OP_PUSH_TX: %v", err)
 		}

@@ -66,6 +66,7 @@ from runar_compiler.frontend.side_effect_summary import (
     continuation_shape_for,
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
+from runar_compiler.frontend.continuation_binding import TWIN_BINDING_FIELD
 from runar_compiler.ir.loader import MAX_LOOP_COUNT
 
 
@@ -87,6 +88,13 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
     if _has_untyped_operator(contract):
         from runar_compiler.frontend.typecheck import type_check
         type_check(contract)
+    # D25: the same for the twin-input binding. A caller that assembles its
+    # own pipeline and skips inject_continuation_binding would otherwise lower
+    # a mixed contract with no _spentOutpointHash, leaving its continuations
+    # unbound. Idempotent: a contract that already carries the field is
+    # returned unchanged, so the compiler's own path is unaffected.
+    from runar_compiler.frontend.continuation_binding import inject_continuation_binding
+    contract = inject_continuation_binding(contract)
     properties = _lower_properties(contract)
     methods = _lower_methods(contract)
 
@@ -551,6 +559,13 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                     # Single-output continuation: build raw output bytes, then
                     # splice in any declared data outputs, then concat with
                     # change, then hash.
+                    # D25: a 'bind' contract first records the spent outpoint
+                    # in its hidden last state field, so this continuation
+                    # differs from every other input's and no two inputs can
+                    # share one output list.
+                    if method_ctx.binds_outpoint:
+                        binding_ref = _emit_outpoint_binding(method_ctx)
+                        method_ctx.emit(_make_update_prop(TWIN_BINDING_FIELD, binding_ref))
                     state_script_ref = method_ctx.emit(ANFValue(kind="get_state_script"))
                     preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
                     new_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_newAmount"))
@@ -724,6 +739,15 @@ def _first_output_intrinsic(bindings: list[ANFBinding] | None) -> str:
         if name:
             return name
     return ""
+
+
+def _emit_outpoint_binding(ctx: "_LowerCtx") -> str:
+    """D25: ``sha256(extractOutpoint(txPreimage))``, the value a 'bind'
+    contract stores in its hidden last state field in every continuation it
+    makes (mirrors ``emitOutpointBinding`` in stateful-scaffold.ts)."""
+    preimage_ref = ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
+    outpoint_ref = ctx.emit(_make_call("extractOutpoint", [preimage_ref]))
+    return ctx.emit(_make_call("sha256", [outpoint_ref]))
 
 
 class _LowerCtx:
@@ -942,6 +966,11 @@ class _LowerCtx:
 
     def get_local_alias(self, local_name: str) -> str:
         return self._local_aliases.get(local_name, "")
+
+    @property
+    def binds_outpoint(self) -> bool:
+        """D25: the contract carries the hidden spent-outpoint field ('bind' class)."""
+        return any(p.name == TWIN_BINDING_FIELD for p in self._contract.properties)
 
     def add_output_ref(self, ref: str) -> None:
         self._add_output_refs.append(ref)
@@ -1903,6 +1932,9 @@ class _LowerCtx:
             arg_refs = self._lower_args(flat_args)
             satoshis = arg_refs[0]
             state_values = arg_refs[1:]
+            # D25: a 'bind' contract's hidden last state field is the spent outpoint.
+            if self.binds_outpoint:
+                state_values.append(_emit_outpoint_binding(self))
             ref = self.emit(ANFValue(kind="add_output", satoshis=satoshis, state_values=state_values, preimage=""))
             self.add_output_ref(ref)
             return ref
@@ -1955,6 +1987,9 @@ class _LowerCtx:
                 arg_refs = self._lower_args(flat_args)
                 satoshis = arg_refs[0]
                 state_values = arg_refs[1:]
+                # D25: a 'bind' contract's hidden last state field is the spent outpoint.
+                if self.binds_outpoint:
+                    state_values.append(_emit_outpoint_binding(self))
                 ref = self.emit(ANFValue(kind="add_output", satoshis=satoshis, state_values=state_values, preimage=""))
                 self.add_output_ref(ref)
                 return ref

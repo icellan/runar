@@ -65,8 +65,10 @@ class F038IrRoundTripTest {
     void statefulNonDefaultSighashSurvivesTheIrPath() throws IOException {
         Path src = repo().resolve("conformance/ir-roundtrip/SighashCounter.runar.ts");
         RoundTrip rt = roundTrip(src);
-        assertEquals(193, intField(rt.ir, "sigHashType"));
-        assertEquals(193, intField(rt.viaIr, "sigHashType"));
+        // D25: the mutate-only contract's ALL|ANYONECANPAY|FORKID (0xc1)
+        // resolves to SINGLE|ANYONECANPAY|FORKID (0xc3 = 195).
+        assertEquals(195, intField(rt.ir, "sigHashType"));
+        assertEquals(195, intField(rt.viaIr, "sigHashType"));
         assertEquals("StatefulSmartContract", stringField(rt.viaIr, "parentClass"));
     }
 

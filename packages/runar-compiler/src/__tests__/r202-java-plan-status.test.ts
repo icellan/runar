@@ -46,7 +46,8 @@ describe('R-202 the Java tier plan describes a shipped tier', () => {
   it('Cli.java runs Typecheck BEFORE ExpandFixedArrays, as the plan specifies', () => {
     const cli = readFileSync(CLI, 'utf8');
     const typecheck = cli.indexOf('Typecheck.run(contract)');
-    const expand = cli.indexOf('ExpandFixedArrays.run(contract)');
+    // D25: the pipeline expands the contract with its continuation binding applied.
+    const expand = cli.indexOf('ExpandFixedArrays.run(ContinuationBinding.apply(contract))');
     expect(typecheck, 'Typecheck.run not found').toBeGreaterThan(-1);
     expect(expand, 'ExpandFixedArrays.run not found').toBeGreaterThan(-1);
     expect(

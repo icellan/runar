@@ -114,7 +114,7 @@ func codesepOffsetForClose(t *testing.T, contract *runar.RunarContract, provider
 	if err != nil {
 		t.Fatalf("reference PrepareCall for codesep recovery: %v", err)
 	}
-	return recoverCodeSep(t, prepared.TxHex, utxo.Script, utxo.Satoshis, prepared.Preimage)
+	return recoverCodeSep(t, prepared.TxHex, utxo.Script, utxo.Satoshis, prepared.Preimage, methodSigHashType(contract.Artifact, "close"))
 }
 
 // buildRawCloseTx builds a raw (non-SDK) close() spend of a deployed auction

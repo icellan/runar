@@ -82,7 +82,9 @@ func TestF038_EmitIRToIRKeepsParentClassAndSigHashType(t *testing.T) {
 		sig               map[string]int
 	}{
 		{"ZeroMutable", f038ZeroMutable, "StatefulSmartContract", nil},
-		{"SighashCounter", f038SighashCounter, "StatefulSmartContract", map[string]int{"increment": 0xc1}},
+		// D25: a mutate-only contract maps ALL|ANYONECANPAY|FORKID to
+		// SINGLE|ANYONECANPAY|FORKID; the effective mode is what must survive.
+		{"SighashCounter", f038SighashCounter, "StatefulSmartContract", map[string]int{"increment": 0xc3}},
 		{"SighashSingle", f038SighashSingle, "SmartContract", map[string]int{"unlock": 0x43}},
 	}
 	for _, c := range cases {

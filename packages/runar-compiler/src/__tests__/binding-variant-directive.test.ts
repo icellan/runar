@@ -25,12 +25,14 @@ function errors(src: string, fileName = 'C.runar.ts'): string {
   return parse(src, fileName).errors.filter((e) => e.severity === 'error').map((e) => e.message).join('\n');
 }
 
+// D25: an addOutput body keeps the method on ALL|FORKID (a mutate-only
+// contract defaults to SINGLE, whose flag byte sits inside the blob).
 const counter = (directive: string, vis = 'public') => `
   class C extends StatefulSmartContract {
     n: bigint;
     constructor(n: bigint) { super(n); this.n = n; }
     ${directive}
-    ${vis} bump(): void { this.n = this.n + 1n; }
+    ${vis} bump(): void { this.addOutput(1n, this.n + 1n); }
   }`;
 
 /** Every check_preimage node in the ANF, in walk order. */

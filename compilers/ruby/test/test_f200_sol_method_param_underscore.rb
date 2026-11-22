@@ -62,7 +62,9 @@ class TestF200SolMethodParamUnderscore < Minitest::Test
   UNBOUND_HEX = "009c"
   # #180 / #213 moved it from 484142b2...: inc gained the 7-byte `_changePKH`
   # entry width gate (TS reference, same source, fold ON: 6001736c...).
-  SILENT_SHA256 = "6001736ca0dd06f9b6b772cf09952c98d042fdfb65dd4a2f46be69b9d5de3feb"
+  # D25: re-pinned (the contract is mutate-only, so it commits under
+  # SIGHASH_SINGLE); equals TS and the Python tier.
+  SILENT_SHA256 = "329bf55d7e561725b56f607ca0310a249fd1b6708f488cb26011d3a54888d47d"
 
   def parse(source, file_name)
     result = RunarCompiler.send(:_parse_source, source, file_name)

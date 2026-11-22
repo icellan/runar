@@ -106,14 +106,30 @@ def _sha256d(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
 
+def _user_sig_preimage(contract: RunarContract, utxo: Utxo, prepared) -> bytes:
+    """D25: SigCounter is mutate-only, so its covenant preimage
+    (``prepared.preimage``) is SIGHASH_SINGLE (0x43). A user Sig is
+    ALL|FORKID (the byte every signer appends), so OP_CHECKSIG verifies it
+    against the ALL|FORKID preimage of the same tx, subscript and code
+    separator."""
+    from runar.sdk.oppushtx import compute_op_push_tx_preimage
+
+    assert prepared.preimage[-8:] == "43000000", "SigCounter's covenant must be SINGLE (D25)"
+    code_sep = contract._get_code_sep_index(contract._find_method_index("inc"))
+    return bytes.fromhex(compute_op_push_tx_preimage(
+        prepared.tx_hex, 0, utxo.script, utxo.satoshis, code_sep, 0x41,
+    ))
+
+
 def test_prepared_call_sighash_is_bip143_hash256():
     """PreparedCall.sighash must be hash256(preimage), never sha256(preimage)."""
     contract, provider, signer = _deploy()
 
+    utxo = contract.get_utxo()
     prepared = contract.prepare_call("inc", [None], provider, signer)
     assert prepared.preimage, "a stateful call must carry a BIP-143 preimage"
 
-    preimage = bytes.fromhex(prepared.preimage)
+    preimage = _user_sig_preimage(contract, utxo, prepared)
     want = _sha256d(preimage).hex()
     wrong_single = hashlib.sha256(preimage).hexdigest()
 
@@ -121,7 +137,7 @@ def test_prepared_call_sighash_is_bip143_hash256():
         "PreparedCall.sighash is sha256(preimage) -- an external sign_hash() wallet "
         f"would ECDSA-sign the WRONG digest (want hash256 = {want})"
     )
-    assert prepared.sighash == want, "PreparedCall.sighash must be hash256(preimage)"
+    assert prepared.sighash == want, "PreparedCall.sighash must be hash256(ALL|FORKID preimage)"
 
 
 def test_external_sign_hash_wallet_signature_verifies_on_chain_digest():
@@ -134,6 +150,7 @@ def test_external_sign_hash_wallet_signature_verifies_on_chain_digest():
     """
     contract, provider, signer = _deploy()
 
+    utxo = contract.get_utxo()
     prepared = contract.prepare_call("inc", [None], provider, signer)
     assert len(prepared.sig_indices) == 1, (
         f"expected exactly one external Sig slot, got {prepared.sig_indices}"
@@ -149,7 +166,7 @@ def test_external_sign_hash_wallet_signature_verifies_on_chain_digest():
     # --- end external wallet ---
 
     # What OP_CHECKSIG actually verifies against on-chain.
-    on_chain_digest = _sha256d(bytes.fromhex(prepared.preimage))
+    on_chain_digest = _sha256d(_user_sig_preimage(contract, utxo, prepared))
     pub_key = bytes.fromhex(signer.get_public_key())
     assert ecdsa_verify(der, pub_key, on_chain_digest), (
         "the external wallet's signature over PreparedCall.sighash does NOT verify "

@@ -389,14 +389,17 @@ class TypedContractGeneratorTest {
     @Test
     void generatedWrapperStatefulCallOptionsChangeAddressAndPubKeyReachTheTx() throws Exception {
         String pkh = n427Pkh();
-        // N-426 (R164): changeAddress alone for another key is refused through the wrapper too.
-        java.lang.reflect.InvocationTargetException refused = org.junit.jupiter.api.Assertions.assertThrows(
-            java.lang.reflect.InvocationTargetException.class, () -> n427Call("n427a", N427_ADDR_B, null));
-        assertEquals(runar.lang.sdk.ScriptUtils.changeAddressMismatchMessage(N427_ADDR_B),
-            refused.getCause().getMessage());
-        String both = n427Call("n427b", N427_ADDR_B, N427_PUB_B);
-        assertEquals(2, countOccurrences(both, pkh),
-            "changePubKey must reach the covenant's _changePKH through the wrapper");
+        // D25: Counter's continuation methods are all mutate-only, so increment
+        // commits under SIGHASH_SINGLE|FORKID and declares no _changePKH: the
+        // change output is not covenant-committed, so changeAddress alone for
+        // another key is no longer an N-426 mismatch and the wrapper's
+        // changeAddress reaches the tx as the change output (one HASH160
+        // occurrence, with or without changePubKey). The _changePKH mapping of
+        // changePubKey is covered on an ALL contract by N425StatefulChangeAddressTest.
+        assertEquals(1, countOccurrences(n427Call("n427a", N427_ADDR_B, null), pkh),
+            "changeAddress must reach the change output through the wrapper");
+        assertEquals(1, countOccurrences(n427Call("n427b", N427_ADDR_B, N427_PUB_B), pkh),
+            "a SINGLE method has no _changePKH for changePubKey to reach");
         assertEquals(0, countOccurrences(n427Call("n427c", null, null), pkh));
     }
 

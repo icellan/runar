@@ -200,6 +200,14 @@ def _deployed_counter():
     return c, p, signer
 
 
+def _pushed(ours: list, tx_hex: str) -> tuple[bytes, int]:
+    """The last captured preimage that input 0's unlock actually pushes. D25:
+    prepare_call also computes the ALL|FORKID preimage of a user Sig's digest
+    (PreparedCall.sighash) after the covenant one, so the last capture is not
+    necessarily the pushed preimage."""
+    return next((pre, cs) for pre, cs in reversed(ours) if pre.hex() in tx_hex)
+
+
 def _capture_ours(monkeypatch) -> list:
     """Record every OP_PUSH_TX preimage runar-py computes, with its codesep index."""
     import runar.sdk.contract as contract_mod
@@ -247,7 +255,7 @@ def test_covenant_input_is_validated_and_its_preimage_matches_bsv_sdk(monkeypatc
     # Every input ran through Spend: the covenant input AND the funding input.
     assert report['validated'] == report['total'] == 2, report
 
-    final, code_sep_idx = ours[-1]
+    final, code_sep_idx = _pushed(ours, p.get_broadcasted_txs()[-1])
     # bsv-sdk's preimage for the SAME input: same outpoint (bytes 68..104).
     same_input = [t for t in theirs if t[68:104] == final[68:104]]
     assert len(same_input) == 1, f'{len(theirs)} bsv-sdk preimages, {len(same_input)} for the covenant input'
@@ -269,7 +277,7 @@ def test_tampered_covenant_preimage_is_rejected_at_input_0(monkeypatch):
 
     c.call('inc', [], p, signer)
     good = p.get_broadcasted_txs()[-1]
-    preimage = ours[-1][0].hex()
+    preimage = _pushed(ours, good)[0].hex()
     assert good.count(preimage) == 1
 
     # Flip a byte inside hashPrevouts (preimage bytes 4..36).

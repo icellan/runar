@@ -86,7 +86,16 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 	}
 	// D26: IR input skips the validator's locktime-domain rule (stateless and
 	// stateful programs alike); see frontend/locktime_domain.go.
-	return frontend.AssertIRLocktimeDomain(program)
+	if err := frontend.AssertIRLocktimeDomain(program); err != nil {
+		return err
+	}
+	// D25: a StatefulSmartContract's continuations must be bound to their input
+	// (SINGLE, or the hidden spent-outpoint field); checked last among the IR
+	// frontend rules so every earlier, more specific diagnostic keeps precedence.
+	if parentClass == "StatefulSmartContract" {
+		return checkIRContinuationBinding(program)
+	}
+	return nil
 }
 
 // N-087: the source validator's parentClass rules, which --ir never ran. A

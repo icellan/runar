@@ -211,11 +211,13 @@ class TestCheckSigAndPreimageCodegen < Minitest::Test
         }
 
         public bump(): void {
-          this.count = this.count + 1n;
+          this.addOutput(1n, this.count + 1n);
         }
       }
     TS
 
+    # D25: an addOutput body keeps the method on ALL|FORKID; a mutate-only
+    # contract defaults to SINGLE, whose flag byte sits inside the blob.
     script_hex = compile_ts_source(source, 'Counter.runar.ts').script
     occurrences = script_hex.scan(TS_REFERENCE_PREIMAGE_BINDING_HEX).length
     assert_equal 1, occurrences,

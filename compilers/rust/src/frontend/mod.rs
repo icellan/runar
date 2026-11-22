@@ -17,6 +17,7 @@ pub mod identifier_collision;
 pub mod input_limits;
 pub mod int_literal;
 pub mod const_reassign;
+pub mod continuation_binding;
 pub mod continuation_rules;
 pub mod locktime_domain;
 pub mod loop_condition;

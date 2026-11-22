@@ -99,6 +99,9 @@ const ParseError = error{
     // D26: a public method compares the locktime against a lower bound on
     // a path with no asserted domain pin. Message in lastDiagnostic().
     LocktimeDomain,
+    /// D25: a StatefulSmartContract continuation not bound to its input
+    /// (stateful_scaffold.checkContinuationBinding).
+    ContinuationUnbound,
     // N-265: a cycle in the method_call graph. `compile-ir` skips the
     // frontend entirely, so frontend/validate.zig's recursion check never
     // ran; stack lowering inlines every method_call with no cycle guard,
@@ -556,6 +559,16 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         error.LocktimeDomain => return ParseError.LocktimeDomain,
         error.OutOfMemory => return error.OutOfMemory,
     };
+    // D25: a StatefulSmartContract's continuations must be bound to their
+    // input (SINGLE, or the hidden spent-outpoint field); checked last among
+    // the IR frontend rules so every earlier, more specific diagnostic keeps
+    // precedence. See stateful_scaffold.zig.
+    if (effective_class == .stateful_smart_contract) {
+        stateful_scaffold.checkContinuationBinding(allocator, properties, method_list.items) catch |err| switch (err) {
+            error.ContinuationUnbound => return ParseError.ContinuationUnbound,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
 
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),

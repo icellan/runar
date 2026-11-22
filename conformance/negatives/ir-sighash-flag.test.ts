@@ -25,8 +25,8 @@ import { isCiEnv } from '../env.js';
  * `sigHashType` binds SINGLE|ANYONECANPAY|FORKID while the artifact tells the
  * SDK to sign ALL|FORKID, so the SDK's preimage never satisfies the script.
  *
- * Every case is a checked-in golden (`stateful-counter`, or the nested control
- * below) with ONE field changed, so each refusal is graded against a control
+ * Every case is a checked-in golden (`stateful-counter`, the sdk-call IR pin,
+ * or the nested control below) with ONE field changed, so each refusal is graded against a control
  * the same tier is first observed accepting. Like `ir-required-fields.test.ts`
  * this file grades the exact diagnostic: the item is one shared rule with one
  * shared message, and a refusal for an unrelated reason does not count.
@@ -77,22 +77,43 @@ function counter(edit: (method: Json, checkPreimage: Json) => void): Json {
 /**
  * N-038: a SIGHASH_SINGLE stateful continuation commits only the same-index
  * output, so it carries no change segment and no `_changePKH` /
- * `_changeAmount`. stateful-counter's change-carrying continuation is
- * therefore not a valid SINGLE program; the SINGLE-base controls are the
- * N-038 contract's `bump` (methods[1]) instead, from the gated sdk-call IR pin
+ * `_changeAmount`. The SINGLE-base controls are the N-038 contract's `bump`
+ * (methods[1]) from the gated sdk-call IR pin
  * conformance/sdk-call/expected-ir.json — same body layout (t1 =
  * check_preimage, t5 = the pinned sighash-type constant).
+ *
+ * D25: stateful-counter's mutate-only continuations are now SIGHASH_SINGLE
+ * (flag 0x43 in the golden), and a mutate-only ALL continuation without the
+ * hidden `_spentOutpointHash` field is refused by the --ir binding rule. The
+ * ALL-base controls (and the "flag absent" shape) are therefore the same
+ * pin's `reset` (methods[2]): a change-carrying ALL continuation, flag absent,
+ * in a contract that carries `_spentOutpointHash`, so the binding rule
+ * accepts it and every edit below reaches the flag rule it is about.
  */
-const SINGLE_GOLDEN = join(REPO, 'conformance/sdk-call/expected-ir.json');
-function single(edit: (method: Json, checkPreimage: Json) => void): Json {
-  const ir = JSON.parse(readFileSync(SINGLE_GOLDEN, 'utf8')) as Json;
-  const method = ir.methods[1];
+const SDK_CALL_GOLDEN = join(REPO, 'conformance/sdk-call/expected-ir.json');
+function sdkCallMethod(
+  index: number,
+  name: string,
+  edit: (method: Json, checkPreimage: Json) => void,
+): Json {
+  const ir = JSON.parse(readFileSync(SDK_CALL_GOLDEN, 'utf8')) as Json;
+  const method = ir.methods[index];
   const cp = method.body[1].value;
-  if (method.name !== 'bump' || cp.kind !== 'check_preimage') {
-    throw new Error('conformance/sdk-call/expected-ir.json no longer has bump.t1 = check_preimage');
+  if (method.name !== name || cp.kind !== 'check_preimage') {
+    throw new Error(`conformance/sdk-call/expected-ir.json no longer has ${name}.t1 = check_preimage`);
   }
   edit(method, cp);
   return ir;
+}
+const single = (edit: (method: Json, checkPreimage: Json) => void): Json =>
+  sdkCallMethod(1, 'bump', edit);
+function allBase(edit: (method: Json, checkPreimage: Json) => void): Json {
+  return sdkCallMethod(2, 'reset', (m, cp) => {
+    if (cp.sighashFlag !== undefined || m.sigHashType !== undefined) {
+      throw new Error('sdk-call reset is no longer an ALL method with the flag absent');
+    }
+    edit(m, cp);
+  });
 }
 
 /**
@@ -163,7 +184,7 @@ const REFUSED: Case[] = [
   // An out-of-set flag is refused as such even when sigHashType agrees on its low byte.
   { name: 'flag 449 (0x1c1), sigHashType 0xc1', ir: counter((m, cp) => { cp.sighashFlag = 449; m.sigHashType = 0xc1; }), error: badFlag('increment', 't1', 449) },
   // The reverse divergence: the ABI declares a mode the script never binds.
-  { name: 'sigHashType 0xc3, flag absent', ir: counter((m) => { m.sigHashType = 0xc3; }), error: mismatch('increment', 't1', 65, 195) },
+  { name: 'sigHashType 0xc3, flag absent', ir: allBase((m) => { m.sigHashType = 0xc3; }), error: mismatch('reset', 't1', 65, 195) },
   { name: 'sigHashType 0x42, flag 0x43', ir: counter((m, cp) => { m.sigHashType = 0x42; cp.sighashFlag = 0x43; }), error: mismatch('increment', 't1', 67, 66) },
   // Nested: an if arm and a loop body are still bindings of the method.
   { name: 'if arm, flag 999999', ir: nested('if', 999999), error: badFlag('unlock', 't3', 999999) },
@@ -173,12 +194,14 @@ const REFUSED: Case[] = [
 ];
 
 const ACCEPTED: Array<{ name: string; ir: Json; flag: number }> = [
-  { name: 'flag absent (golden)', ir: counter(() => {}), flag: 0x41 },
+  // D25: the unedited stateful-counter golden binds SINGLE (0x43).
+  { name: 'stateful-counter golden', ir: counter(() => {}), flag: 0x43 },
+  { name: 'flag absent (sdk-call reset)', ir: allBase(() => {}), flag: 0x41 },
   ...VALID.map((f) => ({
     name: `flag 0x${f.toString(16)} with sigHashType 0x${f.toString(16)}`,
     // N-101: the auto-injected sighash-type assert (increment.t5) pins the
     // declared mode too, as the frontend emits it for `@sighash`.
-    ir: ((f & 0x1f) === 0x03 ? single : counter)((m, cp) => {
+    ir: ((f & 0x1f) === 0x03 ? single : allBase)((m, cp) => {
       const from = m.sigHashType ?? 0x41;
       cp.sighashFlag = f;
       m.sigHashType = f;

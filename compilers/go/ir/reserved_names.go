@@ -9,7 +9,8 @@ package ir
 //   fixed-array expansion  <name>__<digits>, __idx_<digits>, __val_<digits>
 //   stack lowering         _codePart, __param_*, __shadowed_*, _pub_<digits>
 //   auto-injected params   _changePKH, _changeAmount, _newAmount,
-//                          _serialisedOutputs, _prevOutScript_<digits>, and
+//                          _serialisedOutputs, _prevOutScript_<digits>,
+//                          _spentOutpointHash (D25's hidden state field), and
 //                          txPreimage in a StatefulSmartContract
 
 import (
@@ -46,7 +47,7 @@ func isANFBindingReserved(name string) bool {
 
 func isSourceOnlyReserved(name string) bool {
 	switch name {
-	case "_changePKH", "_changeAmount", "_newAmount", "_serialisedOutputs":
+	case "_changePKH", "_changeAmount", "_newAmount", "_serialisedOutputs", "_spentOutpointHash":
 		return true
 	}
 	return reArraySlot.MatchString(name) || reIdxTemp.MatchString(name) ||

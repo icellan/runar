@@ -116,7 +116,15 @@ public final class StatefulScaffold {
         return shape(methods, method)[0];
     }
 
-    private static void continuation(Emitter e, boolean needsChange, boolean includesChange, List<String> stateRefs, List<String> dataRefs) {
+    /** D25: {@code sha256(extractOutpoint(txPreimage))} (stateful-scaffold.ts {@code emitOutpointBinding}). */
+    private static String outpointBinding(Emitter e) {
+        String pre = e.emit(new LoadParam("txPreimage"));
+        String outpoint = e.emit(new Call("extractOutpoint", List.of(pre)));
+        return e.emit(new Call("sha256", List.of(outpoint)));
+    }
+
+    private static void continuation(Emitter e, boolean needsChange, boolean includesChange, List<String> stateRefs,
+            List<String> dataRefs, boolean bindsOutpoint) {
         if (!needsChange) return;
         if (stateRefs.isEmpty()) {
             String p = e.emit(new LoadParam("txPreimage"));
@@ -142,6 +150,11 @@ public final class StatefulScaffold {
             acc = stateRefs.get(0);
             for (String r : stateRefs.subList(1, stateRefs.size())) acc = e.emit(new Call("cat", List.of(acc, r)));
         } else {
+            // D25: a 'bind' contract's auto-continuation records the spent outpoint.
+            if (bindsOutpoint) {
+                String h = outpointBinding(e);
+                e.emit(new UpdateProp(ContinuationBinding.TWIN_BINDING_FIELD, h));
+            }
             String script = e.emit(new GetStateScript());
             String p = e.emit(new LoadParam("txPreimage"));
             String na = e.emit(new LoadParam("_newAmount"));
@@ -261,6 +274,8 @@ public final class StatefulScaffold {
                     && Objects.equals(normType(eb.resultType()), normType(ab.resultType()));
             } else if (e instanceof DeserializeState ed && a instanceof DeserializeState ad) {
                 ok = ref(ed.preimage(), ad.preimage());
+            } else if (e instanceof UpdateProp eu && a instanceof UpdateProp au) {
+                ok = eu.name().equals(au.name()) && ref(eu.value(), au.value());
             } else if (e instanceof GetStateScript && a instanceof GetStateScript) {
                 ok = true;
             } else if (e instanceof If ei && a instanceof If ai) {
@@ -315,6 +330,7 @@ public final class StatefulScaffold {
         boolean hasMutable = props.stream().anyMatch(p -> !p.readonly());
         Set<String> propNames = new HashSet<>();
         for (AnfProperty p : props) propNames.add(p.name());
+        boolean bindsOutpoint = propNames.contains(ContinuationBinding.TWIN_BINDING_FIELD);
 
         for (AnfMethod m : methods) {
             if (!m.isPublic() || "constructor".equals(m.name())) continue;
@@ -390,7 +406,7 @@ public final class StatefulScaffold {
             List<String> dataRefs = new ArrayList<>();
             for (AnfBinding b : dataOut) dataRefs.add(b.name());
             Emitter tail = new Emitter(counts.keySet(), counter);
-            continuation(tail, needsChange, includesChange, stateRefs, dataRefs);
+            continuation(tail, needsChange, includesChange, stateRefs, dataRefs, bindsOutpoint);
             int offset = rest.size() - tail.out.size();
             for (int i = 0; i < tail.out.size(); i++) {
                 if (offset + i < 0 || !match.binding(tail.out.get(i), rest.get(offset + i))) {
@@ -419,5 +435,88 @@ public final class StatefulScaffold {
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // D25: the --ir check of the contract-level continuation binding
+    // ---------------------------------------------------------------------
+
+    /** D25: the shared --ir diagnostic for a continuation that is not bound to its input. */
+    public static String irUnboundContinuationMessage(String detail) {
+        return "IR validation: StatefulSmartContract continuation is not bound to its input (twin-input theft): "
+            + detail;
+    }
+
+    private static boolean isZeroHash(runar.compiler.ir.anf.ConstValue v) {
+        return v instanceof BytesConst b && "00".repeat(32).equals(b.hex());
+    }
+
+    /**
+     * D25 ({@code assertIrContinuationBinding}): an {@code --ir} program must
+     * carry the binding the frontend would give it. Without the hidden
+     * {@code _spentOutpointHash} field, a program with an auto-continuation
+     * method must commit every continuation under a SINGLE base, from
+     * auto-continuation methods only. With the field, it must be the LAST
+     * property, mutable, {@code Sha256}, zero at deploy, and every
+     * {@code add_output} must carry {@code sha256(extractOutpoint(txPreimage))}
+     * as its last state value (the auto-continuation's write is checked with
+     * the rest of the continuation by {@link #check}).
+     */
+    static void checkContinuationBinding(List<AnfProperty> props, List<AnfMethod> methods) {
+        String field = ContinuationBinding.TWIN_BINDING_FIELD;
+        boolean bindsOutpoint = props.stream().anyMatch(p -> field.equals(p.name()));
+        if (bindsOutpoint) {
+            AnfProperty last = props.get(props.size() - 1);
+            if (!field.equals(last.name()) || last.readonly() || !"Sha256".equals(last.type())
+                    || !isZeroHash(last.initialValue())) {
+                throw new RuntimeException(irUnboundContinuationMessage("'" + field
+                    + "' must be the last property, mutable, of type Sha256, with initial value 32 zero bytes"));
+            }
+            for (AnfMethod m : methods) {
+                Map<String, AnfValue> byName = new HashMap<>();
+                List<AnfBinding> all = new ArrayList<>();
+                preorder(m.body(), all);
+                for (AnfBinding b : all) byName.put(b.name(), b.value());
+                for (AnfBinding b : all) {
+                    if (!(b.value() instanceof AddOutput ao)) continue;
+                    List<String> sv = ao.stateValues() == null ? List.of() : ao.stateValues();
+                    String pre = callArg(byName, callArg(byName, sv.isEmpty() ? null : sv.get(sv.size() - 1), "sha256"),
+                        "extractOutpoint");
+                    AnfValue v = pre == null ? null : byName.get(pre);
+                    if (!(v instanceof LoadParam lp) || !"txPreimage".equals(lp.name())) {
+                        throw new RuntimeException(irUnboundContinuationMessage("method '" + m.name()
+                            + "': every add_output must carry sha256(extractOutpoint(txPreimage)) as its last state value"));
+                    }
+                }
+            }
+            return;
+        }
+        List<AnfMethod> continuing = new ArrayList<>();
+        boolean anyAuto = false;
+        for (AnfMethod m : methods) {
+            if (!m.isPublic() || "constructor".equals(m.name())) continue;
+            boolean[] sh = shape(methods, m);
+            if (!sh[0]) continue;
+            continuing.add(m);
+            anyAuto |= sh[1];
+        }
+        if (!anyAuto) return;
+        for (AnfMethod m : continuing) {
+            int mode = m.sighashType() == null ? SIGHASH_DEFAULT : m.sighashType();
+            boolean single = (mode & 0x1f) == 0x03;
+            if (!shape(methods, m)[1] || !single) {
+                throw new RuntimeException(irUnboundContinuationMessage("method '" + m.name()
+                    + "': a program with an auto-continuation method and no '" + field
+                    + "' field must commit every continuation under a SIGHASH_SINGLE base, from auto-continuation"
+                    + " methods only"));
+            }
+        }
+    }
+
+    /** The single argument of {@code r} when it is a one-arg call of {@code func}, else null. */
+    private static String callArg(Map<String, AnfValue> byName, String r, String func) {
+        AnfValue v = r == null ? null : byName.get(r);
+        return v instanceof Call c && c.func().equals(func) && c.args() != null && c.args().size() == 1
+            ? c.args().get(0) : null;
     }
 }

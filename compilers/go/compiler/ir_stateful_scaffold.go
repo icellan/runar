@@ -85,7 +85,15 @@ func scaffoldPrologue(e *scaffoldEmitter, sighashMode int, hasMutableState bool)
 	}
 }
 
-func scaffoldContinuation(e *scaffoldEmitter, needsChange, includesChange bool, stateRefs, dataRefs []string) {
+// scaffoldOutpointBinding (D25): sha256(extractOutpoint(txPreimage)), the
+// value a 'bind' contract stores in its hidden last state field.
+func scaffoldOutpointBinding(e *scaffoldEmitter) string {
+	p := e.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+	op := e.emit(scaffoldCall("extractOutpoint", p))
+	return e.emit(scaffoldCall("sha256", op))
+}
+
+func scaffoldContinuation(e *scaffoldEmitter, needsChange, includesChange bool, stateRefs, dataRefs []string, bindsOutpoint bool) {
 	if !needsChange {
 		return
 	}
@@ -116,6 +124,11 @@ func scaffoldContinuation(e *scaffoldEmitter, needsChange, includesChange bool, 
 			acc = e.emit(scaffoldCall("cat", acc, r))
 		}
 	} else {
+		// D25: a 'bind' contract records the spent outpoint first.
+		if bindsOutpoint {
+			b := scaffoldOutpointBinding(e)
+			e.emit(ir.ANFValue{Kind: "update_prop", Name: frontend.TwinBindingField, ValueRef: b})
+		}
 		script := e.emit(ir.ANFValue{Kind: "get_state_script"})
 		p := e.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 		na := e.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
@@ -285,6 +298,8 @@ func (s *scaffoldMatcher) binding(exp, act *ir.ANFBinding) bool {
 		ok = e.Op == a.Op && s.ref(e.Left, a.Left) && s.ref(e.Right, a.Right) && e.ResultType == a.ResultType
 	case "deserialize_state":
 		ok = s.ref(e.Preimage, a.Preimage)
+	case "update_prop":
+		ok = e.Name == a.Name && s.ref(e.ValueRef, scaffoldAssertRef(a))
 	case "get_state_script":
 		ok = true
 	case "if":
@@ -442,7 +457,7 @@ func checkIRStatefulScaffolding(program *ir.ANFProgram) error {
 			return out
 		}
 		tail := &scaffoldEmitter{taken: taken, next: &next}
-		scaffoldContinuation(tail, needsChange, includesChange, names(stateOut), names(dataOut))
+		scaffoldContinuation(tail, needsChange, includesChange, names(stateOut), names(dataOut), props[frontend.TwinBindingField])
 		offset := len(rest) - len(tail.out)
 		for i := range tail.out {
 			if offset+i < 0 || !match.binding(&tail.out[i], &rest[offset+i]) {
@@ -484,4 +499,135 @@ func checkIRStatefulScaffolding(program *ir.ANFProgram) error {
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// D25: the --ir check of the contract-level continuation binding
+// ---------------------------------------------------------------------------
+
+// irUnboundContinuationMessage is the shared --ir diagnostic for a
+// continuation that is not bound to its input.
+func irUnboundContinuationMessage(detail string) string {
+	return "IR validation: StatefulSmartContract continuation is not bound to its input (twin-input theft): " + detail
+}
+
+// checkIRContinuationBinding (D25): an --ir program must carry the binding the
+// frontend would give it (frontend/continuation_binding.go). Without the
+// hidden `_spentOutpointHash` field, a program with an auto-continuation
+// method must commit every continuation under a SINGLE base, and that method
+// must not sit beside an addOutput one. With the field, it must be the LAST
+// property, mutable, Sha256, zero at deploy, and every add_output must carry
+// sha256(extractOutpoint(txPreimage)) as its last state value (the
+// auto-continuation's write is checked with the rest of the continuation).
+// Mirrors assertIrContinuationBinding in stateful-scaffold.ts.
+func checkIRContinuationBinding(program *ir.ANFProgram) error {
+	binds := false
+	for _, p := range program.Properties {
+		if p.Name == frontend.TwinBindingField {
+			binds = true
+			break
+		}
+	}
+	if binds {
+		field := program.Properties[len(program.Properties)-1]
+		iv, _ := field.InitialValue.(string)
+		if field.Name != frontend.TwinBindingField || field.Readonly || field.Type != "Sha256" ||
+			iv != strings.Repeat("00", 32) {
+			return fmt.Errorf("%s", irUnboundContinuationMessage(fmt.Sprintf(
+				"'%s' must be the last property, mutable, of type Sha256, with initial value 32 zero bytes",
+				frontend.TwinBindingField)))
+		}
+		for mi := range program.Methods {
+			m := &program.Methods[mi]
+			byName := map[string]*ir.ANFValue{}
+			var index func(bs []ir.ANFBinding)
+			index = func(bs []ir.ANFBinding) {
+				for i := range bs {
+					byName[bs[i].Name] = &bs[i].Value
+					for _, n := range scaffoldNested(&bs[i].Value) {
+						index(n)
+					}
+				}
+			}
+			index(m.Body)
+			call := func(r, fn string) string {
+				if r == "" {
+					return ""
+				}
+				v, ok := byName[r]
+				if !ok || v.Kind != "call" || v.Func != fn || len(v.Args) != 1 {
+					return ""
+				}
+				return v.Args[0]
+			}
+			var check func(bs []ir.ANFBinding) error
+			check = func(bs []ir.ANFBinding) error {
+				for i := range bs {
+					v := &bs[i].Value
+					if v.Kind == "add_output" {
+						last := ""
+						if len(v.StateValues) > 0 {
+							last = v.StateValues[len(v.StateValues)-1]
+						}
+						pre := call(call(last, "sha256"), "extractOutpoint")
+						pv, ok := byName[pre]
+						if pre == "" || !ok || pv.Kind != "load_param" || pv.Name != "txPreimage" {
+							return fmt.Errorf("%s", irUnboundContinuationMessage(fmt.Sprintf(
+								"method '%s': every add_output must carry sha256(extractOutpoint(txPreimage)) as its last state value",
+								m.Name)))
+						}
+					}
+					for _, n := range scaffoldNested(v) {
+						if err := check(n); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}
+			if err := check(m.Body); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	type shaped struct {
+		m              *ir.ANFMethod
+		needsNewAmount bool
+	}
+	var shapes []shaped
+	anyAuto := false
+	for mi := range program.Methods {
+		m := &program.Methods[mi]
+		if !m.IsPublic || m.Name == "constructor" {
+			continue
+		}
+		needsChange, _, needsNewAmount := scaffoldShape(program, m)
+		if !needsChange {
+			continue
+		}
+		shapes = append(shapes, shaped{m, needsNewAmount})
+		if needsNewAmount {
+			anyAuto = true
+		}
+	}
+	if !anyAuto {
+		return nil
+	}
+	for _, s := range shapes {
+		single := sighashOrDefaultPtr(s.m.SigHashType)&0x1f == 0x03
+		if !s.needsNewAmount || !single {
+			return fmt.Errorf("%s", irUnboundContinuationMessage(fmt.Sprintf(
+				"method '%s': a program with an auto-continuation method and no '%s' field must commit every continuation under a SIGHASH_SINGLE base, from auto-continuation methods only",
+				s.m.Name, frontend.TwinBindingField)))
+		}
+	}
+	return nil
+}
+
+func sighashOrDefaultPtr(p *int) int {
+	if p == nil {
+		return frontend.SighashDefault
+	}
+	return *p
 }

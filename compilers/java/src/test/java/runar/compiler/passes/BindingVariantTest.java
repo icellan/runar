@@ -28,7 +28,10 @@ class BindingVariantTest {
             + "  count: bigint;\n"
             + "  constructor(count: bigint) { super(count); this.count = count; }\n"
             + "  " + directive + "\n"
-            + "  public bump() { this.count++; }\n"
+            // D25: an addOutput body keeps the method on ALL|FORKID (a
+            // mutate-only contract defaults to SINGLE, whose flag byte sits
+            // inside the blob).
+            + "  public bump() { this.addOutput(1n, this.count + 1n); }\n"
             + "}\n";
     }
 

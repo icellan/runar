@@ -41,6 +41,28 @@ class Counter extends StatefulSmartContract {
 }
 `;
 
+/**
+ * D25: Counter's continuation methods are all mutate-only, so they commit under
+ * SIGHASH_SINGLE|FORKID (0x43). This explicit-output twin keeps ALL|FORKID, for
+ * the cases that exercise the whole-list hashOutputs.
+ */
+const allCounterSource = `
+import { StatefulSmartContract, extractAmount } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public increment() {
+    this.addOutput(extractAmount(this.txPreimage), this.count + 1n);
+  }
+}
+`;
+
 /** Stateless contract that just uses checkPreimage (for basic preimage test). */
 const statelessSource = `
 import { SmartContract, assert } from 'runar-lang';
@@ -249,8 +271,8 @@ describe('mock-preimage', () => {
       expect(result.scriptCode).toBeTruthy();
       expect(result.hashOutputs).toBeTruthy();
 
-      // Signature should end with sighash byte 0x41
-      expect(result.signatureHex.endsWith('41')).toBe(true);
+      // Signature should end with the method's sighash byte: 0x43 (D25 SINGLE)
+      expect(result.signatureHex.endsWith('43')).toBe(true);
 
       // hashOutputs should be 32 bytes (64 hex chars)
       expect(result.hashOutputs.length).toBe(64);
@@ -333,7 +355,7 @@ describe('mock-preimage', () => {
 
       // sighashType: 4 bytes LE
       const sighashType = preimage.slice(offset, offset + 8);
-      expect(sighashType).toBe('41000000'); // SIGHASH_ALL | SIGHASH_FORKID
+      expect(sighashType).toBe('43000000'); // SIGHASH_SINGLE | SIGHASH_FORKID (D25)
       offset += 8;
 
       // Should have consumed the entire preimage
@@ -374,10 +396,9 @@ describe('mock-preimage', () => {
         satoshis: 10000n,
       });
 
-      // hashOutputs should be hash256 of empty data
-      expect(result.hashOutputs).toBe(
-        '5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456',
-      );
+      // D25: Counter commits under SINGLE; with no output at the input's
+      // index BIP-143 SINGLE's hashOutputs is 32 zero bytes.
+      expect(result.hashOutputs).toBe('00'.repeat(32));
     });
 
     it('builds a preimage for a stateless contract', () => {
@@ -419,7 +440,7 @@ describe('mock-preimage', () => {
     });
 
     it('includes additional raw outputs in hashOutputs', () => {
-      const artifact = compileArtifact(counterSource, 'Counter.runar.ts');
+      const artifact = compileArtifact(allCounterSource, 'Counter.runar.ts');
 
       // Build a raw additional output: 1000 sats, 1-byte script 0xff
       const rawOutput = '0000000000000000' + '01' + 'ff';
@@ -492,8 +513,8 @@ describe('mock-preimage', () => {
       // DER signature starts with 0x30 (SEQUENCE tag)
       expect(result.signatureHex.slice(0, 2)).toBe('30');
 
-      // Should end with sighash type 0x41
-      expect(result.signatureHex.slice(-2)).toBe('41');
+      // Should end with the method's sighash type: 0x43 (D25 SINGLE)
+      expect(result.signatureHex.slice(-2)).toBe('43');
 
       // DER structure: 30 [len] 02 [rLen] [r] 02 [sLen] [s] + 41
       const sigBytes = hexToBytes(

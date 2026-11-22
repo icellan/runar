@@ -774,6 +774,13 @@ class Counter extends StatefulSmartContract {
     public increment() {
         this.count = this.count + 1n;
     }
+
+    // D25: an addOutput sibling keeps the contract on ALL|FORKID (a contract
+    // whose continuation methods are all mutate-only defaults to SINGLE,
+    // which takes no change params).
+    public bump() {
+        this.addOutput(1n, this.count + 1n);
+    }
 }
 "#;
     let program = compile_ts_to_ir(source).expect("should lower to ANF");
@@ -3378,9 +3385,18 @@ class Counter extends StatefulSmartContract {
     // so A20's narrower predicate (AddOutput | UpdateProp) must NOT fire here —
     // this is what distinguishes the two tests instead of duplicating one
     // another.
-    let has_narrow_continuation = note.body.iter().any(|b| {
-        matches!(&b.value, ANFValue::AddOutput { .. } | ANFValue::UpdateProp { .. })
+    // D25: a data-output contract is bound by the hidden `_spentOutpointHash`
+    // field, which the auto-continuation writes; that compiler write is not a
+    // user property mutation, so it is excluded here (and asserted below).
+    let has_narrow_continuation = note.body.iter().any(|b| match &b.value {
+        ANFValue::AddOutput { .. } => true,
+        ANFValue::UpdateProp { name, .. } => name != "_spentOutpointHash",
+        _ => false,
     });
+    assert!(
+        note.body.iter().any(|b| matches!(&b.value, ANFValue::UpdateProp { name, .. } if name == "_spentOutpointHash")),
+        "D25: note() must write the hidden spent-outpoint field"
+    );
     assert!(
         !has_narrow_continuation,
         "note() should contain neither AddOutput nor UpdateProp (it only declares a \

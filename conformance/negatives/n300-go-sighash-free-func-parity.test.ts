@@ -24,6 +24,10 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  *   - the same directive above a public method is accepted by every tier
  *     (the control, so the refusal is the directive rule and not the fixture);
  *   - every tier is present (a missing toolchain fails, it is not skipped).
+ * The directive is `SINGLE|FORKID` in all four files: since D25 the Counter's
+ * mutate-only `Increment` commits under SIGHASH_SINGLE, and an explicit pure
+ * `ALL|FORKID` on it is refused (twin-input theft), which would make the
+ * control fail for a reason that has nothing to do with this rule.
  * What it does NOT prove:
  *   - anything about the other eight surfaces, or the position/column of the
  *     diagnostic (the CLIs expose only the verdict and message text);

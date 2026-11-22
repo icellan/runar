@@ -37,7 +37,8 @@ import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
-import { emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
+import { emitOutpointBinding, emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
+import { injectContinuationBinding, TWIN_BINDING_FIELD } from './continuation-binding.js';
 import { loopOutputIntrinsicMessage, ternaryOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import type { BindingVariant } from '../ir/anf-ir.js';
@@ -61,6 +62,12 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
   // types still come from the checker and never from a guess. A node the
   // checker could not type keeps no annotation and is refused below.
   if (hasUntypedOperator(contract)) typecheck(contract);
+  // D25: the same for the twin-input binding. A caller that assembles its
+  // own pipeline and skips injectContinuationBinding would otherwise lower a
+  // mixed contract with no _spentOutpointHash, leaving its continuations
+  // unbound. Idempotent: a contract that already carries the field is
+  // returned unchanged, so the compiler's own path is unaffected.
+  contract = injectContinuationBinding(contract);
   const properties = lowerProperties(contract);
   const methods = lowerMethods(contract);
 
@@ -410,7 +417,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // to the full runtime output set. Locked in by the all-tier
       // `private-helper-outputs` conformance fixture (its `partition`
       // and `log` methods route outputs through private helpers).
-      emitStatefulContinuation(methodCtx, shape, addOutputRefs, addDataOutputRefs);
+      emitStatefulContinuation(methodCtx, shape, addOutputRefs, addDataOutputRefs, methodCtx.bindsOutpoint);
 
       // Build augmented params list for ABI
       const augmentedParams: ParamNode[] = method.params.filter(param => !isStatefulContextParam(param));
@@ -642,6 +649,10 @@ class LoweringContext {
    * lowering to inline later.
    */
   private readonly sideEffects: SideEffectSummary | null;
+  /** D25: the contract carries the hidden spent-outpoint field ('bind' class). */
+  get bindsOutpoint(): boolean {
+    return this.contract.properties.some((p) => p.name === TWIN_BINDING_FIELD);
+  }
   /** Debug: source location to attach to emitted ANF bindings. */
   currentSourceLoc: { file: string; line: number; column: number } | undefined;
   /**
@@ -2575,6 +2586,8 @@ function lowerCallExpr(
     const argRefs = normalizedAddOutputArgs.map(arg => lowerExprToRef(arg, ctx));
     const satoshis = argRefs[0]!;
     const stateValues = argRefs.slice(1);
+    // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+    if (ctx.bindsOutpoint) stateValues.push(emitOutpointBinding(ctx));
     const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
     ctx.addOutputRef(ref);
     return ref;
@@ -2616,6 +2629,8 @@ function lowerCallExpr(
     const argRefs = normalizedAddOutputArgs.map(arg => lowerExprToRef(arg, ctx));
     const satoshis = argRefs[0]!;
     const stateValues = argRefs.slice(1);
+    // D25: a 'bind' contract's hidden last state field is the spent outpoint.
+    if (ctx.bindsOutpoint) stateValues.push(emitOutpointBinding(ctx));
     const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
     ctx.addOutputRef(ref);
     return ref;

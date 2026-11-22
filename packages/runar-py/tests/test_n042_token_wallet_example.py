@@ -10,9 +10,9 @@ default broadcast validation runs every known input through bsv-sdk's
 test asserts nothing about which inputs it executed. Script execution of this
 same example is proven by the TS and Go N-042 tests.
 
-Proves: the shipped example compiles in the Python tier; transfer and merge
-sign the tx they broadcast; merge spends both token outpoints once into a
-continuation holding the summed supply.
+Proves: the shipped example compiles in the Python tier; transfer signs the
+tx it broadcasts; merge (mutate-only, so SIGHASH_SINGLE under D25) is refused
+before anything is broadcast.
 Does NOT prove: script execution in this tier, node acceptance, or that the
 example is a sound token (its header documents the ABI's limits).
 """
@@ -22,11 +22,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import runar_compiler.compiler as compiler
-from runar.sdk.contract import RunarContract
 from runar.sdk.local_signer import LocalSigner
-from runar.sdk.oppushtx import _parse_raw_tx
-from runar.sdk.types import RunarArtifact, Utxo
+from runar.sdk.types import RunarArtifact
 from test_f045_token_wallet import OTHER_KEY, _assert_token_sigs_cover, _outpoints, _setup
 
 EXAMPLE = (
@@ -53,15 +53,14 @@ def test_transfer_drives_the_shipped_example():
     _assert_token_sigs_cover(signer, tokens, broadcast)
 
 
-def test_merge_drives_the_shipped_example():
+# D25: WalletToken's continuation method (merge) is mutate-only, so it commits
+# under SIGHASH_SINGLE, one output per input; a two-input merge into one
+# continuation is the twin-input shape SINGLE closes, refused up front.
+def test_merge_is_refused_before_broadcast():
     art = _artifact()
     provider, wallet, tokens, signer = _setup(art, [100, 250])
-    wallet.merge()
-    broadcast = provider.get_broadcasted_txs()[-1]
-    spent = _outpoints(broadcast)
-    for u in tokens:
-        assert spent.count(f"{u.txid}:0") == 1, spent
-    _assert_token_sigs_cover(signer, tokens, broadcast)
-    out0 = _parse_raw_tx(bytes.fromhex(broadcast))["outputs"][0]
-    merged = RunarContract.from_utxo(art, Utxo(txid="00" * 32, output_index=0, satoshis=out0["satoshis"], script=out0["script"].hex()))
-    assert merged.get_state()["supply"] == 350
+    assert wallet.get_balance() == 350
+    before = len(provider.get_broadcasted_txs())
+    with pytest.raises(ValueError, match="additionalContractInputs cannot be spent into one continuation by a SIGHASH_SINGLE method"):
+        wallet.merge()
+    assert len(provider.get_broadcasted_txs()) == before

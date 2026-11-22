@@ -129,11 +129,13 @@ module RunarCompiler
               push.call(u, "@sighash #{label}: '#{u[:name]}' asserts an output at a fixed index, but SINGLE commits ONLY to the output at THIS input's index — the asserted index cannot be statically proven equal to the input index, so the assertion may bind an uncommitted (attacker-controllable) output or silently brick the spend. Use ALL.")
             end
 
-            # A stateful mutate-only (or data-only) method has NO explicit output
-            # intrinsic, so the compiler auto-injects a single state-continuation
-            # output whose value is the caller-chosen `_newAmount`. Under SINGLE,
-            # BIP-143 commits ONLY to the output at THIS input's index and does
-            # NOT pin its value, so that continuation is value-skimmable. REJECT.
+            # D25: a mutate-only (auto-continuation) method under SINGLE is
+            # SOUND and is the DEFAULT for a contract whose continuation methods
+            # are all mutate-only (continuation_binding.rb). SINGLE hashes the
+            # whole same-index output, value included, and the F-024 floor
+            # (`_newAmount >= extractAmount`) stops a dust continuation; the
+            # change is not committed (N-038). The refusal that used to stand
+            # here (e88f202c8) predates both.
             is_mutate_only_auto_continuation =
               needs_continuation && scan[:state_output_count] == 0 && scan[:data_output_count] == 0
 
@@ -148,8 +150,7 @@ module RunarCompiler
             committed = state_outputs + scan[:data_output_count]
 
             if is_mutate_only_auto_continuation
-              push.call({ name: "state continuation", loc: method.source_location },
-                        "@sighash #{label}: this stateful method's state continuation is sized by the caller-chosen _newAmount, but SINGLE commits ONLY to the same-index output WITHOUT pinning its value — a spender can set _newAmount to dust, drive the change output to zero, and append a draining output while the covenant + OP_PUSH_TX binding still validate (value skim); an honest change>0 leaves the UTXO unspendable. A mutate-only SINGLE continuation is unsound. Use ALL, or emit an explicit addOutput/addRawOutput that carries the full protected value at this input's index.")
+              nil # Sound (see above): nothing to report.
             elsif committed > 1
               push.call({ name: "multi-output continuation", loc: method.source_location },
                         "@sighash #{label}: SINGLE commits ONLY to the output at this input's index, but this method binds #{committed} outputs (#{scan[:state_output_count]} addOutput + #{scan[:data_output_count]} addDataOutput#{state_outputs > scan[:state_output_count] ? ' + state continuation' : ''}). Outputs beyond the same-index one are uncommitted and attacker-controllable. A SINGLE covenant must bind exactly one same-index output.")

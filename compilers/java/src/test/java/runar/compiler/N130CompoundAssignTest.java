@@ -98,13 +98,13 @@ class N130CompoundAssignTest {
      * _changePKH entry width gate.
      */
     private static final String ARITH_TS_SHA256 =
-        "c84357e34c97ecc149d3af49050ced73085692d889d2d606cf0176da1c583738";
-    private static final int ARITH_TS_HEX_LEN = 1806;
+        "e6dcd39c54c479329ca49f8a7fd8213c10636dd4611c19aac67beff37de53b73";
+    private static final int ARITH_TS_HEX_LEN = 1720; // D25: mutate-only contract -> SIGHASH_SINGLE
 
     /** sha256 of the TS reference script hex for Compound.runar.java. */
     private static final String COMPOUND_TS_SHA256 =
-        "cc9b5518a45f4b6ef99365051e9c423f0870310759fb695db4eb44d909fb68f0";
-    private static final int COMPOUND_TS_HEX_LEN = 1882;
+        "b5dfecc5b3778c5ba32fc7e2d9a741e54fea41d48aeb2ce15289511e24116117";
+    private static final int COMPOUND_TS_HEX_LEN = 1800; // D25
 
     @Test
     void arithmeticCompoundAssignmentsMatchTheTsReference(@TempDir Path tmp) throws Exception {
@@ -159,8 +159,9 @@ class N130CompoundAssignTest {
     // N-216 (2026-10-21): re-pinned; one lowerUpdateProp `OP_2 OP_ROLL` now folds to OP_ROT (886 -> 885 B).
     // Ports #170: re-pinned; C=1 binding blob, 885 -> 879 B.
     // #180 / #213 (PR B): re-pinned to the TS tier; _changePKH entry width gate, 879 -> 886 B.
+    // D25: re-pinned to the TS tier; the mutate-only method commits under SIGHASH_SINGLE.
     private static final String UNIT_LOOP_TS_SHA256 =
-        "25388743355d2098a0ca88b12fd4b74c9710339e1c626e8b0fbf4c8ee5503845";
+        "1138bbf01ca82d0835f2aaec4934db44e14b03a332432e3ac1bc0f4452d5c119";
 
     /** A unit-step {@code i += Bigint.ONE} loop update compiles exactly like {@code i++}. */
     @Test

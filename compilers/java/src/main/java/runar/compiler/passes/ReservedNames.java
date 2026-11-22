@@ -17,7 +17,8 @@ import java.util.regex.Pattern;
  * stack-lowering slots {@code _codePart}, {@code __param_*},
  * {@code __shadowed_*}, {@code _pub_<digits>}; auto-injected parameters
  * {@code _changePKH}, {@code _changeAmount}, {@code _newAmount},
- * {@code _serialisedOutputs}, {@code _prevOutScript_<digits>}, and
+ * {@code _serialisedOutputs}, {@code _prevOutScript_<digits>},
+ * {@code _spentOutpointHash} (D25's hidden state field), and
  * {@code txPreimage} in a StatefulSmartContract. EC-optimizer names are
  * allocated collision-free (F-086) and are not reserved.
  */
@@ -50,7 +51,8 @@ public final class ReservedNames {
         Pattern.compile("^_changeAmount$"),
         Pattern.compile("^_newAmount$"),
         Pattern.compile("^_serialisedOutputs$"),
-        Pattern.compile("^_prevOutScript_[0-9]+$")
+        Pattern.compile("^_prevOutScript_[0-9]+$"),
+        Pattern.compile("^_spentOutpointHash$")
     );
 
     private static boolean matchesAny(String name, List<Pattern> ps) {

@@ -711,7 +711,8 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
     // Ports #170: 7798 -> 7762, six C=1 binding blobs at -6 B each.
     // #180 / #213 took it 7762 -> 7804: six 7-byte public-method entry width gates (<d> OP_PICK OP_SIZE <w> OP_NUMEQUALVERIFY OP_DROP); equals the TS reference for the same sources.
-    const expected_bytes: usize = 7804;
+    // D25 took it 7804 -> 7715: every continuation method is mutate-only, so the contract defaults to SIGHASH_SINGLE|FORKID and its continuations drop the change segment and the `_changePKH` gate; equals the TS reference for the same sources.
+    const expected_bytes: usize = 7715;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 
@@ -730,8 +731,9 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // the dispatch table, and the per-method `ab` after `OP_DROP` is gone.)
     // (#180 / #213: the first method now opens with its two entry width
     // gates, PubKey `55798201219d75` and `_changePKH` `53798201149d75`.)
+    // (D25: the `_changePKH` gate is gone under the SINGLE default.)
     const expected_prefix =
-        "61ab76009c637555798201219d7553798201149d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f";
+        "61ab76009c637553798201219d757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f51";
     try std.testing.expectEqualStrings(expected_prefix, v1_hex[0..expected_prefix.len]);
 }
 

@@ -433,66 +433,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		isStateful = program.ParentClass == "StatefulSmartContract"
 	}
 	// Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
-	var methods []ABIMethod
-	for _, method := range program.Methods {
-		if method.Name == "constructor" {
-			continue
-		}
-		params := make([]ABIParam, len(method.Params))
-		for j, p := range method.Params {
-			// N-360: a reassigned property-named public param is bound in the
-			// ANF under its `<name>@local` slot; the ABI keeps the source name
-			// the caller passes.
-			name := p.Name
-			if method.IsPublic {
-				name = strings.TrimSuffix(name, "@local")
-			}
-			params[j] = ABIParam{Name: name, Type: p.Type}
-		}
-		m := ABIMethod{
-			Name:     method.Name,
-			Params:   params,
-			IsPublic: method.IsPublic,
-		}
-		// Issue #123: carry a non-default @sighash mode into the ABI so the SDK
-		// builds the BIP-143 preimage under the same flags the covenant expects.
-		// Omitted for the default (0x41) → existing artifacts are byte-identical.
-		if method.IsPublic && method.SigHashType != nil && *method.SigHashType != frontend.SighashDefault {
-			v := *method.SigHashType
-			m.SigHashType = &v
-		}
-		// For stateful contracts, mark public methods without _changePKH as terminal
-		if isStateful && method.IsPublic {
-			hasChange := false
-			for _, p := range method.Params {
-				if p.Name == "_changePKH" {
-					hasChange = true
-					break
-				}
-			}
-			// N-038: a SIGHASH_SINGLE method continues the contract without
-			// declaring _changePKH (the change output is not committed), so
-			// its continuation is read from the method body instead.
-			if !hasChange && method.SigHashType != nil && (*method.SigHashType&0x1f) == 0x03 {
-				hasChange, _, _ = scaffoldShape(program, &method)
-			}
-			if !hasChange {
-				t := true
-				m.IsTerminal = &t
-			}
-		}
-		// Propagate the authoritative _codePart decision from stack-lowering
-		// into the ABI so the SDK supplies _codePart for terminal var-length
-		// reads (issue #100).
-		for i := range stackMethods {
-			if stackMethods[i].Name == method.Name && stackMethods[i].UsesCodePart {
-				u := true
-				m.UsesCodePart = &u
-				break
-			}
-		}
-		methods = append(methods, m)
-	}
+	methods := BuildABIMethods(program, stackMethods, isStateful)
 
 	// Only include codeSeparatorIndex when an OP_CODESEPARATOR was emitted (index >= 0)
 	var csIndex *int
@@ -609,7 +550,9 @@ func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptio
 	// see only scalar properties and direct-access / dispatch-chain
 	// expressions, so no further FixedArray plumbing is required in
 	// ANF, stack, or emit.
-	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	// D25: a 'bind' contract gains its hidden spent-outpoint state field here
+	// (after typecheck, so user-facing arity rules never see it).
+	expandResult := frontend.ExpandFixedArrays(frontend.InjectContinuationBinding(parseResult.Contract))
 	if len(expandResult.Errors) > 0 {
 		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
@@ -770,7 +713,9 @@ func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptio
 		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
-	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	// D25: a 'bind' contract gains its hidden spent-outpoint state field here
+	// (after typecheck, so user-facing arity rules never see it).
+	expandResult := frontend.ExpandFixedArrays(frontend.InjectContinuationBinding(parseResult.Contract))
 	if len(expandResult.Errors) > 0 {
 		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
@@ -936,7 +881,8 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 	}
 
 	// Pass 3b: Expand FixedArray properties.
-	expandResult := frontend.ExpandFixedArrays(result.Contract)
+	// D25: inject the hidden spent-outpoint field of a 'bind' contract.
+	expandResult := frontend.ExpandFixedArrays(frontend.InjectContinuationBinding(result.Contract))
 	result.Diagnostics = append(result.Diagnostics, expandResult.Errors...)
 	if hasErrors(result.Diagnostics) {
 		return result
@@ -1066,4 +1012,73 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 // ArtifactToJSON serialises an artifact to pretty-printed JSON.
 func ArtifactToJSON(artifact *Artifact) ([]byte, error) {
 	return json.MarshalIndent(artifact, "", "  ")
+}
+
+// BuildABIMethods derives the artifact's method ABIs from the lowered program:
+// params (N-360 @local names trimmed), a non-default sighash mode (#123, and
+// the D25 SIGHASH_SINGLE default), isTerminal and usesCodePart. Exported so a
+// caller that assembles its own artifact (the integration helpers) uses the
+// same rule instead of a copy that drifts.
+func BuildABIMethods(program *ir.ANFProgram, stackMethods []codegen.StackMethod, isStateful bool) []ABIMethod {
+	var methods []ABIMethod
+	for _, method := range program.Methods {
+		if method.Name == "constructor" {
+			continue
+		}
+		params := make([]ABIParam, len(method.Params))
+		for j, p := range method.Params {
+			// N-360: a reassigned property-named public param is bound in the
+			// ANF under its `<name>@local` slot; the ABI keeps the source name
+			// the caller passes.
+			name := p.Name
+			if method.IsPublic {
+				name = strings.TrimSuffix(name, "@local")
+			}
+			params[j] = ABIParam{Name: name, Type: p.Type}
+		}
+		m := ABIMethod{
+			Name:     method.Name,
+			Params:   params,
+			IsPublic: method.IsPublic,
+		}
+		// Issue #123: carry a non-default @sighash mode into the ABI so the SDK
+		// builds the BIP-143 preimage under the same flags the covenant expects.
+		// Omitted for the default (0x41) → existing artifacts are byte-identical.
+		if method.IsPublic && method.SigHashType != nil && *method.SigHashType != frontend.SighashDefault {
+			v := *method.SigHashType
+			m.SigHashType = &v
+		}
+		// For stateful contracts, mark public methods without _changePKH as terminal
+		if isStateful && method.IsPublic {
+			hasChange := false
+			for _, p := range method.Params {
+				if p.Name == "_changePKH" {
+					hasChange = true
+					break
+				}
+			}
+			// N-038: a SIGHASH_SINGLE method continues the contract without
+			// declaring _changePKH (the change output is not committed), so
+			// its continuation is read from the method body instead.
+			if !hasChange && method.SigHashType != nil && (*method.SigHashType&0x1f) == 0x03 {
+				hasChange, _, _ = scaffoldShape(program, &method)
+			}
+			if !hasChange {
+				t := true
+				m.IsTerminal = &t
+			}
+		}
+		// Propagate the authoritative _codePart decision from stack-lowering
+		// into the ABI so the SDK supplies _codePart for terminal var-length
+		// reads (issue #100).
+		for i := range stackMethods {
+			if stackMethods[i].Name == method.Name && stackMethods[i].UsesCodePart {
+				u := true
+				m.UsesCodePart = &u
+				break
+			}
+		}
+		methods = append(methods, m)
+	}
+	return methods
 }

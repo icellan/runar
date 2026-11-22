@@ -94,14 +94,13 @@ function sighashByteOf(preimage: number[]): number {
   return preimage[preimage.length - 4]!;
 }
 
-describe('#123 (F1) — mutate-only SINGLE continuation is a compile REJECT, not a spend', () => {
-  // This flow used to "deploy + exact-cover call + validate through Spend", but
-  // the continuation output was sized by the caller-chosen `_newAmount`, which
-  // BIP-143 SINGLE never pins. That made it value-skimmable: call bump with
-  // `_newAmount` = dust, drive change to 0, and APPEND a draining output — the
-  // covenant + OP_PUSH_TX binding still validate (they only see the same-index
-  // continuation) while the protected funds are swept away. The compiler now
-  // rejects the unsound mode up front, so there is no artifact to deploy.
+describe('D25 — a mutate-only SINGLE continuation compiles, validates, and is the default', () => {
+  // #123 (F1) used to refuse this mode: the continuation is sized by the
+  // caller-chosen `_newAmount`, and SINGLE was thought not to pin it. BIP-143
+  // SINGLE hashes the whole same-index output, value included, and the F-024
+  // floor (`_newAmount >= extractAmount`) refuses a dust continuation, so the
+  // mode is sound (dust refusal: d25-twin-input.test.ts). It is now the
+  // DEFAULT for a contract whose continuation methods are all mutate-only.
   const SRC = `
     class Counter extends StatefulSmartContract {
       n: bigint;
@@ -111,17 +110,30 @@ describe('#123 (F1) — mutate-only SINGLE continuation is a compile REJECT, not
     }
   `;
 
-  it('the compiler refuses to emit an artifact for the skimmable SINGLE mode', () => {
-    expect(() => compileSource(SRC, 'Counter.runar.ts')).toThrow(
-      /mutate-only SINGLE continuation is unsound|sized by the caller-chosen _newAmount/,
-    );
-  });
+  for (const [label, src] of [['explicit', SRC], ['default', SRC.replace('/** @sighash SINGLE|FORKID */', '')]] as const) {
+    it(`${label}: deploy + call is VALID and the preimage sighash byte is 0x43`, async () => {
+      const artifact = compileSource(src, 'Counter.runar.ts');
+      expect(artifact.abi.methods.find((m) => m.name === 'bump')!.sigHashType).toBe(0x43);
+      const provider = new MockProvider('testnet', { enforceFeeFloor: false });
+      const deployer = await fundedSigner(provider, DEPLOYER_KEY, 500_000);
+      const caller = new LocalSigner(CALLER_KEY);
+      const contract = new RunarContract(artifact, [0n]);
+      await contract.deploy(provider, deployer, { satoshis: 50_000 });
+      const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
+      await contract.call('bump', [], provider, caller, { allowFeeBelowRate: true });
+      const callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
+      expect(contract.state.n).toBe(1n);
+      expect(sighashByteOf(preimageFromUnlock(callTx, 0))).toBe(0x43);
+      expect(validateSpend(callTx, 0, deployTx, 0)).toBe(true);
+    });
+  }
 });
 
 describe('#123 — ANYONECANPAY (crowdfund-style) method validates through Spend', () => {
-  // ALL|ANYONECANPAY|FORKID = 0xC1: outputs are still committed (ALL base), but
-  // only THIS input is signed, so other parties may add inputs freely. The
-  // method reads no cross-input field, so the mode is sound.
+  // ALL|ANYONECANPAY|FORKID: only THIS input is signed, so other parties may
+  // add inputs freely. D25: in a contract whose continuation methods are all
+  // mutate-only the ALL base becomes SINGLE (0xC3), so the pledge commits only
+  // its own same-index continuation.
   const SRC = `
     class Fund extends StatefulSmartContract {
       raised: bigint;
@@ -131,9 +143,9 @@ describe('#123 — ANYONECANPAY (crowdfund-style) method validates through Spend
     }
   `;
 
-  it('deploy + exact-cover call is VALID and the preimage sighash byte is 0xC1', async () => {
+  it('deploy + exact-cover call is VALID and the preimage sighash byte is 0xC3', async () => {
     const artifact = compileSource(SRC, 'Fund.runar.ts');
-    expect(artifact.abi.methods.find((m) => m.name === 'pledge')!.sigHashType).toBe(0xc1);
+    expect(artifact.abi.methods.find((m) => m.name === 'pledge')!.sigHashType).toBe(0xc3);
 
     // #116 exact-cover trick deliberately drives change (and therefore fee)
     // to 0 — opt out of P1-2's fee floor, not broadcast validation itself
@@ -151,17 +163,20 @@ describe('#123 — ANYONECANPAY (crowdfund-style) method validates through Spend
 
     expect(contract.state.raised).toBe(7n);
     const pre = preimageFromUnlock(callTx, 0);
-    expect(sighashByteOf(pre)).toBe(0xc1);
+    expect(sighashByteOf(pre)).toBe(0xc3);
     expect(validateSpend(callTx, 0, deployTx, 0)).toBe(true);
   });
 });
 
 describe('#123 — default (no directive) still validates and uses 0x41', () => {
+  // D25: the addOutput sibling keeps the contract on ALL (a contract whose
+  // continuation methods are all mutate-only defaults to SINGLE instead).
   const SRC = `
     class Plain extends StatefulSmartContract {
       n: bigint;
       constructor(n: bigint) { super(n); this.n = n; }
       public bump(): void { this.n = this.n + 1n; }
+      public put(): void { this.addOutput(1n, this.n); }
     }
   `;
   it('unchanged behaviour: preimage sighash byte is 0x41', async () => {

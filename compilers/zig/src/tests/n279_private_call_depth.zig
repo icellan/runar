@@ -86,5 +86,6 @@ test "N-279: a mutation 71 private-helper hops deep compiles byte-identically to
     // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff vs the old pin is folds only (Go agrees).
     // Ports #170: re-pinned; the C=1 binding blob is 6 B shorter (Go and TS agree).
     // #180 / #213: re-pinned; verify gained the `_changePKH` entry width gate (TS reference, both fold modes).
-    try std.testing.expectEqualStrings("a24e579e187ef2f2f442a33be753b4d87407aa5fc4bb5c73d007b1e0d8c51520", &got);
+    // D25: re-pinned; the mutate-only contract defaults to SIGHASH_SINGLE|FORKID (TS reference, both fold modes).
+    try std.testing.expectEqualStrings("66cadda07d5ad3482abd7e869a500b7a25ed78ec9495b7a52d1ff8abb7a54506", &got);
 }

@@ -18,9 +18,11 @@ fn opts() -> CompileOptions {
     CompileOptions { disable_constant_folding: true, ..CompileOptions::default() }
 }
 
+// D25: an addOutput body keeps the method on ALL|FORKID (a mutate-only
+// contract defaults to SINGLE, whose flag byte sits inside the blob).
 fn counter(directive: &str) -> String {
     format!(
-        "class C extends StatefulSmartContract {{\n  count: bigint;\n  constructor(count: bigint) {{ super(count); this.count = count; }}\n  {}\n  public bump() {{ this.count++; }}\n}}\n",
+        "class C extends StatefulSmartContract {{\n  count: bigint;\n  constructor(count: bigint) {{ super(count); this.count = count; }}\n  {}\n  public bump() {{ this.addOutput(1n, this.count + 1n); }}\n}}\n",
         directive
     )
 }

@@ -73,13 +73,15 @@ test "F-038 source IR carries parentClass + sigHashType and compile-ir keeps bot
 
     const ir = try json.serializeCanonicalJSON(work, program);
     try testing.expect(std.mem.indexOf(u8, ir, "\"parentClass\": \"StatefulSmartContract\"") != null);
-    try testing.expect(std.mem.indexOf(u8, ir, "\"sigHashType\": 193") != null);
+    // D25: a mutate-only contract maps ALL|ANYONECANPAY|FORKID to
+    // SINGLE|ANYONECANPAY|FORKID; the effective mode is what must survive.
+    try testing.expect(std.mem.indexOf(u8, ir, "\"sigHashType\": 195") != null);
 
     const direct = try emit.emitArtifact(work, pipeline.stack_program.?, program);
     const via_ir = try artifactFromIr(work, ir);
     for ([_][]const u8{ direct, via_ir }) |art| {
         try testing.expect(std.mem.indexOf(u8, art, "\"parentClass\":\"StatefulSmartContract\"") != null);
-        try testing.expect(std.mem.indexOf(u8, art, "\"sigHashType\":193") != null);
+        try testing.expect(std.mem.indexOf(u8, art, "\"sigHashType\":195") != null);
     }
     try testing.expectEqualStrings(
         try compiler_api.extractArtifactScript(direct),

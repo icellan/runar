@@ -34,6 +34,9 @@ module RunarCompiler
       SIGHASH_DEFAULT = 0x41
       STATE_OUTPUT_KINDS = %w[add_output add_raw_output].freeze
       DATA_OUTPUT_KINDS = %w[add_data_output].freeze
+      # D25: the hidden state field of a "bind" contract
+      # (frontend/continuation_binding.rb).
+      TWIN_BINDING_FIELD = "_spentOutpointHash"
 
       class Emitter
         attr_reader :out
@@ -96,7 +99,14 @@ module RunarCompiler
         e.emit(value("deserialize_state", preimage: p3))
       end
 
-      def self.continuation(e, needs_change, includes_change, state_refs, data_refs)
+      # D25: +sha256(extractOutpoint(txPreimage))+ (emitOutpointBinding).
+      def self.outpoint_binding(e)
+        pre = e.emit(param("txPreimage"))
+        outpoint = e.emit(call("extractOutpoint", pre))
+        e.emit(call("sha256", outpoint))
+      end
+
+      def self.continuation(e, needs_change, includes_change, state_refs, data_refs, binds_outpoint = false)
         return unless needs_change
 
         if state_refs.empty?
@@ -119,6 +129,11 @@ module RunarCompiler
           change = e.emit(value("if", cond: non_zero, then: then_e.out, else_: else_e.out))
         end
         if state_refs.empty?
+          # D25: a "bind" contract's auto-continuation records the spent outpoint.
+          if binds_outpoint
+            h = outpoint_binding(e)
+            e.emit(value("update_prop", name: TWIN_BINDING_FIELD, value_ref: h))
+          end
           script = e.emit(value("get_state_script"))
           p = e.emit(param("txPreimage"))
           new_amount = e.emit(param("_newAmount"))
@@ -233,6 +248,7 @@ module RunarCompiler
                 (e.result_type.nil? || e.result_type.empty? ? nil : e.result_type) ==
                   (a.result_type.nil? || a.result_type.empty? ? nil : a.result_type)
             when "deserialize_state" then ref(e.preimage, a.preimage)
+            when "update_prop" then e.name == a.name && ref(e.value_ref, a.value_ref)
             when "get_state_script" then true
             when "if"
               ref(e.cond, a.cond) && (a.results.nil? || a.results.empty?) &&
@@ -274,6 +290,7 @@ module RunarCompiler
       def self.error(program)
         has_mutable = program.properties.any? { |p| !p.readonly }
         props = program.properties.map(&:name).to_set
+        binds_outpoint = props.include?(TWIN_BINDING_FIELD)
         program.methods.each do |m|
           next if !m.is_public || m.name == "constructor"
 
@@ -330,7 +347,8 @@ module RunarCompiler
             end
           end
           tail = Emitter.new(taken, counter)
-          continuation(tail, needs_change, includes_change, state_out.map(&:name), data_out.map(&:name))
+          continuation(tail, needs_change, includes_change, state_out.map(&:name), data_out.map(&:name),
+                       binds_outpoint)
           offset = rest.length - tail.out.length
           tail.out.each_with_index do |e, j|
             if offset + j < 0 || !match.binding(e, rest[offset + j])
@@ -361,6 +379,94 @@ module RunarCompiler
                    "no property or parameter uses: the injected scaffolding binds it or the " \
                    "continuation commits to it"
           end
+        end
+        nil
+      end
+
+      # -------------------------------------------------------------------
+      # D25: the --ir check of the contract-level continuation binding
+      # -------------------------------------------------------------------
+
+      # D25: the shared --ir diagnostic (carries its own "IR validation: " prefix).
+      def self.ir_unbound_continuation_message(detail)
+        "IR validation: StatefulSmartContract continuation is not bound to its input (twin-input theft): #{detail}"
+      end
+
+      # D25 (+assertIrContinuationBinding+): an --ir program must carry the
+      # binding the frontend would give it. Without the hidden
+      # +_spentOutpointHash+ field, a program with an auto-continuation method
+      # must commit every continuation under a SINGLE base, from
+      # auto-continuation methods only. With the field, it must be the LAST
+      # property, mutable, +Sha256+, zero at deploy, and every +add_output+
+      # must carry +sha256(extractOutpoint(txPreimage))+ as its last state
+      # value (the auto-continuation's write is checked by +error+ with the
+      # rest of the continuation). Returns the full message (prefix included)
+      # or nil.
+      def self.continuation_binding_error(program)
+        props = program.properties
+        if props.any? { |p| p.name == TWIN_BINDING_FIELD }
+          field = props[-1]
+          unless field.name == TWIN_BINDING_FIELD && !field.readonly && field.type == "Sha256" &&
+                 field.initial_value == "00" * 32
+            return ir_unbound_continuation_message(
+              "'#{TWIN_BINDING_FIELD}' must be the last property, mutable, of type Sha256, " \
+              "with initial value 32 zero bytes"
+            )
+          end
+          program.methods.each do |m|
+            by_name = {}
+            index = lambda do |bs|
+              bs.each do |b|
+                by_name[b.name] = b.value
+                nested(b.value).each { |n| index.call(n) }
+              end
+            end
+            index.call(m.body)
+            arg_of = lambda do |r, func|
+              v = r.nil? ? nil : by_name[r]
+              v && v.kind == "call" && v.func == func && (v.args || []).length == 1 ? v.args[0] : nil
+            end
+            check = nil
+            check = lambda do |bs|
+              bs.each do |b|
+                if b.value.kind == "add_output"
+                  pre = arg_of.call(arg_of.call((b.value.state_values || [])[-1], "sha256"), "extractOutpoint")
+                  v = pre.nil? ? nil : by_name[pre]
+                  if v.nil? || v.kind != "load_param" || v.name != "txPreimage"
+                    return ir_unbound_continuation_message(
+                      "method '#{m.name}': every add_output must carry " \
+                      "sha256(extractOutpoint(txPreimage)) as its last state value"
+                    )
+                  end
+                end
+                nested(b.value).each do |n|
+                  err = check.call(n)
+                  return err if err
+                end
+              end
+              nil
+            end
+            err = check.call(m.body)
+            return err if err
+          end
+          return nil
+        end
+        shapes = program.methods
+                        .select { |m| m.is_public && m.name != "constructor" }
+                        .map { |m| [m, shape(program, m)] }
+                        .select { |_, sh| sh[0] }
+        return nil unless shapes.any? { |_, sh| sh[2] }
+
+        shapes.each do |m, sh|
+          mode = m.sighash_type.nil? ? SIGHASH_DEFAULT : m.sighash_type
+          single = (mode & 0x1F) == 0x03
+          next if sh[2] && single
+
+          return ir_unbound_continuation_message(
+            "method '#{m.name}': a program with an auto-continuation method and no " \
+            "'#{TWIN_BINDING_FIELD}' field must commit every continuation under a " \
+            "SIGHASH_SINGLE base, from auto-continuation methods only"
+          )
         end
         nil
       end

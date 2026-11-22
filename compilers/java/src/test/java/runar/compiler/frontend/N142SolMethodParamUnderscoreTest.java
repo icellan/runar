@@ -110,6 +110,7 @@ class N142SolMethodParamUnderscoreTest {
         assertEquals("009c", hex(dir, "F200Unbound.runar.sol", UNBOUND));
     }
 
+    // D25: the sha256 pins below were re-pinned to the TS tier (SIGHASH_SINGLE default).
     @Test
     void silentShapeWritesState(@TempDir Path dir) throws Exception {
         MethodNode inc = method(ParserDispatch.parse(SILENT, "F200Silent.runar.sol"), "inc");
@@ -117,13 +118,13 @@ class N142SolMethodParamUnderscoreTest {
         IncrementExpr ie = assertInstanceOf(IncrementExpr.class,
             assertInstanceOf(ExpressionStatement.class, inc.body().get(0)).expression());
         assertEquals(new PropertyAccessExpr("count"), ie.operand());
-        assertEquals("6001736ca0dd06f9b6b772cf09952c98d042fdfb65dd4a2f46be69b9d5de3feb",
+        assertEquals("329bf55d7e561725b56f607ca0310a249fd1b6708f488cb26011d3a54888d47d",
             sha256(hex(dir, "F200Silent.runar.sol", SILENT)));
     }
 
     @Test
     void interShapeCompilesToTsBytes(@TempDir Path dir) throws Exception {
-        assertEquals("18b2efad1bff573669e7aaa7cfa5f5bcd65a1cca23e78672d29f88789a584da9",
+        assertEquals("ebeabdca9b7e3f2b465cd255dcb68534b6a613317e49226a8ed68ccdb5063ad6",
             sha256(hex(dir, "F200Inter.runar.sol", INTER)));
     }
 
