@@ -208,6 +208,11 @@ export function split(data: ByteString, index: bigint): ByteString {
 
 export function reverseBytes(data: ByteString): ByteString {
   const bytes = hexToBytes(data);
+  // D12 BM-F3: the compiled reverseBytes ends in OP_0 OP_EQUALVERIFY, so the
+  // script ABORTS on more than 520 bytes. Refuse instead of reversing in full.
+  if (bytes.length > 520) {
+    throw new Error(`reverseBytes: input of ${bytes.length} bytes exceeds the 520-byte limit; the script aborts`);
+  }
   bytes.reverse();
   return bytesToHex(bytes) as ByteString;
 }

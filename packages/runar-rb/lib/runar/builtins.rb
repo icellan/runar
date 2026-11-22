@@ -721,6 +721,12 @@ module Runar
 
     # Reverse the byte order of a hex string.
     def reverse_bytes(data)
+      # D12 BM-F3: the compiled reverseBytes ends in OP_0 OP_EQUALVERIFY, so the
+      # script ABORTS on more than 520 bytes. Refuse instead of reversing in full.
+      if data.length / 2 > 520
+        raise ArgumentError, "reverseBytes: input of #{data.length / 2} bytes exceeds the 520-byte limit; the script aborts"
+      end
+
       [data].pack('H*').reverse.unpack1('H*')
     end
 

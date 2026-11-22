@@ -757,15 +757,20 @@ the constants had been honest all along.
 -- anchors `[fresh]` and byte-equal to their expected-script.hex (none calls
 -- reverseBytes), so only their fingerprints move. The same run live-compiled
 -- the moved byte-builtins golden byte-exact (80/100).
+-- 2026-11-22: the model fingerprint moved to v1:65f:7264702b:197fbfa4017aa1dd
+-- (ANF/Eval.lean: `reverseBytes` over 520 bytes is an evaluation error, as the
+-- lowered script aborts there). Eval is not on the compile path; a full live
+-- regen returned all three `.regenLive` anchors `[fresh]` and byte-equal to
+-- their expected-script.hex, so only their fingerprints move (80/100).
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:65f:7263601b:ba4bd7e1f4d01a93"⟩,
+  ⟨"babybear", .regenLive, "v1:65f:7264702b:197fbfa4017aa1dd"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:65f:7263601b:ba4bd7e1f4d01a93"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:65f:7264702b:197fbfa4017aa1dd"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -788,7 +793,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:65f:7263601b:ba4bd7e1f4d01a93"⟩,
+  ⟨"state-covenant", .regenLive, "v1:65f:7264702b:197fbfa4017aa1dd"⟩,
 ]
 
 /--

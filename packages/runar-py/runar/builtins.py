@@ -846,7 +846,14 @@ def substr(data, start: int, length: int) -> bytes:
     return b[start:start + length]
 
 def reverse_bytes(data) -> bytes:
-    return _as_bytes(data)[::-1]
+    b = _as_bytes(data)
+    # D12 BM-F3: the compiled reverseBytes ends in OP_0 OP_EQUALVERIFY, so the
+    # script ABORTS on more than 520 bytes. Refuse instead of reversing in full.
+    if len(b) > 520:
+        raise ValueError(
+            f'reverseBytes: input of {len(b)} bytes exceeds the 520-byte limit; the script aborts'
+        )
+    return b[::-1]
 
 def len_(data) -> int:
     return len(_as_bytes(data))
