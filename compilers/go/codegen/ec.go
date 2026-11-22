@@ -112,14 +112,6 @@ func (t *ECTracker) drop() {
 	}
 }
 
-func (t *ECTracker) nip() {
-	t.e(StackOp{Op: "nip"})
-	L := len(t.nm)
-	if L >= 2 {
-		t.nm = append(t.nm[:L-2], t.nm[L-1])
-	}
-}
-
 func (t *ECTracker) over(n string) {
 	t.e(StackOp{Op: "over"})
 	t.nm = append(t.nm, n)
@@ -222,24 +214,6 @@ func (t *ECTracker) rawBlock(consume []string, produce string, fn func(emit func
 	fn(t.e)
 	if produce != "" {
 		t.nm = append(t.nm, produce)
-	}
-}
-
-// emitIf emits if/else with tracked stack effect.
-// resultName="" means no result pushed.
-func (t *ECTracker) emitIf(condName string, thenFn func(func(StackOp)), elseFn func(func(StackOp)), resultName string) {
-	t.toTop(condName)
-	// condition consumed
-	if len(t.nm) > 0 {
-		t.nm = t.nm[:len(t.nm)-1]
-	}
-	var thenOps []StackOp
-	var elseOps []StackOp
-	thenFn(func(op StackOp) { thenOps = append(thenOps, op) })
-	elseFn(func(op StackOp) { elseOps = append(elseOps, op) })
-	t.e(StackOp{Op: "if", Then: thenOps, Else: elseOps})
-	if resultName != "" {
-		t.nm = append(t.nm, resultName)
 	}
 }
 

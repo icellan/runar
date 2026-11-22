@@ -2258,27 +2258,8 @@ impl<'a> JavaParser<'a> {
 ///   - `a.neg()`                           → `UnaryExpr(-)`
 ///   - `a.abs()`                           → `CallExpr(abs, a)` (builtin)
 ///   - `assertThat(c)`                     → `CallExpr(assert, c)`
-/// Parse a digit string in the given radix into an i128. Returns `Some(v)`
-/// on success, `None` on overflow or invalid digits. Used by the
-/// `new BigInteger("decimal" [, radix])` parser branch — the i128 backing
-/// truncates values that exceed 2^127; the schnorr-zkp secp256k1-n literal
-/// will overflow, but the parser still accepts the source (the canonical
-/// codegen path comes from the TS compiler emitting the literal as a
-/// decimal-string load_const, not from this Rust frontend).
-fn parse_radix_to_i128(s: &str, radix: u32) -> Option<i128> {
-    if radix < 2 || radix > 36 {
-        return None;
-    }
-    let mut value: i128 = 0;
-    for ch in s.chars() {
-        let d = ch.to_digit(radix)?;
-        value = value.checked_mul(radix as i128)?.checked_add(d as i128)?;
-    }
-    Some(value)
-}
-
-/// Same as `parse_radix_to_i128` but returns an arbitrary-precision
-/// `BigInt`. Used to capture 256-bit constants (e.g. the secp256k1 group
+/// Parse a digit string in the given radix into an arbitrary-precision
+/// `BigInt`; `None` on invalid digits. Used to capture 256-bit constants (e.g. the secp256k1 group
 /// order in schnorr-zkp's s-bound assert) without truncation.
 fn parse_radix_to_bigint(s: &str, radix: u32) -> Option<BigInt> {
     if !(2..=36).contains(&radix) {

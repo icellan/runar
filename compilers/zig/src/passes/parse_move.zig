@@ -859,12 +859,6 @@ const Parser = struct {
         return false;
     }
 
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
-    }
-
     // ---- Top-level ----
 
     fn parse(self: *Parser) ParseResult {
@@ -1101,11 +1095,6 @@ const Parser = struct {
 
         _ = self.expect(.rbrace);
         return props.items;
-    }
-
-    fn parseMoveTypeName(self: *Parser) RunarType {
-        var discard: []const u8 = "";
-        return self.parseMoveTypeNameNamed(&discard);
     }
 
     /// `parseMoveTypeName`, additionally reporting the type name as the author

@@ -444,13 +444,6 @@ public final class ZigParser {
         return out;
     }
 
-    private static boolean isHexDigitOrUnderscore(char c) {
-        return (c >= '0' && c <= '9')
-            || (c >= 'a' && c <= 'f')
-            || (c >= 'A' && c <= 'F')
-            || c == '_';
-    }
-
     // ===================================================================
     // Parser state (mutable)
     // ===================================================================

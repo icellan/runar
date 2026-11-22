@@ -99,11 +99,6 @@ const Emitter = struct {
         self.depth += 1;
     }
 
-    fn nip(self: *Emitter) Sha256EmitterError!void {
-        try self.emitOp("OP_NIP");
-        self.depth -= 1;
-    }
-
     fn rot(self: *Emitter) Sha256EmitterError!void {
         try self.emitOp("OP_ROT");
     }

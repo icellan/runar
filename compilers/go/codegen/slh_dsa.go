@@ -102,50 +102,6 @@ const (
 	slhFORSRoots = 4
 )
 
-type slhADRSOpts struct {
-	layer   int
-	tree    int64
-	adrsTyp int
-	keypair int
-	chain   int
-	hash    int
-}
-
-func slhADRS(opts slhADRSOpts) []byte {
-	c := make([]byte, 22)
-	c[0] = byte(opts.layer & 0xff)
-	tr := opts.tree
-	for i := 0; i < 8; i++ {
-		c[1+7-i] = byte((tr >> (8 * i)) & 0xff)
-	}
-	c[9] = byte(opts.adrsTyp & 0xff)
-	kp := opts.keypair
-	c[10] = byte((kp >> 24) & 0xff)
-	c[11] = byte((kp >> 16) & 0xff)
-	c[12] = byte((kp >> 8) & 0xff)
-	c[13] = byte(kp & 0xff)
-	ch := opts.chain
-	c[14] = byte((ch >> 24) & 0xff)
-	c[15] = byte((ch >> 16) & 0xff)
-	c[16] = byte((ch >> 8) & 0xff)
-	c[17] = byte(ch & 0xff)
-	ha := opts.hash
-	c[18] = byte((ha >> 24) & 0xff)
-	c[19] = byte((ha >> 16) & 0xff)
-	c[20] = byte((ha >> 8) & 0xff)
-	c[21] = byte(ha & 0xff)
-	return c
-}
-
-// slhADRS18 returns the 18-byte prefix (bytes 0..17): everything before hashAddress.
-func slhADRS18(opts slhADRSOpts) []byte {
-	full := slhADRS(slhADRSOpts{
-		layer: opts.layer, tree: opts.tree, adrsTyp: opts.adrsTyp,
-		keypair: opts.keypair, chain: opts.chain, hash: 0,
-	})
-	return full[:18]
-}
-
 // ===========================================================================
 // 2b. Runtime ADRS builders
 // ===========================================================================
@@ -291,11 +247,6 @@ func (t *SLHTracker) pushInt(n string, v int64) {
 	t.nm = append(t.nm, n)
 }
 
-func (t *SLHTracker) pushEmpty(n string) {
-	t.e(StackOp{Op: "opcode", Code: "OP_0"})
-	t.nm = append(t.nm, n)
-}
-
 func (t *SLHTracker) dup(n string) {
 	t.e(StackOp{Op: "dup"})
 	t.nm = append(t.nm, n)
@@ -305,14 +256,6 @@ func (t *SLHTracker) drop() {
 	t.e(StackOp{Op: "drop"})
 	if len(t.nm) > 0 {
 		t.nm = t.nm[:len(t.nm)-1]
-	}
-}
-
-func (t *SLHTracker) nip() {
-	t.e(StackOp{Op: "nip"})
-	L := len(t.nm)
-	if L >= 2 {
-		t.nm = append(t.nm[:L-2], t.nm[L-1])
 	}
 }
 
@@ -424,14 +367,6 @@ func (t *SLHTracker) cat(n string) {
 	t.nm = append(t.nm, n)
 }
 
-func (t *SLHTracker) sha256(n string) {
-	t.op("OP_SHA256")
-	if len(t.nm) >= 1 {
-		t.nm = t.nm[:len(t.nm)-1]
-	}
-	t.nm = append(t.nm, n)
-}
-
 func (t *SLHTracker) equal(n string) {
 	t.op("OP_EQUAL")
 	if len(t.nm) >= 2 {
@@ -464,25 +399,6 @@ func (t *SLHTracker) rawBlock(consume []string, produce string, fn func(emit fun
 // ===========================================================================
 // trunc_n(SHA-256(pkSeedPad(64) || ADRSc(22) || M))
 // pkSeedPad on main stack, accessed via PICK.
-
-// emitSLHT emits a tracked tweakable hash. Accesses _pkSeedPad via copyToTop.
-func emitSLHT(t *SLHTracker, n int, adrs, msg, result string) {
-	t.toTop(adrs)
-	t.toTop(msg)
-	t.cat("_am")
-	// Access pkSeedPad via PICK on main stack
-	t.copyToTop("_pkSeedPad", "_psp")
-	t.swap()
-	t.cat("_pre")
-	t.sha256("_h32")
-	if n < 32 {
-		t.pushInt("", int64(n))
-		t.split(result, "_tr")
-		t.drop()
-	} else {
-		t.rename(result)
-	}
-}
 
 // emitSLHTRaw emits a raw tweakable hash with pkSeedPad on main stack via PICK.
 //

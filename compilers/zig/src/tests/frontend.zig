@@ -56,15 +56,6 @@ const TestCtx = struct {
     }
 };
 
-fn methodNames(methods: []const types.MethodNode) [3][]const u8 {
-    var out: [3][]const u8 = .{ "", "", "" };
-    var i: usize = 0;
-    while (i < methods.len and i < out.len) : (i += 1) {
-        out[i] = methods[i].name;
-    }
-    return out;
-}
-
 fn hasMethod(methods: []const types.MethodNode, name: []const u8) bool {
     for (methods) |m| {
         if (std.mem.eql(u8, m.name, name)) return true;

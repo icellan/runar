@@ -753,10 +753,6 @@ func (ms *methodScopeT) recordAutoInjectedParam(name, typ string) {
 	ms.autoInjectedParams = append(ms.autoInjectedParams, ir.ANFParam{Name: name, Type: typ})
 }
 
-func newLowerCtx(contract *ContractNode) *lowerCtx {
-	return newLowerCtxWithEffects(contract, nil)
-}
-
 func newLowerCtxWithEffects(contract *ContractNode, summary SideEffectSummary) *lowerCtx {
 	return &lowerCtx{
 		contract:         contract,
@@ -1226,16 +1222,6 @@ func (ctx *lowerCtx) leaveInlinedScope(saved inlinedScopeState) {
 	ctx.loopVars = saved.loopVars
 }
 
-func (ctx *lowerCtx) getParamType(name string) (string, bool) {
-	// Restricted to the CURRENT method's parameters (issue #34). A cross-method
-	// lookup poisoned the byte-type analysis when two methods shared a parameter
-	// name (e.g. one method's local `x: bigint` collided with another method's
-	// `x: ByteString` parameter), which flipped result_type to 'bytes' and made
-	// stack lowering emit OP_CAT for an integer add.
-	t, ok := ctx.methodParamTypes[name]
-	return t, ok
-}
-
 // subContext creates a sub-context for nested blocks (if/else, loops).
 // The counter continues from the parent. Local names and param names are shared.
 func (ctx *lowerCtx) subContext() *lowerCtx {
@@ -1464,10 +1450,6 @@ func branchEndsWithReturn(stmts []Statement) bool {
 		return branchEndsWithReturn(ifStmt.Then) && branchEndsWithReturn(ifStmt.Else)
 	}
 	return false
-}
-
-func (ctx *lowerCtx) lowerStatement(stmt Statement) {
-	ctx.lowerStatementWithReads(stmt, nil)
 }
 
 func (ctx *lowerCtx) lowerStatementWithReads(stmt Statement, readsAfter map[string]bool) {

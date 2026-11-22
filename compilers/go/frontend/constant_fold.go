@@ -6,7 +6,6 @@
 package frontend
 
 import (
-	"encoding/json"
 	"math/big"
 	"regexp"
 	"strings"
@@ -490,15 +489,6 @@ func constToANFValue(cv *constValue) ir.ANFValue {
 		return makeLoadConstString(cv.s)
 	}
 	panic("unknown constValue kind")
-}
-
-func makeLoadConstBigInt(val *big.Int) ir.ANFValue {
-	raw, _ := json.Marshal(val.String())
-	return ir.ANFValue{
-		Kind:        "load_const",
-		RawValue:    raw,
-		ConstBigInt: new(big.Int).Set(val),
-	}
 }
 
 // ---------------------------------------------------------------------------

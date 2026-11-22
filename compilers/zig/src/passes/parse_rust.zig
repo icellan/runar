@@ -667,12 +667,6 @@ const Parser = struct {
         return false;
     }
 
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
-    }
-
     // ==================================================================
     // Top-level parse
     // ==================================================================
@@ -2078,37 +2072,6 @@ const Parser = struct {
     }
 
     // ---- Helpers ----
-
-    /// Strip underscores + Rust type suffix from a numeric token, then route
-    /// to either `literal_int` (fits `i64`) or `literal_bigint` (overflows).
-    /// Used by parsePrimary's `.number` arm so the 256-bit secp256k1 group
-    /// order survives the Rust DSL frontend with full precision.
-    fn parseNumberExpr(self: *Parser, text: []const u8) ?Expression {
-        var stripped_buf: [128]u8 = undefined;
-        var stripped_len: usize = 0;
-        for (text) |ch| {
-            if ((ch == 'i' or ch == 'u') and stripped_len > 0) break;
-            if (ch != '_' and stripped_len < stripped_buf.len) {
-                stripped_buf[stripped_len] = ch;
-                stripped_len += 1;
-            }
-        }
-        const stripped = stripped_buf[0..stripped_len];
-        if (std.fmt.parseInt(i64, stripped, 0)) |val| {
-            return Expression{ .literal_int = val };
-        } else |_| {
-            // Oversize decimal literal — carry as `literal_bigint`.
-            // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
-            // ordinary way to write secp256k1's group order, and accepted by the
-            // other six tiers -- used to fall into the `invalid integer` arm
-            // below, because this fallback only recognised decimal digits.
-            if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
-                return Expression{ .literal_bigint = decimal };
-            }
-            self.addErrorFmt("invalid integer: '{s}'", .{text});
-            return null;
-        }
-    }
 
     fn isCompoundAssignOp(k: TokenKind) bool {
         return k == .plus_eq or k == .minus_eq or k == .star_eq or k == .slash_eq or k == .percent_eq;

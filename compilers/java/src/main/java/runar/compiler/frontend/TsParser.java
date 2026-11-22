@@ -254,18 +254,6 @@ public final class TsParser {
         return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
     }
 
-    private static boolean isHexDigit(char ch) {
-        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
-    }
-
-    private static boolean isOctalDigit(char ch) {
-        return ch >= '0' && ch <= '7';
-    }
-
-    private static boolean isBinaryDigit(char ch) {
-        return ch == '0' || ch == '1';
-    }
-
     private static List<Token> tokenize(String source, List<CommentInfo> comments, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;

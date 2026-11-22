@@ -1607,10 +1607,6 @@ const LowerCtx = struct {
     // Last-use analysis
     // ========================================================================
 
-    fn computeLastUses(self: *LowerCtx, bindings: []const types.ANFBinding) !void {
-        return self.computeLastUsesWithArrays(bindings, null);
-    }
-
     /// `computeLastUses` seeded with the array_literal metadata of an
     /// ENCLOSING scope (F-081): an if-arm or loop body can consume an array
     /// declared before it, and its own bindings do not contain that
@@ -1816,109 +1812,6 @@ const LowerCtx = struct {
         return self.force_copy_bindings.contains(name);
     }
 
-    fn valueReferencesName(value: types.ANFValue, name: []const u8) bool {
-        switch (value) {
-            .load_param => |lp| return std.mem.eql(u8, lp.name, name),
-            .load_const => |lc| switch (lc.value) {
-                .string => |s| return std.mem.startsWith(u8, s, "@ref:") and std.mem.eql(u8, s[5..], name),
-                else => return false,
-            },
-            .bin_op => |bop| return std.mem.eql(u8, bop.left, name) or std.mem.eql(u8, bop.right, name),
-            .unary_op => |uop| return std.mem.eql(u8, uop.operand, name),
-            .call => |call| {
-                for (call.args) |arg| {
-                    if (std.mem.eql(u8, arg, name)) return true;
-                }
-                return false;
-            },
-            .method_call => |mc| {
-                if (mc.object.len > 0 and std.mem.eql(u8, mc.object, name)) return true;
-                for (mc.args) |arg| {
-                    if (std.mem.eql(u8, arg, name)) return true;
-                }
-                return false;
-            },
-            .assert => |a| return std.mem.eql(u8, a.value, name),
-            .update_prop => |up| return std.mem.eql(u8, up.value, name),
-            .check_preimage => |cp| return std.mem.eql(u8, cp.preimage, name),
-            .deserialize_state => |ds| return std.mem.eql(u8, ds.preimage, name),
-            .add_output => |ao| {
-                if (ao.satoshis.len > 0 and std.mem.eql(u8, ao.satoshis, name)) return true;
-                if (ao.preimage.len > 0 and std.mem.eql(u8, ao.preimage, name)) return true;
-                for (ao.state_values) |sv| {
-                    if (sv.len > 0 and std.mem.eql(u8, sv, name)) return true;
-                }
-                for (ao.state_refs) |sr| {
-                    if (sr.len > 0 and std.mem.eql(u8, sr, name)) return true;
-                }
-                return false;
-            },
-            .add_raw_output => |aro| {
-                if (aro.satoshis.len > 0 and std.mem.eql(u8, aro.satoshis, name)) return true;
-                return aro.script_bytes.len > 0 and std.mem.eql(u8, aro.script_bytes, name);
-            },
-            .add_data_output => |ado| {
-                if (ado.satoshis.len > 0 and std.mem.eql(u8, ado.satoshis, name)) return true;
-                return ado.script_bytes.len > 0 and std.mem.eql(u8, ado.script_bytes, name);
-            },
-            .array_literal => |al| {
-                for (al.elements) |elem| {
-                    if (std.mem.eql(u8, elem, name)) return true;
-                }
-                return false;
-            },
-            .@"if", .loop, .load_prop, .get_state_script => return false,
-        }
-    }
-
-    fn futureUseCount(self: *const LowerCtx, name: []const u8) usize {
-        if (self.scope_bindings.len == 0 or self.current_idx + 1 >= self.scope_bindings.len) return 0;
-        var count: usize = 0;
-        for (self.scope_bindings[self.current_idx + 1 ..]) |binding| {
-            if (valueReferencesName(binding.value, name)) count += 1;
-        }
-        return count;
-    }
-
-    fn feedsLaterAliasedBinding(self: *const LowerCtx, name: []const u8) bool {
-        if (self.scope_bindings.len == 0 or self.current_idx + 1 >= self.scope_bindings.len) return false;
-        const future = self.scope_bindings[self.current_idx + 1 ..];
-        for (future, 0..) |binding, rel_idx| {
-            if (!valueReferencesName(binding.value, name)) continue;
-            for (future[rel_idx + 1 ..]) |later| {
-                switch (later.value) {
-                    .load_const => |lc| switch (lc.value) {
-                        .string => |s| {
-                            if (std.mem.startsWith(u8, s, "@ref:") and std.mem.eql(u8, s[5..], binding.name)) {
-                                return true;
-                            }
-                        },
-                        else => {},
-                    },
-                    else => {},
-                }
-            }
-        }
-        return false;
-    }
-
-    fn feedsPrivateMethodCall(self: *const LowerCtx, name: []const u8) bool {
-        if (self.scope_bindings.len == 0 or self.current_idx + 1 >= self.scope_bindings.len) return false;
-        for (self.scope_bindings[self.current_idx + 1 ..]) |binding| {
-            switch (binding.value) {
-                .method_call => |mc| {
-                    if (findPrivateMethod(self.program.methods, mc.method) == null) continue;
-                    if (mc.object.len > 0 and std.mem.eql(u8, mc.object, name)) return true;
-                    for (mc.args) |arg| {
-                        if (std.mem.eql(u8, arg, name)) return true;
-                    }
-                },
-                else => {},
-            }
-        }
-        return false;
-    }
-
     /// Lowers `binding`; for a binding that lowers a nested body (an inlined
     /// private call, an if, a loop) returns the task that does so instead, for
     /// the caller to run (N-264). Otherwise returns null.
@@ -2039,15 +1932,6 @@ const LowerCtx = struct {
     // ========================================================================
     // Individual value kind lowering
     // ========================================================================
-
-    fn lowerRef(self: *LowerCtx, bind_name: []const u8, ref_name: []const u8) !void {
-        const consume = self.isLastUse(ref_name);
-        try self.bringToTop(ref_name, consume);
-        try self.stack.renameAtDepth(self.allocator, 0, bind_name);
-        if (self.isForceCopyBinding(ref_name)) {
-            try self.force_copy_bindings.put(self.allocator, bind_name, {});
-        }
-    }
 
     fn lowerLoadParam(self: *LowerCtx, bind_name: []const u8, param_name: []const u8) !void {
         // The parameter is already on the stack under its original name — or, for
@@ -7467,25 +7351,6 @@ fn pinCodePartLength(methods: []types.StackMethod, properties: []const types.ANF
     }
 }
 
-fn countPublicMethods(methods: []const types.ANFMethod) usize {
-    var count: usize = 0;
-    for (methods) |m| {
-        if (m.is_public) count += 1;
-    }
-    return count;
-}
-
-fn usesOutputBuiltins(methods: []const types.ANFMethod) bool {
-    for (methods) |method| {
-        if (methodUsesCodePart(methodBindings(method))) return true;
-    }
-    return false;
-}
-
-fn isStateful(program: types.ANFProgram) bool {
-    return program.parent_class == .stateful_smart_contract;
-}
-
 fn setupMethodStack(ctx: *LowerCtx, program: types.ANFProgram, method: types.ANFMethod) !void {
     const bindings = methodBindings(method);
 
@@ -7758,20 +7623,6 @@ fn endsWithTerminalRawScript(bindings: []const types.ANFBinding) bool {
             (endsWithAssert(ie.@"else") or endsWithTerminalRawScript(ie.@"else")),
         else => false,
     };
-}
-
-fn anyMethodUsesCheckPreimage(methods: []const types.ANFMethod) bool {
-    for (methods) |method| {
-        if (method.is_public and methodUsesCheckPreimage(methodBindings(method), methods)) return true;
-    }
-    return false;
-}
-
-fn anyMethodUsesCodePart(methods: []const types.ANFMethod) bool {
-    for (methods) |method| {
-        if (method.is_public and methodUsesCodePart(methodBindings(method))) return true;
-    }
-    return false;
 }
 
 /// C27: the sole entry point used to hard-code `null` for the private-method

@@ -1437,13 +1437,6 @@ public final class AnfLoader {
         throw malformed(fieldPath(path, key), "a boolean", v);
     }
 
-    private static BigInteger asBigInt(Object v) {
-        if (v instanceof BigInteger bi) return bi;
-        if (v instanceof Long l) return BigInteger.valueOf(l);
-        if (v instanceof Integer i) return BigInteger.valueOf(i);
-        throw new RuntimeException("expected integer, got " + (v == null ? "null" : v.getClass()));
-    }
-
     /**
      * A {@code loop}'s iterator start: a JSON integer, or the sanctioned
      * {@code "<decimal>n"} string for a start too wide for a tier's native

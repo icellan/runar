@@ -560,12 +560,6 @@ const Parser = struct {
         return false;
     }
 
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
-    }
-
     // ---- Top-level ----
 
     fn parse(self: *Parser) ParseResult {

@@ -89,20 +89,6 @@ public final class StackLower {
      */
     static final int POW_EXPONENT_LIMIT = 32;
 
-
-    private static int trailingMergedLocalResults(List<AnfBinding> bindings) {
-        String prefix = "@ref:" + AnfValue.MERGED_LOCAL_TEMP_PREFIX;
-        int n = 0;
-        for (int i = bindings.size() - 1; i >= 0; i--) {
-            AnfValue v = bindings.get(i).value();
-            if (!(v instanceof LoadConst lc)) break;
-            if (!(lc.value() instanceof BytesConst bc)) break;
-            if (!bc.hex().startsWith(prefix)) break;
-            n++;
-        }
-        return n;
-    }
-
     /**
      * OP_PUSH_TX on-chain signature derivation (BUG-100 fix).
      *
@@ -6206,15 +6192,5 @@ public final class StackLower {
             sm.slots.clear();
             sm.slots.addAll(endTarget.slots);
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    private static String bytesToHex(byte[] bs) {
-        StringBuilder sb = new StringBuilder(bs.length * 2);
-        for (byte b : bs) sb.append(String.format("%02x", b & 0xff));
-        return sb.toString();
     }
 }

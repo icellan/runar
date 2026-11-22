@@ -2271,44 +2271,6 @@ func parsePyNumber(s string) Expression {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// pyIsPyKeyword returns true if the identifier is a Python keyword that
-// cannot be a variable name.
-func pyIsPyKeyword(name string) bool {
-	switch name {
-	case "class", "def", "if", "elif", "else", "for", "in", "range",
-		"return", "pass", "True", "False", "None", "and", "or", "not",
-		"self", "super", "from", "import", "assert", "while", "break",
-		"continue", "lambda", "yield", "with", "as", "try", "except",
-		"finally", "raise", "del", "global", "nonlocal":
-		return true
-	}
-	return false
-}
-
-// pyIsPyTypeStart checks if the current position looks like a type annotation
-// pattern: identifier followed by identifier (Type name).
-func (p *pyParser) pyIsPyTypeStart() bool {
-	if p.pos+1 >= len(p.tokens) {
-		return false
-	}
-	next := p.tokens[p.pos+1]
-	if next.kind == pyTokIdent {
-		name := p.peek().value
-		// Known types
-		if IsPrimitiveType(name) || parsePyType(name) != (CustomType{Name: name}) {
-			return true
-		}
-		if len(name) > 0 && unicode.IsUpper(rune(name[0])) {
-			return true
-		}
-		switch name {
-		case "int", "bool", "bytes", "Int":
-			return true
-		}
-	}
-	return false
-}
-
 // Ensure the _ import is used
 var _ = unicode.IsUpper
 

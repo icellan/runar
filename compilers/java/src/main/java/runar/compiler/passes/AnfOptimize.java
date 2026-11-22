@@ -8,36 +8,24 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import runar.compiler.ir.anf.AddDataOutput;
-import runar.compiler.ir.anf.AddOutput;
-import runar.compiler.ir.anf.AddRawOutput;
 import runar.compiler.ir.anf.AnfBinding;
 import runar.compiler.ir.anf.AnfMethod;
 import runar.compiler.ir.anf.AnfParam;
 import runar.compiler.ir.anf.AnfProgram;
 import runar.compiler.ir.anf.AnfProperty;
 import runar.compiler.ir.anf.AnfValue;
-import runar.compiler.ir.anf.ArrayLiteral;
 import runar.compiler.ir.anf.Assert;
 import runar.compiler.ir.anf.BigIntConst;
 import runar.compiler.ir.anf.BinOp;
 import runar.compiler.ir.anf.BoolConst;
 import runar.compiler.ir.anf.BytesConst;
 import runar.compiler.ir.anf.Call;
-import runar.compiler.ir.anf.CheckPreimage;
 import runar.compiler.ir.anf.ConstValue;
-import runar.compiler.ir.anf.DeserializeState;
-import runar.compiler.ir.anf.GetStateScript;
 import runar.compiler.ir.anf.If;
 import runar.compiler.ir.anf.LoadConst;
 import runar.compiler.ir.anf.LoadParam;
 import runar.compiler.ir.anf.LoadProp;
 import runar.compiler.ir.anf.Loop;
-import runar.compiler.ir.anf.MethodCall;
-import runar.compiler.ir.anf.RawScript;
-import runar.compiler.ir.anf.UnaryOp;
-import runar.compiler.ir.anf.UpdateProp;
-import runar.compiler.ir.UnknownAnfKindError;
 
 /**
  * General ANF cleanup pass (Pass 4.5 in the Java pipeline).
@@ -1016,169 +1004,10 @@ public final class AnfOptimize {
     // optimiser". Keeping the rest of an unreachable optimizer in the
     // production pass file is the same hazard one step back.
 
-
-
-    /** Cheap structural fingerprint used as a fixed-point sentinel. */
-    private static int bodyFingerprint(List<AnfBinding> body) {
-        int h = body.size();
-        for (AnfBinding b : body) {
-            h = h * 31 + b.name().hashCode();
-            h = h * 31 + b.value().getClass().getName().hashCode();
-            h = h * 31 + valueShapeHash(b.value());
-        }
-        return h;
-    }
-
-    private static int valueShapeHash(AnfValue v) {
-        if (v instanceof If ifv) {
-            return 17 + (ifv.cond() == null ? 0 : ifv.cond().hashCode())
-                + 31 * (ifv.thenBranch() == null ? 0 : ifv.thenBranch().size())
-                + 31 * (ifv.elseBranch() == null ? 0 : ifv.elseBranch().size());
-        }
-        if (v instanceof Loop lp) {
-            return 19 + lp.count() + 31 * (lp.body() == null ? 0 : lp.body().size());
-        }
-        if (v instanceof LoadConst lc) {
-            return lc.value() == null ? 0 : lc.value().hashCode();
-        }
-        return v.kind().hashCode();
-    }
-
     // ---------------------------------------------------------------
     // 1. Tautological-branch removal
     // ---------------------------------------------------------------
 
-
-    // ---------------------------------------------------------------
-    // 2. Constant propagation through @ref: aliases
-    // ---------------------------------------------------------------
-
-    /**
-     * Walk the body and build a rename map {@code t_i -> canonical(t_j)}
-     * for every binding {@code t_i = load_const "@ref:t_j"}.  Then rewrite
-     * every reference to {@code t_i} (as a left/right/operand/cond/arg/...)
-     * to point at {@code canonical(t_j)} instead.  After this pass, alias
-     * bindings have no consumers and are picked up by DCE.
-     */
-    private static List<AnfBinding> propagateAliases(List<AnfBinding> body) {
-        Map<String, String> rename = collectAliasRenames(body);
-        if (rename.isEmpty()) return body;
-
-        List<AnfBinding> out = new ArrayList<>(body.size());
-        for (AnfBinding b : body) {
-            out.add(new AnfBinding(b.name(), renameInValue(b.value(), rename), b.sourceLoc()));
-        }
-        return out;
-    }
-
-    private static Map<String, String> collectAliasRenames(List<AnfBinding> body) {
-        Map<String, String> direct = new HashMap<>();
-        for (AnfBinding b : body) {
-            if (b.value() instanceof LoadConst lc && lc.value() instanceof BytesConst bs) {
-                String hex = bs.hex();
-                if (hex != null && hex.startsWith("@ref:")) {
-                    direct.put(b.name(), hex.substring(5));
-                }
-            }
-        }
-        // Resolve transitively: t_i -> t_j -> t_k => t_i -> t_k.
-        Map<String, String> resolved = new HashMap<>();
-        for (String src : direct.keySet()) {
-            String cur = src;
-            Set<String> seen = new HashSet<>();
-            while (direct.containsKey(cur)) {
-                if (!seen.add(cur)) break;
-                cur = direct.get(cur);
-            }
-            if (!cur.equals(src)) {
-                resolved.put(src, cur);
-            }
-        }
-        return resolved;
-    }
-
-    private static String resolve(String name, Map<String, String> rename) {
-        String r = rename.get(name);
-        return r == null ? name : r;
-    }
-
-    private static List<String> resolveAll(List<String> args, Map<String, String> rename) {
-        if (args == null) return null;
-        List<String> out = new ArrayList<>(args.size());
-        for (String a : args) out.add(resolve(a, rename));
-        return out;
-    }
-
-    private static AnfValue renameInValue(AnfValue v, Map<String, String> rename) {
-        if (v instanceof LoadParam || v instanceof LoadProp || v instanceof GetStateScript) {
-            return v;
-        }
-        if (v instanceof LoadConst) return v;
-        if (v instanceof BinOp b) {
-            return new BinOp(b.op(), resolve(b.left(), rename), resolve(b.right(), rename), b.resultType());
-        }
-        if (v instanceof UnaryOp u) {
-            return new UnaryOp(u.op(), resolve(u.operand(), rename), u.resultType());
-        }
-        if (v instanceof Call c) {
-            return new Call(c.func(), resolveAll(c.args(), rename));
-        }
-        if (v instanceof MethodCall mc) {
-            return new MethodCall(resolve(mc.object(), rename), mc.method(), resolveAll(mc.args(), rename));
-        }
-        if (v instanceof If ifv) {
-            return new If(resolve(ifv.cond(), rename),
-                renameInBody(orEmpty(ifv.thenBranch()), rename),
-                renameInBody(orEmpty(ifv.elseBranch()), rename),
-                ifv.results());
-        }
-        if (v instanceof Loop lp) {
-            return new Loop(lp.count(), renameInBody(orEmpty(lp.body()), rename), lp.iterVar(), lp.start(), lp.step());
-        }
-        if (v instanceof Assert a) {
-            return new Assert(resolve(a.value(), rename));
-        }
-        if (v instanceof UpdateProp up) {
-            return new UpdateProp(up.name(), resolve(up.value(), rename));
-        }
-        if (v instanceof CheckPreimage cp) {
-            // Carry every field: the 1-arg constructor reset sighashFlag (and
-            // now bindingVariant) to the default on a renamed preimage.
-            return new CheckPreimage(resolve(cp.preimage(), rename), cp.sighashFlag(), cp.bindingVariant());
-        }
-        if (v instanceof DeserializeState ds) {
-            return new DeserializeState(resolve(ds.preimage(), rename));
-        }
-        if (v instanceof AddOutput ao) {
-            return new AddOutput(resolve(ao.satoshis(), rename),
-                resolveAll(ao.stateValues(), rename),
-                resolve(ao.preimage(), rename));
-        }
-        if (v instanceof AddRawOutput ar) {
-            return new AddRawOutput(resolve(ar.satoshis(), rename), resolve(ar.scriptBytes(), rename));
-        }
-        if (v instanceof AddDataOutput ad) {
-            return new AddDataOutput(resolve(ad.satoshis(), rename), resolve(ad.scriptBytes(), rename));
-        }
-        if (v instanceof ArrayLiteral al) {
-            return new ArrayLiteral(resolveAll(al.elements(), rename));
-        }
-        if (v instanceof RawScript) {
-            // Opaque byte span — no SSA operand refs to rename.
-            return v;
-        }
-        // Exhaustiveness guard. Silently returning the value would drop a
-        // pending rename and corrupt downstream lowering.
-        throw new UnknownAnfKindError(v.kind(), "anf-optimize.renameInValue");
-    }
-
-    private static List<AnfBinding> renameInBody(List<AnfBinding> body, Map<String, String> rename) {
-        List<AnfBinding> out = new ArrayList<>(body.size());
-        for (AnfBinding b : body) {
-            out.add(new AnfBinding(b.name(), renameInValue(b.value(), rename), b.sourceLoc()));
-        }
-        return out;
-    }
 
     // ---------------------------------------------------------------
     // 3. Dead-binding elimination

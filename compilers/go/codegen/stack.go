@@ -555,10 +555,6 @@ func (s *stackMap) namedSlots() map[string]bool {
 // Use analysis — determine last-use sites for each variable
 // ---------------------------------------------------------------------------
 
-func computeLastUses(bindings []ir.ANFBinding) map[string]int {
-	return computeLastUsesWithArrays(bindings, nil)
-}
-
 // computeLastUsesWithArrays is computeLastUses seeded with the array_literal
 // metadata of an ENCLOSING scope (F-081): an if-arm or loop body can consume
 // an array declared before it, and its own bindings do not contain that
@@ -1847,30 +1843,6 @@ func (ctx *loweringContext) lowerBindingsWithArrays(bindings []ir.ANFBinding, te
 		} else {
 			ctx.lowerBinding(&binding, i, lastUses)
 		}
-		ctx.currentSourceLoc = nil
-	}
-}
-
-// lowerBindingsProtected works like lowerBindings but ensures that variables
-// in the protectedNames set are never consumed (always PICK'd, never ROLL'd).
-// This is used during loop unrolling so that outer-scope variables survive
-// across iterations.
-func (ctx *loweringContext) lowerBindingsProtected(bindings []ir.ANFBinding, protectedNames map[string]bool) {
-	lastUses := computeLastUses(bindings)
-
-	// Remove protected names from lastUses so they're never treated as last-use.
-	// This forces bringToTop to use PICK instead of ROLL for these variables.
-	for name := range protectedNames {
-		delete(lastUses, name)
-	}
-	// Set protected names to a very high last-use index so isLastUse always returns false
-	for name := range protectedNames {
-		lastUses[name] = 1<<31 - 1 // MAX_INT
-	}
-
-	for i, binding := range bindings {
-		ctx.currentSourceLoc = binding.SourceLoc
-		ctx.lowerBinding(&binding, i, lastUses)
 		ctx.currentSourceLoc = nil
 	}
 }
@@ -6727,14 +6699,6 @@ func methodUsesCodePart(bindings []ir.ANFBinding) bool {
 	return false
 }
 
-// lowerMethodWithPrivateMethods lowers a single method in isolation (tests and
-// single-method entry points). R-010: with no sibling methods to consult, the
-// separator decision is taken from this method alone.
-func lowerMethodWithPrivateMethods(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod) (*StackMethod, error) {
-	scriptLevelCodeSeparator := computeUsesCodePart(method, properties, privateMethods)
-	return lowerMethodWithPrivateMethodsAndOptions(method, properties, privateMethods, LowerToStackOptions{}, scriptLevelCodeSeparator)
-}
-
 func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod, opts LowerToStackOptions, scriptLevelCodeSeparator bool) (*StackMethod, error) {
 	paramNames := make([]string, len(method.Params))
 	for i, p := range method.Params {
@@ -6847,46 +6811,6 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 		MaxStackDepth:      ctx.maxDepth,
 		UsesCodePart:       usesCodePart,
 		NeedsCodeSeparator: scriptLevelCodeSeparator,
-	}, nil
-}
-
-func lowerMethod(method *ir.ANFMethod, properties []ir.ANFProperty) (*StackMethod, error) {
-	paramNames := make([]string, len(method.Params))
-	for i, p := range method.Params {
-		paramNames[i] = p.Name
-	}
-
-	// OP_PUSH_TX no longer requires an implicit _opPushTxSig parameter.
-
-	ctx := newLoweringContext(paramNames, properties)
-	// Pass terminalAssert=true for public methods so the last assert leaves
-	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
-	ctx.lowerBindings(method.Body, method.IsPublic)
-
-	// Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
-	// Excess items can come from deserialize_state (stateful methods reading
-	// mutable fields) or from readonly-field-binding patterns in all-readonly
-	// terminal methods. Only the final assertion result must remain on the
-	// stack. The depth>1 guard keeps this a no-op for already-clean methods.
-	if method.IsPublic && ctx.sm.depth() > 1 {
-		excess := ctx.sm.depth() - 1
-		for i := 0; i < excess; i++ {
-			ctx.emitOp(StackOp{Op: "nip"})
-			ctx.sm.removeAtDepth(1)
-		}
-	}
-
-	if ctx.maxDepth > maxStackDepth {
-		return nil, fmt.Errorf(
-			"method '%s' exceeds maximum stack depth of %d (actual: %d). Simplify the contract logic",
-			method.Name, maxStackDepth, ctx.maxDepth,
-		)
-	}
-
-	return &StackMethod{
-		Name:          method.Name,
-		Ops:           ctx.ops,
-		MaxStackDepth: ctx.maxDepth,
 	}, nil
 }
 

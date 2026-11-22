@@ -1027,10 +1027,6 @@ struct LoweringContext<'a> {
 }
 
 impl<'a> LoweringContext<'a> {
-    fn new(contract: &'a ContractNode) -> Self {
-        Self::with_effects(contract, None)
-    }
-
     fn with_effects(contract: &'a ContractNode, side_effects: Option<SideEffectSummary>) -> Self {
         LoweringContext {
             bindings: Vec::new(),

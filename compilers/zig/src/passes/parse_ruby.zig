@@ -521,10 +521,6 @@ const Tokenizer = struct {
         return isIdentStart(c) or (c >= '0' and c <= '9');
     }
 
-    fn isHexDigit(c: u8) bool {
-        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-    }
-
     fn twoCharOp(two: []const u8) ?TokenKind {
         if (two.len < 2) return null;
         const a = two[0];
@@ -960,12 +956,6 @@ const Parser = struct {
 
     fn tokenSourceLoc(self: *const Parser, tok: Token) types.SourceLocation {
         return .{ .file = self.file_name, .line = tok.line, .column = tok.col };
-    }
-
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
     }
 
     // ==== Top-level ====
@@ -2658,42 +2648,6 @@ const Parser = struct {
         }
         _ = self.expect(.rbracket);
         return .{ .array_literal = elements.items };
-    }
-
-    fn parseRbNumber(self: *Parser, text: []const u8) ?Expression {
-        // Strip underscores from number text. Buffer sized for 256-bit
-        // decimal literals (78 digits) with headroom.
-        var stripped_buf: [160]u8 = undefined;
-        var stripped_len: usize = 0;
-        var overflow = false;
-        for (text) |ch| {
-            if (ch == '_') continue;
-            if (stripped_len >= stripped_buf.len) {
-                overflow = true;
-                break;
-            }
-            stripped_buf[stripped_len] = ch;
-            stripped_len += 1;
-        }
-        if (overflow) {
-            self.addErrorFmt("integer literal too long: '{s}'", .{text});
-            return Expression{ .literal_int = 0 };
-        }
-        const stripped = stripped_buf[0..stripped_len];
-        if (std.fmt.parseInt(i64, stripped, 0)) |val| {
-            return Expression{ .literal_int = val };
-        } else |_| {
-            // Oversize decimal literal — carry as `literal_bigint`.
-            // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
-            // ordinary way to write secp256k1's group order, and accepted by the
-            // other six tiers -- used to fall into the `invalid integer` arm
-            // below, because this fallback only recognised decimal digits.
-            if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
-                return Expression{ .literal_bigint = decimal };
-            }
-            self.addErrorFmt("invalid integer: '{s}'", .{text});
-            return Expression{ .literal_int = 0 };
-        }
     }
 
     // ==== Helpers ====

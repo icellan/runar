@@ -400,9 +400,6 @@ const Tokenizer = struct {
         return isIdentStart(c) or (c >= '0' and c <= '9');
     }
 
-    fn isHexDigit(c: u8) bool {
-        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-    }
 };
 
 // ============================================================================
