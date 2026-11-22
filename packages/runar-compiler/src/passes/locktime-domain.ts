@@ -9,9 +9,11 @@
  * (#131, `extractSequence !== 0xffffffff`) does not help.
  *
  * A GATE is a lower-bound compare on a locktime read: `lt >= X`, `lt > X`,
- * `X <= lt`, `X < lt`, where `lt` is `extractLocktime(...)`,
- * `currentBlockHeight()`, a local bound to one of them, or a private helper's
- * parameter that a call passes one of them (a DIRECT read). It is not a gate
+ * `X <= lt`, `X < lt`, where `lt` is `extractLocktime(...)`, a local bound to
+ * it, or a private helper's parameter that a call passes it (a DIRECT read).
+ * `currentBlockHeight()` is NOT a read here: it asserts its own value
+ * `< 500000000` at the call (04-anf-lower.ts), so it is a height by
+ * construction. A local bound to both is still read fail-closed (DERIVED). It is not a gate
  * when X is a literal in the timestamp domain (`>= N` with N >= 500000000,
  * `> N` with N >= 499999999): a height-domain locktime can never pass that, so
  * it pins the domain itself, nor for the vacuous `>= 0n` that every locktime
@@ -161,18 +163,73 @@ function classifyCompare<T>(
 // Source path
 // ---------------------------------------------------------------------------
 
+/**
+ * currentBlockHeight() asserts its own value is below 500000000, so a
+ * lower-bound compare of it against a timestamp-domain literal
+ * (`currentBlockHeight() >= N` with N >= 500000000, `> N` with
+ * N >= 499999999, and the reversed spellings) can never be true: inside an
+ * assert the output could never be spent. True iff `method` contains one,
+ * anywhere (any statement, any branch). The compared operand is a direct
+ * call, or a local every binding of which (declaration or assignment) is a
+ * direct call; the bound must be a bigint literal.
+ */
+export function comparesCurrentBlockHeightToTimestamp(method: MethodNode): boolean {
+  const lit = (x: Expression): bigint | null => (x.kind === 'bigint_literal' ? x.value : null);
+  const isNode = (v: unknown): v is Expression =>
+    typeof v === 'object' && v !== null && typeof (v as { kind?: unknown }).kind === 'string';
+  // Locals bound only to currentBlockHeight().
+  const binds = new Map<string, boolean>();
+  const bind = (name: string, value: Expression): void => {
+    binds.set(name, (binds.get(name) ?? true) && isCallTo(value, 'currentBlockHeight'));
+  };
+  const collect = (stmts: Statement[]): void => {
+    for (const st of stmts) {
+      if (st.kind === 'variable_decl') bind(st.name, st.init);
+      else if (st.kind === 'assignment' && st.target.kind === 'identifier') bind(st.target.name, st.value);
+      else if (st.kind === 'if_statement') {
+        collect(st.then);
+        if (st.else) collect(st.else);
+      } else if (st.kind === 'for_statement') {
+        collect([st.init]);
+        collect(st.body);
+      }
+    }
+  };
+  collect(method.body);
+  const isCbh = (e: Expression): boolean =>
+    isCallTo(e, 'currentBlockHeight') || (e.kind === 'identifier' && binds.get(e.name) === true);
+  const hit = (e: Expression): boolean => {
+    if (e.kind === 'binary_expr' && isCmp(e.op)) {
+      if (isCbh(e.left) && classify(e.op, lit(e.right)) === 'pin' && (e.op === '>=' || e.op === '>')) return true;
+      const f = FLIP[e.op];
+      if (isCbh(e.right) && classify(f, lit(e.left)) === 'pin' && (f === '>=' || f === '>')) return true;
+    }
+    return Object.values(e).some((v) => (Array.isArray(v) ? v.some((x) => isNode(x) && hit(x)) : isNode(v) && hit(v)));
+  };
+  return method.body.some((st) => hit(st as unknown as Expression));
+}
+
+/** The shared error text for {@link comparesCurrentBlockHeightToTimestamp}. */
+export function currentBlockHeightTimestampMessage(method: string): string {
+  return (
+    `method '${method}' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts ` +
+    `its value is below 500000000 (a block height), so this compare can never pass and an output gated on it ` +
+    `could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate`
+  );
+}
+
 const isCallTo = (e: Expression, name: string): boolean =>
   e.kind === 'call_expr' && e.callee.kind === 'identifier' && e.callee.name === name;
 
 /**
  * Prefilter (no result of its own): true iff some method of the contract calls
- * extractLocktime or currentBlockHeight. Without one there is no gate, and the
+ * extractLocktime (currentBlockHeight pins itself, see above). Without one there is no gate, and the
  * path walk, which recurses once per nested if and helper call, is skipped
  * (N-264 compiles call chains nested far past what that walk can recurse).
  */
 export function contractReadsLocktime(contract: ContractNode): boolean {
   const seen = (e: Expression): boolean => {
-    if (isCallTo(e, 'extractLocktime') || isCallTo(e, 'currentBlockHeight')) return true;
+    if (isCallTo(e, 'extractLocktime')) return true;
     return Object.values(e).some((v) =>
       Array.isArray(v) ? v.some((x) => isNode(x) && seen(x)) : isNode(v) && seen(v),
     );
@@ -325,7 +382,7 @@ class SourceGates {
 
 /** Taint level of a source expression, given the taint of the names in scope. */
 function exprLevel(e: Expression, names: Map<string, number>): number {
-  if (isCallTo(e, 'extractLocktime') || isCallTo(e, 'currentBlockHeight')) return DIRECT;
+  if (isCallTo(e, 'extractLocktime')) return DIRECT;
   const any = (...xs: Expression[]): number => (xs.some((x) => exprLevel(x, names) !== NONE) ? DERIVED : NONE);
   switch (e.kind) {
     case 'identifier':
@@ -374,7 +431,7 @@ function collectLocktimeLocals(body: Statement[], params: Map<string, number>): 
     (b, d) =>
       typeof b === 'number'
         ? b === DIRECT
-        : isCallTo(b, 'extractLocktime') || isCallTo(b, 'currentBlockHeight') || (b.kind === 'identifier' && d.has(b.name)),
+        : isCallTo(b, 'extractLocktime') || (b.kind === 'identifier' && d.has(b.name)),
   );
 }
 

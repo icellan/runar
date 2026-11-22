@@ -50,7 +50,9 @@ from runar_compiler.frontend.continuation_rules import (
     dropped_continuation_message,
 )
 from runar_compiler.frontend.locktime_domain import (
+    compares_current_block_height_to_timestamp,
     contract_reads_locktime,
+    current_block_height_timestamp_message,
     has_unpinned_locktime_gate,
     locktime_domain_message,
 )
@@ -1186,6 +1188,10 @@ class _TypeChecker:
             and has_unpinned_locktime_gate(self.contract, method)
         ):
             self._add_error(locktime_domain_message(method.name))
+        # currentBlockHeight() pins itself below 500000000, so a timestamp-
+        # domain lower bound on it can never pass (locktime_domain.py).
+        if compares_current_block_height_to_timestamp(method):
+            self._add_error(current_block_height_timestamp_message(method.name))
 
     def _check_statements(self, stmts: list[Statement], env: _TypeEnv) -> None:
         for stmt in stmts:

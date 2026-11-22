@@ -996,6 +996,11 @@ terminal (no state mutation)",
         {
             self.add_error(super::locktime_domain::locktime_domain_message(&method.name));
         }
+        // currentBlockHeight() pins itself below 500000000, so a timestamp-
+        // domain lower bound on it can never pass (locktime_domain.rs).
+        if super::locktime_domain::compares_current_block_height_to_timestamp(method) {
+            self.add_error(super::locktime_domain::current_block_height_timestamp_message(&method.name));
+        }
     }
 
     fn check_statements(&mut self, stmts: &[Statement], env: &mut TypeEnv) {

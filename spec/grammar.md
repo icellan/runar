@@ -896,9 +896,12 @@ specific companion UTXO — parse the companion input's parent tx, hash-bound to
 the spending tx through the BIP-143 preimage — is written out and tested in
 `examples/ts/companion-verifier/`.
 
-`currentBlockHeight()` is a source-level desugar to
-`extractLocktime(this.txPreimage)`, so it is valid only where that preimage
-exists — inside a `StatefulSmartContract` method. **The name is misleading and
+`currentBlockHeight()` desugars to `extractLocktime(this.txPreimage)` plus an
+asserted height-domain pin at the call (`assert(<that value> < 500000000)`, one
+per call), so it is valid only where that preimage exists — inside a
+`StatefulSmartContract` method — and a spend whose `nLockTime` is a Unix
+timestamp fails it. D26 therefore does not apply to it; a timestamp gate must
+use `extractLocktime`. **The name is misleading and
 kept only for source compatibility: it does not read the chain height.** It
 reads the spending transaction's own `nLockTime`, a number the spender writes.
 

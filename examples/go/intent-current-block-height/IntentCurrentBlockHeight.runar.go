@@ -3,9 +3,9 @@ package x
 import runar "github.com/icellan/runar/packages/runar-go"
 
 // IntentCurrentBlockHeight exercises the runar.CurrentBlockHeight
-// shorthand, which is pure source-level sugar for
-// `runar.ExtractLocktime(this.txPreimage)`. The desugar happens at ANF
-// lowering time — no new ANF kind or stack codegen is needed.
+// shorthand: `runar.ExtractLocktime(this.txPreimage)` plus an asserted
+// `< 500000000` height-domain pin, emitted at ANF lowering time — no
+// new ANF kind or stack codegen is needed.
 type IntentCurrentBlockHeight struct {
 	runar.StatefulSmartContract
 

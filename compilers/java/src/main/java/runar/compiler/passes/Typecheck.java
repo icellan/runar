@@ -770,6 +770,11 @@ public final class Typecheck {
                 && LocktimeDomain.hasUnpinnedLocktimeGate(contract, m)) {
                 errors.add(format(LocktimeDomain.locktimeDomainMessage(m.name()), m.sourceLocation()));
             }
+            // currentBlockHeight() pins itself below 500000000, so a timestamp-
+            // domain lower bound on it can never pass (LocktimeDomain).
+            if (LocktimeDomain.comparesCurrentBlockHeightToTimestamp(m)) {
+                errors.add(format(LocktimeDomain.currentBlockHeightTimestampMessage(m.name()), m.sourceLocation()));
+            }
         }
 
         private void checkStatements(List<Statement> stmts, Env env) {

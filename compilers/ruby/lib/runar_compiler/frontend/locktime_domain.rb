@@ -8,9 +8,10 @@
 # or above it as a Unix timestamp, so extractLocktime(p) >= H for a height H is
 # passed at once by any timestamp-domain locktime.
 #
-# A GATE is a lower-bound compare on a locktime read (extractLocktime(...),
-# currentBlockHeight(), a local bound to one, or a private helper's parameter a
-# call passes one: a DIRECT read), unless the other side is a timestamp-domain
+# A GATE is a lower-bound compare on a locktime read (extractLocktime(...), a
+# local bound to it, or a private helper's parameter a call passes it: a DIRECT
+# read; currentBlockHeight() is not one, it asserts its own value < 500000000
+# at the call, so it is a height by construction), unless the other side is a timestamp-domain
 # literal (it pins the domain itself) or the vacuous >= 0. A value DERIVED
 # from a read (arithmetic, bitwise, shift,
 # unary - / ~, a ternary arm, a builtin taking a read, or a local some of whose
@@ -151,11 +152,12 @@ module RunarCompiler
         e.is_a?(CallExpr) && e.callee.is_a?(Identifier) && e.callee.name == name
       end
 
+      # currentBlockHeight() pins itself (anf_lower.rb); mirrors locktime-domain.ts.
       def self.read?(e)
-        call_to?(e, "extractLocktime") || call_to?(e, "currentBlockHeight")
+        call_to?(e, "extractLocktime")
       end
 
-      # Prefilter: does any method call extractLocktime or currentBlockHeight?
+      # Prefilter: does any method call extractLocktime?
       # Without a read there is no gate, so the path walk is skipped.
       def self.contract_reads_locktime?(contract)
         seen = lambda do |node|
@@ -171,6 +173,66 @@ module RunarCompiler
           false
         end
         (contract.methods || []).any? { |m| (m.body || []).any? { |st| seen.call(st) } }
+      end
+
+      # The shared error text for a currentBlockHeight() compare against a
+      # timestamp-domain bound.
+      def self.current_block_height_timestamp_message(method)
+        "method '#{method}' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts " \
+          "its value is below 500000000 (a block height), so this compare can never pass and an output gated on it " \
+          "could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate"
+      end
+
+      # True iff +method+ contains, anywhere, a lower-bound compare of a direct
+      # currentBlockHeight() call (or a local every binding of which is one)
+      # against a timestamp-domain bigint literal
+      # (>= N, N >= 500000000; > N, N >= 499999999; or reversed).
+      # currentBlockHeight() asserts its value is below 500000000, so such a
+      # compare can never pass. Mirrors comparesCurrentBlockHeightToTimestamp.
+      def self.compares_current_block_height_to_timestamp?(method)
+        lit = ->(x) { x.is_a?(BigIntLiteral) ? x.value : nil }
+        # Locals bound only to currentBlockHeight() (every declaration/assignment).
+        cbh_only = {}
+        bind = lambda do |name, value|
+          cbh_only[name] = cbh_only.fetch(name, true) && call_to?(value, "currentBlockHeight")
+        end
+        collect = lambda do |stmts|
+          (stmts || []).each do |st|
+            case st
+            when VariableDeclStmt then bind.call(st.name, st.init)
+            when AssignmentStmt then bind.call(st.target.name, st.value) if st.target.is_a?(Identifier)
+            when IfStmt
+              collect.call(st.then)
+              collect.call(st.else_) if st.else_
+            when ForStmt
+              collect.call([st.init]) if st.init
+              collect.call(st.body)
+            end
+          end
+        end
+        collect.call(method.body)
+        is_cbh = ->(e) { call_to?(e, "currentBlockHeight") || (e.is_a?(Identifier) && cbh_only.fetch(e.name, false)) }
+        hit = lambda do |e|
+          return false unless e.is_a?(BinaryExpr) && FLIP.key?(e.op)
+          return true if is_cbh.call(e.left) && [">=", ">"].include?(e.op) &&
+                         classify(e.op, lit.call(e.right)) == :pin
+
+          f = FLIP[e.op]
+          is_cbh.call(e.right) && [">=", ">"].include?(f) && classify(f, lit.call(e.left)) == :pin
+        end
+        seen = lambda do |node|
+          return true if hit.call(node)
+
+          node.to_h.each_value do |v|
+            if v.is_a?(Array)
+              return true if v.any? { |x| x.is_a?(Struct) && seen.call(x) }
+            elsif v.is_a?(Struct) && seen.call(v)
+              return true
+            end
+          end
+          false
+        end
+        (method.body || []).any? { |st| seen.call(st) }
       end
 
       # D26 (source path): some path through public +method+ carries an unpinned gate.

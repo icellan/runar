@@ -2660,12 +2660,18 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
 	}
 
-	// currentBlockHeight() -> bigint. Pure source-level desugar to
-	// extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
-	// methods (typecheck enforces). No new ANF kind or stack codegen needed.
+	// currentBlockHeight() -> bigint. Desugars to extractLocktime(this.txPreimage)
+	// AND pins the locktime domain at the use site (an nLockTime >= 500000000
+	// is a Unix timestamp). One pin per call; emission order matches
+	// 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
+	// Only valid in StatefulSmartContract methods (typecheck enforces).
 	if id, ok := callee.(Identifier); ok && id.Name == "currentBlockHeight" {
 		preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
-		return ctx.emit(makeCall("extractLocktime", []string{preimageRef}))
+		heightRef := ctx.emit(makeCall("extractLocktime", []string{preimageRef}))
+		thresholdRef := ctx.emit(makeLoadConstInt(big.NewInt(500000000)))
+		inDomainRef := ctx.emit(ir.ANFValue{Kind: "bin_op", Op: "<", Left: heightRef, Right: thresholdRef})
+		ctx.emit(makeAssert(inDomainRef))
+		return heightRef
 	}
 
 	// this.addOutput(satoshis, val1, val2, ...) -> special node.

@@ -979,6 +979,11 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 		ContractReadsLocktime(tc.contract) && HasUnpinnedLocktimeGate(tc.contract, method) {
 		tc.addError(LocktimeDomainMessage(method.Name))
 	}
+	// currentBlockHeight() pins itself below 500000000, so a timestamp-domain
+	// lower bound on it can never pass (locktime_domain.go).
+	if ComparesCurrentBlockHeightToTimestamp(method) {
+		tc.addError(CurrentBlockHeightTimestampMessage(method.Name))
+	}
 }
 
 func (tc *typeChecker) checkStatements(stmts []Statement, env *typeEnv) {

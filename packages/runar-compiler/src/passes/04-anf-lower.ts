@@ -2546,12 +2546,22 @@ function lowerCallExpr(
     return ctx.emit({ kind: 'assert', value: outEqRef });
   }
 
-  // currentBlockHeight() -> bigint. Pure source-level desugar to
-  // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
-  // methods (typecheck enforces). No new ANF kind or stack codegen needed.
+  // currentBlockHeight() -> bigint. Desugars to extractLocktime(this.txPreimage)
+  // AND pins the locktime domain at the use site: consensus reads an
+  // nLockTime >= 500000000 as a Unix timestamp, so without the pin
+  // `currentBlockHeight() >= H` passes for any timestamp locktime. One pin per
+  // call (a method-entry pin would refuse timestamp spends on paths that never
+  // read the height). Emission order is part of the cross-tier ANF:
+  //   load_param txPreimage; call extractLocktime; load_const 500000000;
+  //   bin_op <; assert. The value is the extractLocktime binding.
+  // Only valid in StatefulSmartContract methods (typecheck enforces).
   if (callee.kind === 'identifier' && callee.name === 'currentBlockHeight') {
     const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
-    return ctx.emit({ kind: 'call', func: 'extractLocktime', args: [preimageRef] });
+    const heightRef = ctx.emit({ kind: 'call', func: 'extractLocktime', args: [preimageRef] });
+    const thresholdRef = ctx.emit({ kind: 'load_const', value: 500000000n });
+    const inDomainRef = ctx.emit({ kind: 'bin_op', op: '<', left: heightRef, right: thresholdRef });
+    ctx.emit({ kind: 'assert', value: inDomainRef });
+    return heightRef;
   }
 
   // continuationAmount() -> bigint. F-024 (R14): a read-only view of the

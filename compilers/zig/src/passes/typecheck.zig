@@ -1572,6 +1572,11 @@ const TypeChecker = struct {
         {
             self.addError(locktime_domain.LOCKTIME_DOMAIN_FMT, .{method.name});
         }
+        // currentBlockHeight() pins itself below 500000000, so a timestamp-
+        // domain lower bound on it can never pass (locktime_domain.zig).
+        if (locktime_domain.comparesCurrentBlockHeightToTimestamp(method)) {
+            self.addError(locktime_domain.CBH_TIMESTAMP_FMT, .{method.name});
+        }
     }
 
     /// N-323: a local annotated with a type name no tier recognises. Every

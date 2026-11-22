@@ -381,7 +381,9 @@ T — while `assert(extractLocktime(p) < T)` proves nothing whatsoever. A bidder
 at height T + 1000 writes `nLockTime = T - 1`, the node mines it (T - 1 is long
 past), and the script happily sees `T - 1 < T`. The check reads like a deadline
 and enforces nothing. `currentBlockHeight()` is sugar for the same field and
-carries the same caveat despite its name; read it as `txLocktime()`.
+carries the same caveat despite its name; read it as `txLocktime()` (it does
+pin itself to the block-height domain: every call asserts the value is below
+500000000).
 
 A contract that genuinely needs "before T" needs a time source it can read as
 **state** — an oracle, or a tick transaction the contract can verify — not the

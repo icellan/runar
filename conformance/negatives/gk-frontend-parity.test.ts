@@ -452,6 +452,63 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
     }
   });
 
+  // (Not listed below: currentBlockHeight() in a ternary arm. Six tiers accept
+  // it on the source path, while Go's source path and every --ir path refuse
+  // it with D26, because the --ir rule does not see a pin asserted inside a
+  // value arm. Fail-closed, but a parity gap; reported, not fixed here.)
+  // currentBlockHeight() asserts its own value is below 500000000, so a
+  // timestamp-domain lower bound on it can never pass: an output gated on it
+  // could never be spent. Every tier refuses it at compile time with one text,
+  // and still accepts the height-domain spellings next to it.
+  describe('currentBlockHeight() against a timestamp bound is refused', () => {
+    const src = (stmt: string): string => `import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';
+
+class CbhTs extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  public spend() {
+    assert(extractSequence(this.txPreimage) !== 0xffffffffn);
+    ${stmt}
+    this.count = this.count + 1n;
+  }
+}
+`;
+    const MSG =
+      "method 'spend' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts " +
+      'its value is below 500000000 (a block height), so this compare can never pass and an output gated on it ' +
+      'could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate';
+    const refuse: Array<[string, string]> = [
+      ['ge', 'assert(currentBlockHeight() >= 1700000000n);'],
+      ['gt-edge', 'assert(currentBlockHeight() > 499999999n);'],
+      ['reversed', 'assert(500000000n <= currentBlockHeight());'],
+      ['in-if', 'if (currentBlockHeight() >= 1700000000n) { this.count = 0n; }'],
+      ['via-local', 'const now = currentBlockHeight();\n    assert(now >= 1700000000n);'],
+    ];
+    for (const [name, stmt] of refuse) {
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${name}`, () => {
+          const { status, out, diag } = run(tier, writeFile(`CbhTs_${name}.runar.ts`, src(stmt)));
+          expect(status, `${tier.id} accepted ${name} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(MSG);
+        });
+      }
+    }
+    const accept: Array<[string, string]> = [
+      ['ge-height', 'assert(currentBlockHeight() >= 499999999n);'],
+      ['lt-big', 'assert(currentBlockHeight() < 600000000n);'],
+      ['raw-timestamp', 'assert(extractLocktime(this.txPreimage) >= 1700000000n);'],
+      ['local-rebound', 'let now = currentBlockHeight();\n    if (this.count > 5n) {\n      now = this.count;\n    }\n    assert(now >= 1700000000n);'],
+      ['rhs-of-and', 'assert(this.count >= 0n && currentBlockHeight() >= 100n);'],
+    ];
+    for (const [name, stmt] of accept) {
+      it(`every tier compiles ${name} to the same bytes`, () => {
+        const input = writeFile(`CbhOk_${name}.runar.ts`, src(stmt));
+        const hexes = new Set(TIERS.map((t) => compileHex(t, input)));
+        expect([...hexes]).toHaveLength(1);
+      });
+    }
+  });
+
   // D12 FE-F2: a write to a property the contract does not declare (a typo,
   // `this.cnt = ...` for `count`) compiled in the python, zig and ruby tiers:
   // their typecheck typed `this.cnt` as <unknown> without an error, the write

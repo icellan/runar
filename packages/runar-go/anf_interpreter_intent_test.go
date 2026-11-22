@@ -550,6 +550,27 @@ func TestIntentInterpreter_CurrentBlockHeight_Failure(t *testing.T) {
 	}
 }
 
+// currentBlockHeight() is pinned to the block-height domain, as the compiled
+// script asserts (an nLockTime >= 500000000 is a Unix timestamp): a timestamp
+// locktime is refused even though it is below a far-future deadline.
+func TestIntentInterpreter_CurrentBlockHeight_TimestampLocktimeRefused(t *testing.T) {
+	anf := anfIntentCurrentBlockHeight()
+	fix := NewInterpreterFixture()
+	fix.SetMockPreimageLocktime(big.NewInt(500_000_000))
+	_, _, _, err := ExecuteStrictWithFixture(anf, "spend",
+		map[string]interface{}{"deadline": big.NewInt(2_000_000_000), "count": big.NewInt(0)},
+		nil, nil, fix)
+	if err == nil || !strings.Contains(err.Error(), "currentBlockHeight") {
+		t.Fatalf("expected a currentBlockHeight domain refusal, got %v", err)
+	}
+	fix.SetMockPreimageLocktime(big.NewInt(499_999_999))
+	if _, _, _, err := ExecuteStrictWithFixture(anf, "spend",
+		map[string]interface{}{"deadline": big.NewInt(2_000_000_000), "count": big.NewInt(0)},
+		nil, nil, fix); err != nil {
+		t.Fatalf("height 499999999 refused: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // branched-readonly-len — both arms succeed.
 //

@@ -835,7 +835,8 @@ func ExtractPrevOutputScript(inputIndex int64, expectedScriptHash ByteString, pr
 func RequireOutputP2PKH(outputIndex int64, pubkeyHash ByteString, amount int64) {}
 
 // CurrentBlockHeight is the test-mode stub for the locktime-as-height
-// shorthand. On-chain the compiler desugars to ExtractLocktime(txPreimage).
+// shorthand. On-chain the compiler desugars to ExtractLocktime(txPreimage)
+// and asserts the value is < 500000000 (a block height, not a timestamp).
 func CurrentBlockHeight() int64 { return 0 }
 
 // ContinuationAmount is the test-mode stub for the read-only view of the

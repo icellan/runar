@@ -20,7 +20,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { computeSideEffectSummary } from './side-effect-summary.js';
 import { continuationVerdict } from './continuation-rules.js';
-import { contractReadsLocktime, hasUnpinnedLocktimeGate } from './locktime-domain.js';
+import { comparesCurrentBlockHeightToTimestamp, contractReadsLocktime, hasUnpinnedLocktimeGate } from './locktime-domain.js';
 import type { MethodEffects, SideEffectSummary } from './side-effect-summary.js';
 
 // ---------------------------------------------------------------------------
@@ -1218,6 +1218,19 @@ class TypeChecker {
           `consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime ` +
           `passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < ` +
           `500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate`,
+        'error',
+        method.sourceLocation,
+      ));
+    }
+
+    // currentBlockHeight() pins itself below 500000000, so a timestamp-domain
+    // lower bound on it can never pass (locktime-domain.ts). Same text as
+    // currentBlockHeightTimestampMessage, spelled out for the R-101 extractor.
+    if (comparesCurrentBlockHeightToTimestamp(method)) {
+      this.errors.push(makeDiagnostic(
+        `method '${method.name}' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts ` +
+          `its value is below 500000000 (a block height), so this compare can never pass and an output gated on it ` +
+          `could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate`,
         'error',
         method.sourceLocation,
       ));

@@ -210,12 +210,15 @@ func ltIsCallTo(e Expression, name string) bool {
 	return ok && id.Name == name
 }
 
+// ltIsRead: a D26 locktime read. currentBlockHeight() is not one: it asserts
+// its own value < 500000000 at the call (anf_lower.go), so it is a height by
+// construction. Mirrors locktime-domain.ts.
 func ltIsRead(e Expression) bool {
-	return ltIsCallTo(e, "extractLocktime") || ltIsCallTo(e, "currentBlockHeight")
+	return ltIsCallTo(e, "extractLocktime")
 }
 
 // ContractReadsLocktime is the D26 prefilter: some method body calls
-// extractLocktime or currentBlockHeight anywhere. Mirrors contractReadsLocktime.
+// extractLocktime anywhere. Mirrors contractReadsLocktime.
 func ContractReadsLocktime(contract *ContractNode) bool {
 	var seen func(v reflect.Value) bool
 	seen = func(v reflect.Value) bool {
@@ -252,6 +255,108 @@ func ContractReadsLocktime(contract *ContractNode) bool {
 		}
 	}
 	return false
+}
+
+// CurrentBlockHeightTimestampMessage is the shared error text for a
+// currentBlockHeight() compare against a timestamp-domain bound.
+func CurrentBlockHeightTimestampMessage(method string) string {
+	return fmt.Sprintf(
+		"method '%s' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts "+
+			"its value is below 500000000 (a block height), so this compare can never pass and an output gated on it "+
+			"could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate",
+		method)
+}
+
+// ComparesCurrentBlockHeightToTimestamp: true iff method contains, anywhere, a
+// lower-bound compare of a direct currentBlockHeight() call (or a local every
+// binding of which is one) against a
+// timestamp-domain bigint literal (`>= N`, N >= 500000000; `> N`,
+// N >= 499999999; or reversed). currentBlockHeight() asserts its value is
+// below 500000000, so such a compare can never pass. Mirrors
+// comparesCurrentBlockHeightToTimestamp in locktime-domain.ts.
+func ComparesCurrentBlockHeightToTimestamp(method MethodNode) bool {
+	lit := func(x Expression) *big.Int {
+		if l, ok := x.(BigIntLiteral); ok && l.Value != nil {
+			return l.Value
+		}
+		return nil
+	}
+	// Locals bound only to currentBlockHeight() (every declaration/assignment).
+	cbhOnly := map[string]bool{}
+	bind := func(name string, v Expression) {
+		prev, seen := cbhOnly[name]
+		cbhOnly[name] = (!seen || prev) && ltIsCallTo(v, "currentBlockHeight")
+	}
+	var collect func(stmts []Statement)
+	collect = func(stmts []Statement) {
+		for _, st := range stmts {
+			switch s := st.(type) {
+			case VariableDeclStmt:
+				bind(s.Name, s.Init)
+			case AssignmentStmt:
+				if id, ok := s.Target.(Identifier); ok {
+					bind(id.Name, s.Value)
+				}
+			case IfStmt:
+				collect(s.Then)
+				if s.Else != nil {
+					collect(s.Else)
+				}
+			case ForStmt:
+				collect([]Statement{s.Init})
+				collect(s.Body)
+			}
+		}
+	}
+	collect(method.Body)
+	isCbh := func(e Expression) bool {
+		if ltIsCallTo(e, "currentBlockHeight") {
+			return true
+		}
+		id, ok := e.(Identifier)
+		return ok && cbhOnly[id.Name]
+	}
+	hit := func(e Expression) bool {
+		b, ok := e.(BinaryExpr)
+		if !ok || !ltIsCmp(b.Op) {
+			return false
+		}
+		if isCbh(b.Left) && (b.Op == ">=" || b.Op == ">") && ltClassify(b.Op, lit(b.Right)) == ltPinK {
+			return true
+		}
+		f := ltFlip[b.Op]
+		return isCbh(b.Right) && (f == ">=" || f == ">") && ltClassify(f, lit(b.Left)) == ltPinK
+	}
+	var seen func(v reflect.Value) bool
+	seen = func(v reflect.Value) bool {
+		switch v.Kind() {
+		case reflect.Interface, reflect.Pointer:
+			if v.IsNil() {
+				return false
+			}
+			if e, ok := v.Interface().(Expression); ok && hit(e) {
+				return true
+			}
+			return seen(v.Elem())
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				if seen(v.Index(i)) {
+					return true
+				}
+			}
+		case reflect.Struct:
+			if e, ok := v.Interface().(Expression); ok && hit(e) {
+				return true
+			}
+			for i := 0; i < v.NumField(); i++ {
+				if v.Type().Field(i).IsExported() && seen(v.Field(i)) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return seen(reflect.ValueOf(method.Body))
 }
 
 // HasUnpinnedLocktimeGate is the D26 source rule: true iff some path through

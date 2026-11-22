@@ -281,18 +281,22 @@ export function requireOutputP2PKH(
 }
 
 /**
- * Shorthand for `extractLocktime(this.txPreimage)`. Only valid in
- * StatefulSmartContract methods. Pure source-level desugar — no new ANF
- * kind or stack codegen.
+ * `extractLocktime(this.txPreimage)`, pinned to the block-height domain: every
+ * call also asserts the value is `< 500000000` (an nLockTime at or above that
+ * is a Unix timestamp), so a spend whose nLockTime is a timestamp fails the
+ * script. That makes `currentBlockHeight() >= H` a sound height gate on its
+ * own, with no explicit domain pin (D26 does not apply to it). Only valid in
+ * StatefulSmartContract methods; one pin is emitted per call.
  *
- * THE NAME IS MISLEADING and is kept only for source compatibility. This does
- * NOT read the chain height. It reads the spending transaction's own
- * `nLockTime` — a number the spender writes — so every caveat in
- * {@link extractLocktime} applies verbatim: it is a NOT-BEFORE, it is only
- * consensus-enforced on a non-final transaction, it needs the same
- * `< 500000000n` domain pin next to a `>=` gate, and comparing it UPWARDS
- * (`currentBlockHeight() < T`) proves nothing at all. Read it as
- * `txLocktime()`. Prefer spelling {@link extractLocktime} directly.
+ * THE NAME IS STILL MISLEADING and is kept only for source compatibility. This
+ * does NOT read the chain height. It reads the spending transaction's own
+ * `nLockTime` — a number the spender writes — so the other caveats in
+ * {@link extractLocktime} apply: it is a NOT-BEFORE, it is only
+ * consensus-enforced on a non-final transaction (pair a gate with
+ * `extractSequence(this.txPreimage) !== 0xffffffffn`), and comparing it
+ * UPWARDS (`currentBlockHeight() < T`) proves nothing at all. A timestamp
+ * gate must use {@link extractLocktime}: `currentBlockHeight() >= N` with
+ * N >= 500000000 can never pass.
  */
 export function currentBlockHeight(): bigint {
   return compilerStub('currentBlockHeight');
