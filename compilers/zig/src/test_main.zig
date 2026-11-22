@@ -139,6 +139,7 @@ test {
     _ = @import("tests/n064_rebind_fold.zig");
     _ = @import("tests/n065_reserved_names.zig");
     _ = @import("tests/n151_raw_script_spans.zig");
+    _ = @import("tests/pq_f1_pubkey_params.zig");
     _ = @import("passes/reserved_names.zig");
     _ = @import("tests/f039_sighash_malformed.zig");
     _ = @import("tests/n199_lost_directive.zig");

@@ -628,6 +628,23 @@ public final class Cli {
                 appendJoined(b, spans);
                 b.append("],\n");
             }
+            // PQ-F1: constructor params that are a post-quantum verifier's
+            // public key, omitted when empty (matches the TS assembler).
+            List<String> ctorNames = new ArrayList<>();
+            for (StateFieldRegroup.Grouped cp : ctorProps) ctorNames.add(cp.name());
+            List<PqPubKeyParams.Entry> pq = PqPubKeyParams.compute(anf, ctorNames);
+            if (!pq.isEmpty()) {
+                List<String> entries = new ArrayList<>();
+                for (PqPubKeyParams.Entry e : pq) {
+                    entries.add("{\"index\": " + e.index()
+                        + ", \"name\": " + jsonString(e.name())
+                        + ", \"scheme\": " + jsonString(e.scheme())
+                        + ", \"length\": " + e.length() + "}");
+                }
+                b.append("  \"pqPubKeyParams\": [");
+                appendJoined(b, entries);
+                b.append("],\n");
+            }
             // N-152: opcode-to-source mappings, omitted when empty (matches Go).
             // sourceFile is repo-relative POSIX, as in the --emit-source-map file.
             if (!noSourceMap && !emit.sourceMap().isEmpty()) {

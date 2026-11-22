@@ -243,6 +243,21 @@ pub struct RunarArtifact {
     /// `sdk/unsound_primitives.rs`.
     #[serde(default)]
     pub unsound_primitives: Option<Vec<String>>,
+    /// PQ-F1: constructor params passed directly as a post-quantum verifier's
+    /// public key, with the exact byte length each needs. `RunarContract::new`
+    /// refuses a wrong-length value. Absent on artifacts without PQ keys.
+    #[serde(default)]
+    pub pq_pub_key_params: Option<Vec<PqPubKeyParam>>,
+}
+
+/// One entry of `RunarArtifact::pq_pub_key_params` (PQ-F1): `index` is the
+/// param's position in abi.constructor.params, `scheme` the verifier builtin.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct PqPubKeyParam {
+    pub index: usize,
+    pub name: String,
+    pub scheme: String,
+    pub length: usize,
 }
 
 /// The ABI (Application Binary Interface) of a contract.

@@ -72,7 +72,16 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Create contract and get locking script
-    var contract = try runar.RunarContract.init(allocator, &artifact, ctor_args);
+    // PQ-F1: a wrong-length post-quantum key is a RESULT, not a crash — print
+    // the shared refusal text and exit non-zero so the runner compares the
+    // verdict across all seven tiers.
+    var contract = runar.RunarContract.init(allocator, &artifact, ctor_args) catch |err| {
+        if (err == error.InvalidConstructorArg and runar.sdk_errors.lastPqPubKeyMessage().len > 0) {
+            std.debug.print("{s}\n", .{runar.sdk_errors.lastPqPubKeyMessage()});
+            std.process.exit(1);
+        }
+        return err;
+    };
     defer contract.deinit();
 
     // Handle optional inscription

@@ -100,7 +100,7 @@ module Runar
                   :script, :asm, :state_fields, :constructor_slots,
                   :code_sep_index_slots, :code_part_len_slots,
                   :build_timestamp, :code_separator_index, :code_separator_indices,
-                  :anf, :unsound_primitives
+                  :anf, :unsound_primitives, :pq_pub_key_params
 
       def initialize(
         version: '',
@@ -124,7 +124,11 @@ module Runar
         anf: nil,
         # Builtins this script reaches that the compiler does not claim are
         # sound (R-062). Empty for every ordinary contract.
-        unsound_primitives: []
+        unsound_primitives: [],
+        # PQ-F1: constructor params passed directly as a post-quantum verifier's
+        # public key ({'index','name','scheme','length'} hashes). nil when the
+        # artifact predates the field (the SDK then walks +anf+ instead).
+        pq_pub_key_params: nil
       )
         @version                = version
         @compiler_version       = compiler_version
@@ -142,6 +146,7 @@ module Runar
         @code_separator_indices = code_separator_indices
         @anf                    = anf
         @unsound_primitives     = Array(unsound_primitives)
+        @pq_pub_key_params      = pq_pub_key_params
       end
 
       # Parse a camelCase FixedArray metadata hash into SDK-native shape.
@@ -228,7 +233,8 @@ module Runar
           code_separator_index:   hash['codeSeparatorIndex'],
           code_separator_indices: hash['codeSeparatorIndices'],
           anf:                    hash['anf'],
-          unsound_primitives:     Array(hash['unsoundPrimitives'])
+          unsound_primitives:     Array(hash['unsoundPrimitives']),
+          pq_pub_key_params:      hash['pqPubKeyParams']&.map(&:dup)
         )
       end
 

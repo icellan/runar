@@ -613,6 +613,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         }
     }
 
@@ -714,6 +715,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         let result = extract_constructor_args(&artifact, "51").unwrap();
         assert!(result.is_empty());
@@ -946,6 +948,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         assert!(matches_artifact(&artifact, "5151").unwrap());
         assert!(!matches_artifact(&artifact, "5152").unwrap());
@@ -992,6 +995,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         // Script with code + OP_RETURN + state data
         assert!(matches_artifact(&artifact, "51516a0000000000000000").unwrap());
@@ -1176,6 +1180,7 @@ mod n074_script_number_width {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         }
     }
 

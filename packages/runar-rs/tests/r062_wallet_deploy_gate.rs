@@ -70,6 +70,7 @@ fn artifact(script: &str, unsound: Option<Vec<String>>) -> RunarArtifact {
         code_separator_indices: None,
         anf: None,
         unsound_primitives: unsound,
+        pq_pub_key_params: None,
     }
 }
 

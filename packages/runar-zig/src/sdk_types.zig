@@ -202,6 +202,11 @@ pub const TerminalOutput = struct {
 // ---------------------------------------------------------------------------
 
 /// RunarArtifact is the compiled output of a Runar compiler.
+/// One `pqPubKeyParams` entry (PQ-F1): `index` is the param's position in
+/// abi.constructor.params, `scheme` the verifier builtin, `length` the exact
+/// public-key byte length it needs.
+pub const PqPubKeyParam = struct { index: usize, name: []const u8, scheme: []const u8, length: usize };
+
 pub const RunarArtifact = struct {
     allocator: std.mem.Allocator,
     version: []const u8 = &.{},
@@ -228,6 +233,10 @@ pub const RunarArtifact = struct {
     /// Builtins this script reaches that the compiler does not claim are sound
     /// (R-062). Empty for every ordinary contract; see sdk_errors.zig.
     unsound_primitives: [][]const u8 = &.{},
+    /// PQ-F1: constructor params passed directly as a post-quantum verifier's
+    /// public key, with the exact byte length each needs. Null when the
+    /// artifact predates the field (the SDK then walks `anf_json` instead).
+    pq_pub_key_params: ?[]PqPubKeyParam = null,
 
     pub fn isStateful(self: *const RunarArtifact) bool {
         return self.state_fields.len > 0;
@@ -264,6 +273,13 @@ pub const RunarArtifact = struct {
         // R-062: the marker's names are duped out of the parsed JSON.
         for (self.unsound_primitives) |name| a.free(name);
         if (self.unsound_primitives.len > 0) a.free(self.unsound_primitives);
+        if (self.pq_pub_key_params) |pq| {
+            for (pq) |e| {
+                a.free(e.name);
+                a.free(e.scheme);
+            }
+            a.free(pq);
+        }
         self.* = .{ .allocator = a };
     }
 
@@ -353,6 +369,41 @@ pub const RunarArtifact = struct {
                     }
                 }
                 artifact.unsound_primitives = names[0..n];
+            }
+        }
+
+        // PQ-F1: post-quantum public-key constructor params.
+        if (root.get("pqPubKeyParams")) |pq_val| {
+            if (pq_val == .array) {
+                const items = pq_val.array.items;
+                var entries = try allocator.alloc(PqPubKeyParam, items.len);
+                var n: usize = 0;
+                errdefer {
+                    for (entries[0..n]) |e| {
+                        allocator.free(e.name);
+                        allocator.free(e.scheme);
+                    }
+                    allocator.free(entries);
+                }
+                for (items) |item| {
+                    if (item != .object) return error.InvalidArtifact;
+                    const idx = item.object.get("index") orelse return error.InvalidArtifact;
+                    const nm = item.object.get("name") orelse return error.InvalidArtifact;
+                    const sc = item.object.get("scheme") orelse return error.InvalidArtifact;
+                    const ln = item.object.get("length") orelse return error.InvalidArtifact;
+                    if (idx != .integer or nm != .string or sc != .string or ln != .integer) return error.InvalidArtifact;
+                    if (idx.integer < 0 or ln.integer < 0) return error.InvalidArtifact;
+                    const name = try allocator.dupe(u8, nm.string);
+                    errdefer allocator.free(name);
+                    entries[n] = .{
+                        .index = @intCast(idx.integer),
+                        .name = name,
+                        .scheme = try allocator.dupe(u8, sc.string),
+                        .length = @intCast(ln.integer),
+                    };
+                    n += 1;
+                }
+                artifact.pq_pub_key_params = entries;
             }
         }
 

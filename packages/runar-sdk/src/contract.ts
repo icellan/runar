@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
-import { InputLimits, pqPubKeyRequirements, pqPubKeyLengthError } from 'runar-ir-schema';
+import { InputLimits, pqPubKeyParams, pqPubKeyParamError } from 'runar-ir-schema';
 import { assertScriptHexUnderLimit, InvalidConstructorArgError, MalformedScriptError, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
 import { txToTransactionData } from './providers/provider.js';
@@ -3362,33 +3362,24 @@ const BYTE_STRING_CTOR_TYPES = new Set([
 ]);
 
 /**
- * N-329 / N-330: a ByteString-family constructor arg must be an even-length hex
- * string or raw bytes (Uint8Array / Buffer). `encodeArg` treats every string as
- * hex, so raw text (e.g. 20 raw Addr bytes) was emitted as a push header
- * followed by non-hex text, and its `String(v)` fallback turned a Uint8Array
- * into "1,2,3" and null/undefined into "null"/"undefined": corrupt locking
- * scripts with no error. Raw bytes are converted to their hex string (so the
- * script and any state built from the arg agree); every other kind is refused.
- * Returns the (possibly rewritten) args; the caller's array is not mutated.
- * Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
- */
-/**
- * D12 PQ-F1: refuse a constructor value that is used directly as the public
- * key of a post-quantum verifier but does not have the length that
- * verifier's parameter set needs; the locking script would refuse every
- * honest signature. Hash-committed keys cannot be checked here.
+ * PQ-F1: refuse a constructor value that is used directly as the public key
+ * of a post-quantum verifier but does not have the length that verifier's
+ * parameter set needs; the locking script would refuse every honest
+ * signature. The params come from the artifact's `pqPubKeyParams` (stateless
+ * artifacts included); an artifact that predates the field falls back to the
+ * same walk over its ANF (stateful artifacts only). Hash-committed keys
+ * cannot be checked here. Same message in all seven SDKs.
  */
 function checkPqPubKeyCtorArgs(artifact: RunarArtifact, constructorArgs: unknown[]): void {
-  // `compile()` puts the ANF in stateful artifacts only; a stateless one is
-  // covered by the compile-time constructorArgs check instead.
-  const anf = artifact.anf ?? artifact.ir?.anf;
-  if (!anf) return;
-  const params = artifact.abi.constructor.params;
-  for (const req of pqPubKeyRequirements(anf)) {
-    const idx = params.findIndex((p) => p.name === req.property);
-    if (idx < 0) continue;
-    const msg = pqPubKeyLengthError(req, constructorArgs[idx]);
-    if (msg !== null) throw new Error(`RunarContract(${artifact.contractName}): ${msg}`);
+  let params = artifact.pqPubKeyParams;
+  if (params === undefined) {
+    const anf = artifact.anf ?? artifact.ir?.anf;
+    if (!anf) return;
+    params = pqPubKeyParams(anf, artifact.abi.constructor.params.map((p) => p.name));
+  }
+  for (const p of params) {
+    const msg = pqPubKeyParamError(p, constructorArgs[p.index]);
+    if (msg !== null) throw new Error(msg);
   }
 }
 
@@ -3416,6 +3407,17 @@ function wireOutpointHex(txid: string, vout: number): string {
   return txidLE + voutLE;
 }
 
+/**
+ * N-329 / N-330: a ByteString-family constructor arg must be an even-length hex
+ * string or raw bytes (Uint8Array / Buffer). `encodeArg` treats every string as
+ * hex, so raw text (e.g. 20 raw Addr bytes) was emitted as a push header
+ * followed by non-hex text, and its `String(v)` fallback turned a Uint8Array
+ * into "1,2,3" and null/undefined into "null"/"undefined": corrupt locking
+ * scripts with no error. Raw bytes are converted to their hex string (so the
+ * script and any state built from the arg agree); every other kind is refused.
+ * Returns the (possibly rewritten) args; the caller's array is not mutated.
+ * Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+ */
 function checkByteStringCtorArgs(
   artifact: RunarArtifact,
   args: unknown[],

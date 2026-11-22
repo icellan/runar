@@ -105,3 +105,45 @@ describe('D12 PQ-F1: wrong-length PQ public keys are refused', () => {
     expect(() => new RunarContract(art, ['ab'.repeat(20), 0n])).not.toThrow();
   });
 });
+
+/**
+ * PQ-F1 (artifact field): the deploy-time check reads `pqPubKeyParams`, so a
+ * STATELESS artifact (no ANF) is now refused too. An older stateful artifact
+ * without the field still falls back to the ANF walk.
+ *
+ * Proves: every scheme's stateless artifact refuses wrong lengths and accepts
+ * the right one, with the exact cross-tier message; the legacy ANF fallback.
+ * Does not prove: other tiers (their own tests).
+ */
+describe('PQ-F1: stateless artifacts are checked from pqPubKeyParams', () => {
+  for (const [label, src, prop, n] of CASES) {
+    describe(label, () => {
+      const art = artifactOf(src);
+      it('is stateless and carries the field', () => {
+        expect(art.anf).toBeUndefined();
+        expect(art.pqPubKeyParams).toEqual([
+          { index: 0, name: prop, scheme: label === 'verifyWOTS' ? 'verifyWOTS' : `verifySLHDSA_SHA2_${label.slice(-4)}`, length: n },
+        ]);
+      });
+      for (const len of [0, n - 1, n + 1]) {
+        it(`refuses a ${len}-byte key with the shared message`, () => {
+          const scheme = art.pqPubKeyParams![0]!.scheme;
+          expect(() => new RunarContract(art, ['ab'.repeat(len)])).toThrow(
+            `RunarContract: constructor arg '${prop}' is the ${scheme} public key and must be exactly ${n} bytes, got ${len}. ` +
+              'A locking script built from it would refuse every valid signature, so the output could never be spent (PQ-F1)',
+          );
+        });
+      }
+      it(`accepts a ${n}-byte key`, () => {
+        expect(() => new RunarContract(art, ['ab'.repeat(n)])).not.toThrow();
+      });
+    });
+  }
+
+  it('a stateful artifact without the field falls back to its ANF', () => {
+    const art = artifactOf(statefulTwin(wots));
+    delete (art as { pqPubKeyParams?: unknown }).pqPubKeyParams;
+    expect(() => new RunarContract(art, ['ab'.repeat(32), 0n])).toThrow(/must be exactly 64 bytes, got 32/);
+    expect(() => new RunarContract(art, ['ab'.repeat(64), 0n])).not.toThrow();
+  });
+});

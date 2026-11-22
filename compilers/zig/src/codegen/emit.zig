@@ -1012,6 +1012,32 @@ pub fn emitArtifactStamped(
         try w.writeAll("]");
     }
 
+    // pqPubKeyParams — PQ-F1: constructor params passed directly as a
+    // post-quantum verifier's public key, omitted when empty (matches TS).
+    {
+        var ctor_names: []const types.ParamNode = &.{};
+        for (anf_program.methods) |method| {
+            if (std.mem.eql(u8, method.name, "constructor")) {
+                ctor_names = method.params;
+                break;
+            }
+        }
+        const pq = try pqPubKeyParams(allocator, anf_program, ctor_names);
+        defer allocator.free(pq);
+        if (pq.len > 0) {
+            try w.writeAll(",\"pqPubKeyParams\":[");
+            for (pq, 0..) |e, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.print("{{\"index\":{d},\"name\":", .{e.index});
+                try writeJsonString(w, e.name);
+                try w.writeAll(",\"scheme\":");
+                try writeJsonString(w, e.scheme);
+                try w.print(",\"length\":{d}}}", .{e.length});
+            }
+            try w.writeAll("]");
+        }
+    }
+
     // sourceMap — opcode-to-source-location mappings.
     // Wrapped in {"mappings":[...]} to match the canonical schema declared
     // in packages/runar-ir-schema/src/schemas/artifact.schema.json#SourceMap.
@@ -1041,6 +1067,96 @@ pub fn emitArtifactStamped(
     try w.writeByte('}');
 
     return try json_buf.toOwnedSlice(allocator);
+}
+
+// ---------------------------------------------------------------------------
+// PQ-F1: pqPubKeyParams
+// ---------------------------------------------------------------------------
+
+/// One `pqPubKeyParams` entry: constructor param `index` named `name` is the
+/// public key of the `scheme` verifier, which needs exactly `length` bytes.
+pub const PqPubKeyParam = struct { index: usize, name: []const u8, scheme: []const u8, length: usize };
+
+/// Public-key length each post-quantum verifier's compiled script splits its
+/// pk operand into: WOTS+ pubSeed(32)||pkRoot(32), SLH-DSA PK.seed(n)||PK.root(n).
+fn pqPubKeyBytes(func: []const u8) ?usize {
+    const table = [_]struct { f: []const u8, n: usize }{
+        .{ .f = "verifyWOTS", .n = 64 },
+        .{ .f = "verifySLHDSA_SHA2_128s", .n = 32 },
+        .{ .f = "verifySLHDSA_SHA2_128f", .n = 32 },
+        .{ .f = "verifySLHDSA_SHA2_192s", .n = 48 },
+        .{ .f = "verifySLHDSA_SHA2_192f", .n = 48 },
+        .{ .f = "verifySLHDSA_SHA2_256s", .n = 64 },
+        .{ .f = "verifySLHDSA_SHA2_256f", .n = 64 },
+    };
+    for (table) |e| if (std.mem.eql(u8, e.f, func)) return e.n;
+    return null;
+}
+
+const PqWalk = struct {
+    allocator: std.mem.Allocator,
+    ctor: []const types.ParamNode,
+    prop_of: std.StringHashMapUnmanaged([]const u8) = .empty,
+    out: *std.ArrayListUnmanaged(PqPubKeyParam),
+
+    fn walk(self: *PqWalk, bindings: []const types.ANFBinding) error{OutOfMemory}!void {
+        for (bindings) |b| {
+            switch (b.value) {
+                .load_prop => |lp| try self.prop_of.put(self.allocator, b.name, lp.name),
+                .load_const => |lc| switch (lc.value) {
+                    .string => |sv| if (std.mem.startsWith(u8, sv, "@ref:")) {
+                        if (self.prop_of.get(sv["@ref:".len..])) |target| try self.prop_of.put(self.allocator, b.name, target);
+                    },
+                    else => {},
+                },
+                .call => |c| if (pqPubKeyBytes(c.func)) |len| {
+                    if (c.args.len > 2) if (self.prop_of.get(c.args[2])) |prop| {
+                        const idx: ?usize = for (self.ctor, 0..) |p, i| {
+                            if (std.mem.eql(u8, p.name, prop)) break i;
+                        } else null;
+                        if (idx) |index| {
+                            const dup = for (self.out.items) |e| {
+                                if (std.mem.eql(u8, e.name, prop) and std.mem.eql(u8, e.scheme, c.func)) break true;
+                            } else false;
+                            if (!dup) try self.out.append(self.allocator, .{ .index = index, .name = prop, .scheme = c.func, .length = len });
+                        }
+                    };
+                },
+                .@"if" => |iff| {
+                    try self.walk(iff.then);
+                    try self.walk(iff.@"else");
+                },
+                .loop => |lp| try self.walk(lp.body),
+                else => {},
+            }
+        }
+    }
+};
+
+fn pqLessThan(_: void, a: PqPubKeyParam, b: PqPubKeyParam) bool {
+    if (a.index != b.index) return a.index < b.index;
+    return std.mem.order(u8, a.scheme, b.scheme) == .lt;
+}
+
+/// PQ-F1: `pqPubKeyParams` from the final ANF, exactly as the TS reference
+/// (packages/runar-ir-schema/src/pq-pubkey.ts): every method, nested if / loop
+/// bodies, `@ref:` aliases, pk = the verifier call's third arg; kept to
+/// constructor params, deduplicated on (name, scheme), sorted by (index,
+/// scheme). Caller frees the returned slice (names borrow from the program).
+pub fn pqPubKeyParams(
+    allocator: std.mem.Allocator,
+    anf_program: types.ANFProgram,
+    ctor: []const types.ParamNode,
+) ![]PqPubKeyParam {
+    var out: std.ArrayListUnmanaged(PqPubKeyParam) = .empty;
+    errdefer out.deinit(allocator);
+    for (anf_program.methods) |method| {
+        var wk = PqWalk{ .allocator = allocator, .ctor = ctor, .out = &out };
+        defer wk.prop_of.deinit(allocator);
+        try wk.walk(stack_lower.methodBindings(method));
+    }
+    std.mem.sort(PqPubKeyParam, out.items, {}, pqLessThan);
+    return try out.toOwnedSlice(allocator);
 }
 
 // ---------------------------------------------------------------------------

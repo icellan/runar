@@ -323,3 +323,30 @@ pub fn recordSingleMergeRefusal(method_name: []const u8) void {
     ) catch last_single_merge_buf[0..0];
     last_single_merge_len = s.len;
 }
+
+// ---------------------------------------------------------------------------
+// PQ-F1 -- wrong-length post-quantum public key at RunarContract.init
+// ---------------------------------------------------------------------------
+//
+// Same side-channel rationale as `last_error` above: `RunarContract.init`
+// returns `error.InvalidConstructorArg`, and the refusal text shared by all
+// seven SDKs is recorded here.
+pub var last_pq_pubkey_buf: [512]u8 = undefined;
+pub var last_pq_pubkey_len: usize = 0;
+
+/// The recorded PQ-F1 refusal text (empty when none was recorded).
+pub fn lastPqPubKeyMessage() []const u8 {
+    return last_pq_pubkey_buf[0..last_pq_pubkey_len];
+}
+
+/// Record the shared PQ-F1 refusal text.
+pub fn recordPqPubKeyRefusal(name: []const u8, scheme: []const u8, length: usize, got: usize) void {
+    const std = @import("std");
+    const s = std.fmt.bufPrint(
+        &last_pq_pubkey_buf,
+        "RunarContract: constructor arg '{s}' is the {s} public key and must be exactly {d} bytes, got {d}. " ++
+            "A locking script built from it would refuse every valid signature, so the output could never be spent (PQ-F1)",
+        .{ name, scheme, length, got },
+    ) catch last_pq_pubkey_buf[0..0];
+    last_pq_pubkey_len = s.len;
+}

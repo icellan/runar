@@ -56,6 +56,63 @@ class D12PqAndPreimageTest {
         }
     }
 
+    private static String compileJson(String name, String src) throws Exception {
+        Path dir = Files.createTempDirectory("pq-f1-java");
+        Path file = dir.resolve(name + ".runar.ts");
+        Path out = dir.resolve("artifact.json");
+        Files.writeString(file, src);
+        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        int exit = new Cli(
+            new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
+            new PrintStream(stderr, true, StandardCharsets.UTF_8)
+        ).run(new String[] {"--source", file.toString(), "--emit-artifact", out.toString()});
+        assertEquals(0, exit, stderr.toString(StandardCharsets.UTF_8));
+        return Files.readString(out);
+    }
+
+    /**
+     * PQ-F1 (artifact field): the check reads {@code pqPubKeyParams}, so a
+     * STATELESS artifact (no ANF) is refused too, with the message shared by
+     * all seven SDKs; an older stateful artifact without the field falls back
+     * to the ANF walk.
+     */
+    @Test
+    void statelessArtifactCheckedFromPqPubKeyParams() throws Exception {
+        RunarArtifact art = RunarArtifact.fromJson(compileJson("SW", String.join("\n",
+            "import { SmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';",
+            "class SW extends SmartContract {",
+            "  readonly pk: ByteString;",
+            "  constructor(pk: ByteString) { super(pk); this.pk = pk; }",
+            "  public spend(msg: ByteString, sig: ByteString) { assert(verifyWOTS(msg, sig, this.pk)); }",
+            "}", "")));
+        assertEquals(null, art.anf());
+        assertEquals(1, art.pqPubKeyParams().size());
+        InvalidConstructorArgException e = assertThrows(InvalidConstructorArgException.class,
+            () -> new RunarContract(art, List.of("ab".repeat(32))));
+        assertEquals("RunarContract: constructor arg 'pk' is the verifyWOTS public key and must be exactly 64 bytes, got 32. "
+            + "A locking script built from it would refuse every valid signature, so the output could never be spent (PQ-F1)",
+            e.getMessage());
+        for (int bad : new int[] {0, 63, 65}) {
+            assertThrows(InvalidConstructorArgException.class, () -> new RunarContract(art, List.of("ab".repeat(bad))));
+        }
+        assertDoesNotThrow(() -> new RunarContract(art, List.of("ab".repeat(64))));
+
+        String legacyJson = compileJson("LW", String.join("\n",
+            "import { StatefulSmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';",
+            "class LW extends StatefulSmartContract {",
+            "  readonly pk: ByteString;",
+            "  n: bigint;",
+            "  constructor(pk: ByteString, n: bigint) { super(pk, n); this.pk = pk; this.n = n; }",
+            "  public spend(msg: ByteString, sig: ByteString) { const k = this.pk; assert(verifyWOTS(msg, sig, k)); this.n = this.n + 1n; }",
+            "}", ""));
+        String stripped = legacyJson.replaceFirst("\\s*\"pqPubKeyParams\":\\s*\\[[^\\]]*],", "");
+        assertEquals(false, stripped.contains("pqPubKeyParams"));
+        RunarArtifact legacy = RunarArtifact.fromJson(stripped);
+        assertThrows(InvalidConstructorArgException.class,
+            () -> new RunarContract(legacy, List.of("ab".repeat(32), BigInteger.ZERO)));
+        assertDoesNotThrow(() -> new RunarContract(legacy, List.of("ab".repeat(64), BigInteger.ZERO)));
+    }
+
     private static String pqSource(String verify) {
         return String.join("\n",
             "import { StatefulSmartContract, ByteString, assert, " + verify + " } from 'runar-lang';",

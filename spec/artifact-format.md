@@ -40,6 +40,7 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
     "codeSeparatorIndices": [ ... ],
     "rawScriptSpans": [ ... ],
     "unsoundPrimitives": [ ... ],
+    "pqPubKeyParams": [ ... ],
     "buildTimestamp": "string"
 }
 ```
@@ -271,7 +272,14 @@ The SDK uses these offsets to splice serialized constructor argument values dire
 - **Required**: No — **absent**, not empty, on any artifact that reaches no such builtin
 - **Description**: Names of unsound primitives this artifact's script reaches. Read by the SDKs (`packages/runar-sdk/src/unsound-primitives.ts`) and by all six native tiers.
 
-### 3.19 `buildTimestamp`
+### 3.19 `pqPubKeyParams`
+
+- **Type**: `{ index: number, name: string, scheme: string, length: number }[]`
+- **Required**: No — **absent**, not empty, when no constructor param is a post-quantum public key
+- **Description**: Constructor params passed directly as the public key of `verifyWOTS` or a `verifySLHDSA_SHA2_*` verifier. `index` is the param's position in `abi.constructor.params`, `scheme` the verifier builtin, `length` the exact byte length that verifier splits its key at (WOTS+ 64; SLH-DSA 128s/128f 32, 192s/192f 48, 256s/256f 64). A key of any other length deploys fine and then refuses every valid signature, so all seven SDKs refuse a wrong-length value at construction, before anything is broadcast, with the same message. Entries are sorted by (`index`, `scheme`); the value is byte-identical across the seven compilers.
+- **Rules**: Computed from the final ANF: a property load (directly, or through a local alias) reaching the verifier's third argument, in any method including private helpers. Not covered: a key passed to a private helper as an argument, a key supplied at spend time (e.g. hash-committed), a FixedArray element, and an initialized property. For artifacts that predate the field, the SDKs fall back to the same walk over top-level `anf` (stateful artifacts only).
+
+### 3.20 `buildTimestamp`
 
 - **Type**: `string` (ISO 8601)
 - **Required**: Yes

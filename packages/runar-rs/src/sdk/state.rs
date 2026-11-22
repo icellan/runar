@@ -1320,6 +1320,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         let result = extract_state_from_script(&artifact, "76a988ac").expect("refused a well-formed script");
         assert!(result.is_none());
@@ -1345,6 +1346,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         let result = extract_state_from_script(&artifact, "51").expect("refused a well-formed script");
         assert!(result.is_none());
@@ -1371,6 +1373,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         // Script with no 0x6a anywhere
         let result = extract_state_from_script(&artifact, "5193885187").expect("refused a well-formed script");
@@ -1406,6 +1409,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script).expect("refused a well-formed script");
@@ -1447,6 +1451,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script).expect("refused a well-formed continuation").unwrap();
@@ -1481,6 +1486,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script).expect("refused a well-formed continuation").unwrap();

@@ -17,7 +17,7 @@ import type {
 } from '../ir/index.js';
 import { computeSideEffectSummary, continuationShape } from '../passes/side-effect-summary.js';
 import { SIGHASH_DEFAULT } from '../passes/sighash-directive.js';
-import { abiValueEncoding, annotateStateFieldLayout, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
+import { abiValueEncoding, annotateStateFieldLayout, pqPubKeyParams, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Artifact types (mirroring runar-ir-schema/artifact.ts)
@@ -193,6 +193,20 @@ export interface RawScriptSpan {
   outArity: number;
 }
 
+/**
+ * PQ-F1: one constructor param passed directly as a post-quantum verifier's
+ * public key. `index` is its position in `abi.constructor.params`, `scheme`
+ * the verifier builtin (e.g. `verifyWOTS`), `length` the exact byte length
+ * that verifier needs. Key order (index, name, scheme, length) is identical
+ * in all seven compilers.
+ */
+export interface PqPubKeyParam {
+  index: number;
+  name: string;
+  scheme: string;
+  length: number;
+}
+
 export interface RunarArtifact {
   /** Schema version, e.g. "runar-v0.1.0" */
   version: string;
@@ -272,6 +286,15 @@ export interface RunarArtifact {
    * Absent (not empty) on every artifact that reaches no such builtin.
    */
   unsoundPrimitives?: string[];
+
+  /**
+   * PQ-F1: constructor params passed directly as the public key of a
+   * post-quantum verifier (verifyWOTS / verifySLHDSA_SHA2_*), each with the
+   * exact byte length that verifier needs. The SDKs refuse a wrong-length
+   * value at construction. Sorted by (index, scheme); absent (not empty)
+   * when there are none.
+   */
+  pqPubKeyParams?: PqPubKeyParam[];
 }
 
 // ---------------------------------------------------------------------------
@@ -934,6 +957,14 @@ export function assembleArtifact(
 
   if (options?.rawScriptSpans && options.rawScriptSpans.length > 0) {
     artifact.rawScriptSpans = options.rawScriptSpans;
+  }
+
+  // PQ-F1: constructor params that are a post-quantum verifier's public key,
+  // so every SDK can refuse a wrong-length value before deploying, stateless
+  // artifacts (which carry no ANF) included.
+  const pq = pqPubKeyParams(anfProgram, abi.constructor.params.map(p => p.name));
+  if (pq.length > 0) {
+    artifact.pqPubKeyParams = pq;
   }
 
   return artifact;
