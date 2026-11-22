@@ -654,13 +654,18 @@ public final class Typecheck {
                 }
             }
 
-            // N-511: a private method that declares a non-void return type
+            // N-511: a private method that declares a non-void return type, or
+            // that declares none but returns a non-void value on some path,
             // must return a value on every path (rule: returnsOnEveryPath).
-            if (m.visibility() != Visibility.PUBLIC && m.returnType() != null) {
-                String declared = typeToString(m.returnType());
-                if (!"void".equals(declared)
-                    && (hasBareReturn(m.body()) || !returnsOnEveryPath(m.body(), true, false))) {
-                    errors.add(format(missingReturnMessage(m.name(), declared), m.sourceLocation()));
+            if (m.visibility() != Visibility.PUBLIC) {
+                boolean missing = hasBareReturn(m.body()) || !returnsOnEveryPath(m.body());
+                if (m.returnType() != null) {
+                    String declared = typeToString(m.returnType());
+                    if (!"void".equals(declared) && missing) {
+                        errors.add(format(missingReturnMessage(m.name(), declared), m.sourceLocation()));
+                    }
+                } else if (missing && currentReturnTypes.stream().anyMatch(t -> !"void".equals(t))) {
+                    errors.add(format(undeclaredMissingReturnMessage(m.name()), m.sourceLocation()));
                 }
             }
 
@@ -1941,27 +1946,27 @@ public final class Typecheck {
             + "' but does not return a value on every path";
     }
 
+    /** N-511: the one wording every tier emits for a helper with no declared type. */
+    public static String undeclaredMissingReturnMessage(String method) {
+        return "Method '" + method + "' returns a value on some paths but not on every path";
+    }
+
     /**
      * N-511: whether a statement list returns a value on every path. A list
      * returns when one of its statements does; {@code return <value>} returns;
      * an {@code if} returns only when it has an else and both arms return; a
-     * loop never counts. Tail value: an expression statement counts when it is
-     * the last statement of an arm of an if/else that is itself last in its
-     * list, recursively up to the method body (the .runar.rs / .runar.move tail
-     * if-expression). A top-level trailing expression is not credited.
+     * loop or an expression statement never counts. (Surfaces whose trailing
+     * expression is the value, .runar.rs / .runar.move / .runar.rb, turn it
+     * into a return in the parser.)
      */
-    static boolean returnsOnEveryPath(List<Statement> stmts, boolean tail, boolean inArm) {
-        for (int i = 0; i < stmts.size(); i++) {
-            boolean last = i == stmts.size() - 1;
-            Statement s = stmts.get(i);
+    static boolean returnsOnEveryPath(List<Statement> stmts) {
+        for (Statement s : stmts) {
             if (s instanceof ReturnStatement r) {
                 if (r.value() != null) return true;
             } else if (s instanceof IfStatement f) {
                 if (f.elseBody() != null
-                    && returnsOnEveryPath(f.thenBody(), tail && last, true)
-                    && returnsOnEveryPath(f.elseBody(), tail && last, true)) return true;
-            } else if (s instanceof ExpressionStatement) {
-                if (tail && last && inArm) return true;
+                    && returnsOnEveryPath(f.thenBody())
+                    && returnsOnEveryPath(f.elseBody())) return true;
             }
         }
         return false;

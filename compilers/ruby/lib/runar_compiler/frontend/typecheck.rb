@@ -300,23 +300,24 @@ module RunarCompiler
       "Method '#{method}' declares return type '#{declared}' but does not return a value on every path"
     end
 
+    # N-511: the one wording every tier emits for a helper with no declared type.
+    def self.undeclared_missing_return_message(method)
+      "Method '#{method}' returns a value on some paths but not on every path"
+    end
+
     # N-511: whether a statement list returns a value on every path. A list
     # returns when one of its statements does; `return <value>` returns; an
-    # `if` returns only when it has an else and both arms return; a loop never
-    # counts. Tail value: an expression statement counts when it is the last
-    # statement of an arm of an if/else that is itself last in its list,
-    # recursively up to the method body (the .runar.rs / .runar.move tail
-    # if-expression). A top-level trailing expression is not credited.
-    def self.returns_on_every_path?(stmts, tail, in_arm)
-      stmts.each_with_index.any? do |st, i|
-        last = i == stmts.length - 1
+    # `if` returns only when it has an else and both arms return; a loop or an
+    # expression statement never counts. (Surfaces whose trailing expression
+    # is the value, .runar.rs / .runar.move / .runar.rb, turn it into a return
+    # in the parser.)
+    def self.returns_on_every_path?(stmts)
+      stmts.any? do |st|
         case st
         when ReturnStmt then !st.value.nil?
         when IfStmt
           !st.else_.nil? && !st.else_.empty? &&
-            returns_on_every_path?(st.then || [], tail && last, true) &&
-            returns_on_every_path?(st.else_, tail && last, true)
-        when ExpressionStmt then tail && last && in_arm
+            returns_on_every_path?(st.then || []) && returns_on_every_path?(st.else_)
         else false
         end
       end
@@ -977,13 +978,19 @@ module RunarCompiler
           end
         end
 
-        # N-511: a private method that declares a non-void return type must
-        # return a value on every path (rule: Frontend.returns_on_every_path?).
-        if method.visibility == "private" && !method.return_type.nil?
-          declared = type_node_to_string(method.return_type)
-          if declared != "void" &&
-             (Frontend.bare_return?(method.body) || !Frontend.returns_on_every_path?(method.body, true, false))
-            @errors << Diagnostic.new(message: Frontend.missing_return_message(method.name, declared),
+        # N-511: a private method that declares a non-void return type, or that
+        # declares none but returns a non-void value on some path, must return
+        # a value on every path (rule: Frontend.returns_on_every_path?).
+        if method.visibility == "private"
+          missing = Frontend.bare_return?(method.body) || !Frontend.returns_on_every_path?(method.body)
+          if !method.return_type.nil?
+            declared = type_node_to_string(method.return_type)
+            if declared != "void" && missing
+              @errors << Diagnostic.new(message: Frontend.missing_return_message(method.name, declared),
+                                        severity: Severity::ERROR, loc: method.source_location)
+            end
+          elsif missing && @current_return_types.any? { |t| t != "void" }
+            @errors << Diagnostic.new(message: Frontend.undeclared_missing_return_message(method.name),
                                       severity: Severity::ERROR, loc: method.source_location)
           end
         end

@@ -1079,13 +1079,9 @@ func (p *moveParser) parseMoveFunction(attrs []moveAttribute) (MethodNode, bool)
 	// Move allows an implicit return of the final expression when the function
 	// declares a return type. Convert the trailing expression statement into
 	// an explicit return so downstream type inference can see it.
-	if hasReturnType && len(body) > 0 {
-		if last, ok := body[len(body)-1].(ExpressionStmt); ok {
-			body[len(body)-1] = ReturnStmt{
-				Value:          last.Expr,
-				SourceLocation: last.SourceLocation,
-			}
-		}
+	// N-511: also through the arms of a trailing if/else.
+	if hasReturnType {
+		promoteTailReturns(body, true)
 	}
 
 	// N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here

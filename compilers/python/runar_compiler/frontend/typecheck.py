@@ -1091,15 +1091,22 @@ class _TypeChecker:
                     loc=method.source_location,
                 ))
 
-        # N-511: a private method that declares a non-void return type must
-        # return a value on every path (rule: _returns_on_every_path).
-        if method.visibility == "private" and method.return_type is not None:
-            declared = _type_node_to_string(method.return_type)
-            if declared != "void" and (
-                _has_bare_return(method.body) or not _returns_on_every_path(method.body, True, False)
-            ):
+        # N-511: a private method that declares a non-void return type, or that
+        # declares none but returns a non-void value on some path, must return
+        # a value on every path (rule: _returns_on_every_path).
+        if method.visibility == "private":
+            missing = _has_bare_return(method.body) or not _returns_on_every_path(method.body)
+            if method.return_type is not None:
+                declared = _type_node_to_string(method.return_type)
+                if declared != "void" and missing:
+                    self.errors.append(Diagnostic(
+                        message=missing_return_message(method.name, declared),
+                        severity=Severity.ERROR,
+                        loc=method.source_location,
+                    ))
+            elif missing and any(t != "void" for t in self._current_return_types):
                 self.errors.append(Diagnostic(
-                    message=missing_return_message(method.name, declared),
+                    message=undeclared_missing_return_message(method.name),
                     severity=Severity.ERROR,
                     loc=method.source_location,
                 ))
@@ -2292,30 +2299,26 @@ def missing_return_message(method: str, declared: str) -> str:
     )
 
 
-def _returns_on_every_path(stmts: list, tail: bool, in_arm: bool) -> bool:
+def undeclared_missing_return_message(method: str) -> str:
+    """N-511: the one wording every tier emits for a helper with no declared type."""
+    return f"Method '{method}' returns a value on some paths but not on every path"
+
+
+def _returns_on_every_path(stmts: list) -> bool:
     """N-511: whether a statement list returns a value on every path.
 
     A list returns when one of its statements does; ``return <value>``
     returns; an ``if`` returns only when it has an else and both arms return;
-    a loop never counts. Tail value: an expression statement counts when it is
-    the last statement of an arm of an if/else that is itself last in its
-    list, recursively up to the method body (the .runar.rs / .runar.move tail
-    if-expression). A top-level trailing expression is not credited.
+    a loop or an expression statement never counts. (Surfaces whose trailing
+    expression is the value, .runar.rs / .runar.move / .runar.rb, turn it
+    into a return in the parser.)
     """
-    for i, s in enumerate(stmts):
-        last = i == len(stmts) - 1
+    for s in stmts:
         if isinstance(s, ReturnStmt):
             if s.value is not None:
                 return True
         elif isinstance(s, IfStmt):
-            if (
-                s.else_
-                and _returns_on_every_path(s.then, tail and last, True)
-                and _returns_on_every_path(s.else_, tail and last, True)
-            ):
-                return True
-        elif isinstance(s, ExpressionStmt):
-            if tail and last and in_arm:
+            if s.else_ and _returns_on_every_path(s.then) and _returns_on_every_path(s.else_):
                 return True
     return False
 

@@ -1478,16 +1478,27 @@ const TypeChecker = struct {
             }
         }
 
-        // N-511: a private method that declares a non-void return type must
+        // N-511: a private method that declares a non-void return type, or
+        // that declares none but returns a non-void value on some path, must
         // return a value on every path (rule: `returnsOnEveryPath`).
-        if (!method.is_public) if (method.return_type) |declared| {
-            if (declared != .void and (hasBareReturn(method.body) or !returnsOnEveryPath(method.body, true, false))) {
-                self.addErrorAt(method.source_loc, MISSING_RETURN_FMT, .{
-                    method.name,
-                    if (method.return_type_name.len > 0) method.return_type_name else tsTypeName(declared),
-                });
+        if (!method.is_public) {
+            const missing = hasBareReturn(method.body) or !returnsOnEveryPath(method.body);
+            if (method.return_type) |declared| {
+                if (declared != .void and missing) {
+                    self.addErrorAt(method.source_loc, MISSING_RETURN_FMT, .{
+                        method.name,
+                        if (method.return_type_name.len > 0) method.return_type_name else tsTypeName(declared),
+                    });
+                }
+            } else if (missing) {
+                for (self.current_return_types.items) |t| {
+                    if (t != .void) {
+                        self.addErrorAt(method.source_loc, UNDECLARED_MISSING_RETURN_FMT, .{method.name});
+                        break;
+                    }
+                }
             }
-        };
+        }
 
         // Crit-3 (BSVM Phase 13) — reject mixing requireOutputP2PKH with
         // addDataOutput in the same method body. v1 of the intrinsic assumes
@@ -2940,25 +2951,22 @@ pub const INCOMPATIBLE_RETURN_TYPES_FMT = "Method '{s}' returns values of incomp
 /// N-511: the one wording every tier emits.
 pub const MISSING_RETURN_FMT = "Method '{s}' declares return type '{s}' but does not return a value on every path";
 
+/// N-511: the one wording every tier emits for a helper with no declared type.
+pub const UNDECLARED_MISSING_RETURN_FMT = "Method '{s}' returns a value on some paths but not on every path";
+
 /// N-511: whether a statement list returns a value on every path. A list
 /// returns when one of its statements does; `return <value>` returns; an `if`
-/// returns only when it has an else and both arms return; a loop never
-/// counts. Tail value: an expression statement counts when it is the last
-/// statement of an arm of an if/else that is itself last in its list,
-/// recursively up to the method body (the .runar.rs / .runar.move tail
-/// if-expression). A top-level trailing expression is not credited.
-fn returnsOnEveryPath(stmts: []const types.Statement, tail: bool, in_arm: bool) bool {
-    for (stmts, 0..) |st, i| {
-        const last = i + 1 == stmts.len;
+/// returns only when it has an else and both arms return; a loop or an
+/// expression statement never counts. (Surfaces whose trailing expression is
+/// the value, .runar.rs / .runar.move / .runar.rb, turn it into a return in
+/// the parser.)
+fn returnsOnEveryPath(stmts: []const types.Statement) bool {
+    for (stmts) |st| {
         switch (st) {
             .return_stmt => |r| if (r.value != null) return true,
             .if_stmt => |f| if (f.else_body) |else_body| {
-                if (returnsOnEveryPath(f.then_body, tail and last, true) and
-                    returnsOnEveryPath(else_body, tail and last, true)) return true;
+                if (returnsOnEveryPath(f.then_body) and returnsOnEveryPath(else_body)) return true;
             },
-            // `assert_stmt` is this tier's spelling of an assert expression
-            // statement (an `expression_statement` in the TS AST).
-            .expr_stmt, .assert_stmt => if (tail and last and in_arm) return true,
             else => {},
         }
     }

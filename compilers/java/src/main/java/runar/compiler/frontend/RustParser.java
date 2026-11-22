@@ -1199,13 +1199,8 @@ public final class RustParser {
         s.expect(TOK_RBRACE);
 
         // Rust implicit return: convert last ExpressionStatement to ReturnStatement
-        if (hasReturnType && !body.isEmpty()) {
-            Statement last = body.get(body.size() - 1);
-            if (last instanceof ExpressionStatement es) {
-                body.set(body.size() - 1,
-                    new ReturnStatement(es.expression(), es.sourceLocation()));
-            }
-        }
+        // (N-511: also through the arms of a trailing if/else).
+        if (hasReturnType) body = TailReturn.promote(body, true);
 
         return new MethodNode(name, params, body, visibility, funcLoc, null, null, declaredReturn);
     }

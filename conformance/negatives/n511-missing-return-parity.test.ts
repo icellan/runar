@@ -20,21 +20,29 @@ import { buildSourceTiers, judge } from './tier-harness.js';
  *
  * The rule (identical in every tier's type checker):
  *   - it applies to private methods whose declared return type is present and
- *     not void (Ruby spells no return type; Python `-> None` is void);
+ *     not void (Python `-> None` is void), and to private methods with NO
+ *     declared type that return a non-void value on some path (undeclared TS
+ *     helpers, and every .runar.rb helper). The latter get a second shared
+ *     wording, with no type to name:
+ *       Method '<name>' returns a value on some paths but not on every path
  *   - a statement list returns when one of its statements returns;
  *   - `return <value>` returns; an `if` returns only when it has an else and
- *     both arms return; a loop never counts;
- *   - a bare `return;` anywhere in such a method is itself a refusal;
- *   - tail value: an expression statement counts as a return when it is the
- *     last statement of an arm of an if/else that is itself last in its list,
- *     recursively up to the method body. This is the .runar.rs / .runar.move
- *     tail if-expression (`if c { x } else { 0 }`), which compiles to the same
- *     bytes as `if c { return x; } else { return 0; }` in every tier. A
- *     top-level trailing expression is NOT credited (the Rust and Move parsers
- *     turn it into a return themselves). The same AST spelled on another
- *     surface (`if (c) { x; } else { y; }` last in a TS helper) is therefore
- *     also accepted, as it is today.
+ *     both arms return; a loop never counts; an expression statement never
+ *     counts;
+ *   - a bare `return;` anywhere in such a method is itself a refusal.
  *
+ * Tail values are a parser matter, not a checker heuristic. Only the surfaces
+ * where the trailing expression IS the value turn it into a return: .runar.rs
+ * and .runar.move (with a declared return type) and .runar.rb (private
+ * helpers) already did so for a top-level trailing expression; they now also
+ * do it recursively through the arms of a trailing if/else, so
+ * `if c { x } else { 0 }` reaches the checker as two returns. (On .runar.rb
+ * the recursion applies only to a helper that already has an explicit
+ * `return <value>`, which keeps a void helper ending in an if/else of asserts,
+ * and a value if/else with no return at all, exactly as they were.) The same
+ * AST spelled on any other surface (`if (c) { return x; } else { this.f(x); }`
+ * in a TS helper) is refused: there the arm's value is discarded.
+
  * What this proves:
  *   - on the eight surfaces that spell a return type, every tier refuses the
  *     empty-body, bare-return and conditional-return helpers with the shared
@@ -50,7 +58,8 @@ import { buildSourceTiers, judge } from './tier-harness.js';
  *   - that every legal helper in the checked-in corpus is still accepted: the
  *     all-format over-rejection sweep covers that;
  *   - the bytes of accepted programs (the conformance goldens cover that);
- *   - `.runar.rb` (no return-type syntax).
+ *   - `.runar.rb` in the surface matrix (no return-type syntax; it is
+ *     covered by the follow-up cases at the end of the file).
  */
 
 const TIERS = buildSourceTiers();
@@ -345,5 +354,99 @@ describe('N-511: every tier refuses a declared non-void private helper that does
       }
       expect(got).toEqual(want);
     }, 1_800_000);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Review follow-up (same N-511 item): undeclared value-returning helpers, and
+// tail values only where the surface has them.
+// ---------------------------------------------------------------------------
+
+const UNDECLARED = /Method '_?helper' returns a value on some paths but not on every path/i;
+
+interface Case { name: string; file: string; src: string; want: 'declared' | 'undeclared' | 'accept'; hex?: string }
+const CASES: Case[] = [
+  {
+    name: "ts-undeclared-cond", file: "Probe.runar.ts", want: "undeclared",
+    src: "import { SmartContract, assert } from 'runar-lang';\nclass Probe extends SmartContract {\n  readonly target: bigint;\n  constructor(target: bigint) { super(target); this.target = target; }\n  private helper(x: bigint) { if (x > 0n) { return x; } }\n  public verify(a: bigint): void {\n    assert(this.helper(a) === this.target);\n  }\n}\n",
+  },
+  {
+    name: "rb-cond-return", file: "Probe.runar.rb", want: "undeclared",
+    src: "require 'runar'\n\nclass Probe < Runar::SmartContract\n  prop :target, Bigint\n\n  def initialize(target)\n    super(target)\n    @target = target\n  end\n\n  params x: Bigint\n  def helper(x)\n    if x > 0\n      return x\n    end\n  end\n\n  runar_public a: Bigint\n  def verify(a)\n    assert helper(a) == @target\n  end\nend\n",
+  },
+  {
+    name: "ts-bare-call-arm", file: "Probe.runar.ts", want: "declared",
+    src: "import { SmartContract, assert } from 'runar-lang';\nclass Probe extends SmartContract {\n  readonly target: bigint;\n  constructor(target: bigint) { super(target); this.target = target; }\n  private twice(x: bigint): bigint { return x * 2n; }\n  private helper(x: bigint): bigint { if (x > 0n) { return x; } else { this.twice(x); } }\n  public verify(a: bigint): void {\n    assert(this.helper(a) === this.target);\n  }\n}\n",
+  },
+  {
+    name: "ts-assert-arm", file: "Probe.runar.ts", want: "declared",
+    src: "import { SmartContract, assert } from 'runar-lang';\nclass Probe extends SmartContract {\n  readonly target: bigint;\n  constructor(target: bigint) { super(target); this.target = target; }\n  private twice(x: bigint): bigint { return x * 2n; }\n  private helper(x: bigint): bigint { if (x > 0n) { return x; } else { assert(x < 0n); } }\n  public verify(a: bigint): void {\n    assert(this.helper(a) === this.target);\n  }\n}\n",
+  },
+  {
+    name: "rb-return-and-value", file: "Probe.runar.rb", want: "accept", hex: "7600a06367007768009c",
+    src: "require 'runar'\n\nclass Probe < Runar::SmartContract\n  prop :target, Bigint\n\n  def initialize(target)\n    super(target)\n    @target = target\n  end\n\n  params x: Bigint\n  def helper(x)\n    if x > 0\n      return x\n    else\n      0\n    end\n  end\n\n  runar_public a: Bigint\n  def verify(a)\n    assert helper(a) == @target\n  end\nend\n",
+  },
+  {
+    name: "rb-void-asserts", file: "Probe.runar.rb", want: "accept", hex: "767600a06301649f696701e4a06968009c",
+    src: "require 'runar'\n\nclass Probe < Runar::SmartContract\n  prop :target, Bigint\n\n  def initialize(target)\n    super(target)\n    @target = target\n  end\n\n  params x: Bigint\n  def check(x)\n    if x > 0\n      assert x < 100\n    else\n      assert x > -100\n    end\n  end\n\n  runar_public a: Bigint\n  def verify(a)\n    check(a)\n    assert a == @target\n  end\nend\n",
+  },
+  {
+    name: "rs-simple", file: "Probe.runar.rs", want: "accept", hex: "7600a06367007768009c",
+    src: "use runar::prelude::*;\n\n#[runar::contract]\nstruct Probe {\n    #[readonly]\n    target: Int,\n}\n\nimpl Probe {\n    fn helper(&self, x: Int) -> Int {\n        if x > 0 { x } else { 0 }\n    }\n\n    pub fn verify(&self, a: Int) {\n        assert!(self.helper(a) == self.target);\n    }\n}\n",
+  },
+  {
+    name: "rs-nested-then", file: "Probe.runar.rs", want: "accept", hex: "7600a0637655a06355776867007768009c",
+    src: "use runar::prelude::*;\n\n#[runar::contract]\nstruct Probe {\n    #[readonly]\n    target: Int,\n}\n\nimpl Probe {\n    fn helper(&self, x: Int) -> Int {\n        if x > 0 { if x > 5 { 5 } else { x } } else { 0 }\n    }\n\n    pub fn verify(&self, a: Int) {\n        assert!(self.helper(a) == self.target);\n    }\n}\n",
+  },
+  {
+    name: "rs-nested-else", file: "Probe.runar.rs", want: "accept", hex: "7600a06367009f630067516868009c",
+    src: "use runar::prelude::*;\n\n#[runar::contract]\nstruct Probe {\n    #[readonly]\n    target: Int,\n}\n\nimpl Probe {\n    fn helper(&self, x: Int) -> Int {\n        if x > 0 { x } else { if x < 0 { 0 } else { 1 } }\n    }\n\n    pub fn verify(&self, a: Int) {\n        assert!(self.helper(a) == self.target);\n    }\n}\n",
+  },
+  {
+    name: "rs-multi-stmt", file: "Probe.runar.rs", want: "accept", hex: "7600a0638b678c68009c",
+    src: "use runar::prelude::*;\n\n#[runar::contract]\nstruct Probe {\n    #[readonly]\n    target: Int,\n}\n\nimpl Probe {\n    fn helper(&self, x: Int) -> Int {\n        if x > 0 { let y = x + 1; y } else { let z = x - 1; z }\n    }\n\n    pub fn verify(&self, a: Int) {\n        assert!(self.helper(a) == self.target);\n    }\n}\n",
+  },
+  {
+    name: "rs-after-stmts", file: "Probe.runar.rs", want: "accept", hex: "529500a06300670068009c",
+    src: "use runar::prelude::*;\n\n#[runar::contract]\nstruct Probe {\n    #[readonly]\n    target: Int,\n}\n\nimpl Probe {\n    fn helper(&self, x: Int) -> Int {\n        let w = x * 2; if w > 0 { w } else { 0 }\n    }\n\n    pub fn verify(&self, a: Int) {\n        assert!(self.helper(a) == self.target);\n    }\n}\n",
+  },
+  {
+    name: "move-simple", file: "Probe.runar.move", want: "accept", hex: "7600a06367007768009c",
+    src: "module Probe {\n    use runar::types::{Int};\n    struct Probe { target: Int, }\n    fun helper(x: Int): Int { if (x > 0) { x } else { 0 } }\n    public fun verify(contract: &Probe, a: Int) {\n        assert_eq!(helper(a), contract.target);\n    }\n}\n",
+  },
+  {
+    name: "move-nested-else", file: "Probe.runar.move", want: "accept", hex: "7600a06367009f630067516868009c",
+    src: "module Probe {\n    use runar::types::{Int};\n    struct Probe { target: Int, }\n    fun helper(x: Int): Int { if (x > 0) { x } else { if (x < 0) { 0 } else { 1 } } }\n    public fun verify(contract: &Probe, a: Int) {\n        assert_eq!(helper(a), contract.target);\n    }\n}\n",
+  },
+  {
+    name: "move-multi-stmt", file: "Probe.runar.move", want: "accept", hex: "7600a0638b678c68009c",
+    src: "module Probe {\n    use runar::types::{Int};\n    struct Probe { target: Int, }\n    fun helper(x: Int): Int { if (x > 0) { let y = x + 1; y } else { let z = x - 1; z } }\n    public fun verify(contract: &Probe, a: Int) {\n        assert_eq!(helper(a), contract.target);\n    }\n}\n",
+  },
+];
+
+describe('N-511 follow-up: undeclared helpers, and tail values only on tail-value surfaces', () => {
+  for (const c of CASES) {
+    it(`${c.name}: ${c.want === 'accept' ? 'accepted with the pre-N-511 bytes' : `refused (${c.want} wording)`}`, () => {
+      const dir = mkdtempSync(join(TMP, `${c.name}-`));
+      const path = join(dir, c.file);
+      writeFileSync(path, c.src);
+      const got: Record<string, string> = {};
+      const want: Record<string, string> = {};
+      for (const tier of TIERS) {
+        const r = judge(tier, path);
+        if (c.want === 'accept') {
+          want[tier.id] = `accepted ${c.hex}`;
+          const hex = r.diag.trim().split('\n').pop()!.trim();
+          got[tier.id] = r.verdict === 'accepted' ? `accepted ${hex}` : `${r.verdict}: ${r.diag.trim().slice(0, 200)}`;
+        } else {
+          const re = c.want === 'declared' ? WORDING : UNDECLARED;
+          want[tier.id] = 'refused (shared wording)';
+          got[tier.id] = r.verdict === 'rejected' && re.test(r.diag)
+            ? 'refused (shared wording)'
+            : `${r.verdict}: ${r.diag.trim().slice(0, 200)}`;
+        }
+      }
+      expect(got).toEqual(want);
+    }, 900_000);
   }
 });

@@ -701,28 +701,27 @@ func MissingReturnMsg(method, declared string) string {
 		method, declared)
 }
 
+// UndeclaredMissingReturnMsg is N-511's refusal for a helper with no declared
+// return type; one wording in every tier.
+func UndeclaredMissingReturnMsg(method string) string {
+	return fmt.Sprintf("Method '%s' returns a value on some paths but not on every path", method)
+}
+
 // returnsOnEveryPath is N-511's rule: a statement list returns a value on
 // every path when one of its statements does; `return <value>` returns; an
-// `if` returns only when it has an else and both arms return; a loop never
-// counts. Tail value: an expression statement counts when it is the last
-// statement of an arm of an if/else that is itself last in its list,
-// recursively up to the method body (the .runar.rs / .runar.move tail
-// if-expression). A top-level trailing expression is not credited.
-func returnsOnEveryPath(stmts []Statement, tail, inArm bool) bool {
-	for i, s := range stmts {
-		last := i == len(stmts)-1
+// `if` returns only when it has an else and both arms return; a loop or an
+// expression statement never counts. (Surfaces whose trailing expression is
+// the value, .runar.rs / .runar.move / .runar.rb, turn it into a return in
+// the parser.)
+func returnsOnEveryPath(stmts []Statement) bool {
+	for _, s := range stmts {
 		switch st := s.(type) {
 		case ReturnStmt:
 			if st.Value != nil {
 				return true
 			}
 		case IfStmt:
-			if st.Else != nil && returnsOnEveryPath(st.Then, tail && last, true) &&
-				returnsOnEveryPath(st.Else, tail && last, true) {
-				return true
-			}
-		case ExpressionStmt:
-			if tail && last && inArm {
+			if st.Else != nil && returnsOnEveryPath(st.Then) && returnsOnEveryPath(st.Else) {
 				return true
 			}
 		}
@@ -952,12 +951,22 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 		}
 	}
 
-	// N-511: a private method that declares a non-void return type must
-	// return a value on every path (rule: returnsOnEveryPath).
-	if method.Visibility != "public" && method.ReturnType != nil {
-		declared := typeNodeToString(method.ReturnType)
-		if declared != "void" && (hasBareReturn(method.Body) || !returnsOnEveryPath(method.Body, true, false)) {
-			tc.addErrorWithLoc(MissingReturnMsg(method.Name, declared), &method.SourceLocation)
+	// N-511: a private method that declares a non-void return type, or that
+	// declares none but returns a non-void value on some path, must return a
+	// value on every path (rule: returnsOnEveryPath).
+	if method.Visibility != "public" {
+		missing := hasBareReturn(method.Body) || !returnsOnEveryPath(method.Body)
+		if method.ReturnType != nil {
+			if declared := typeNodeToString(method.ReturnType); declared != "void" && missing {
+				tc.addErrorWithLoc(MissingReturnMsg(method.Name, declared), &method.SourceLocation)
+			}
+		} else if missing {
+			for _, t := range tc.currentReturnTypes {
+				if t != "void" {
+					tc.addErrorWithLoc(UndeclaredMissingReturnMsg(method.Name), &method.SourceLocation)
+					break
+				}
+			}
 		}
 	}
 

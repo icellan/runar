@@ -1094,13 +1094,21 @@ class TypeChecker {
       }
     }
 
-    // N-511: a private method that declares a non-void return type must
-    // return a value on every path (rule: `returnsOnEveryPath`).
-    if (method.visibility === 'private' && method.returnType) {
-      const declared = typeNodeToTType(method.returnType);
-      if (declared !== 'void' && (hasBareReturn(method.body) || !returnsOnEveryPath(method.body))) {
+    // N-511: a private method that declares a non-void return type, or that
+    // declares none but returns a non-void value on some path, must return a
+    // value on every path (rule: `returnsOnEveryPath`).
+    if (method.visibility === 'private') {
+      const declared = method.returnType ? typeNodeToTType(method.returnType) : null;
+      const missing = hasBareReturn(method.body) || !returnsOnEveryPath(method.body);
+      if (declared !== null && declared !== 'void' && missing) {
         this.errors.push(makeDiagnostic(
           missingReturnMessage(method.name, declared),
+          'error',
+          method.sourceLocation,
+        ));
+      } else if (declared === null && this.currentReturnTypes.some((t) => t !== 'void') && missing) {
+        this.errors.push(makeDiagnostic(
+          undeclaredMissingReturnMessage(method.name),
           'error',
           method.sourceLocation,
         ));
@@ -2915,25 +2923,25 @@ export function missingReturnMessage(method: string, declared: string): string {
   return `Method '${method}' declares return type '${declared}' but does not return a value on every path`;
 }
 
+/** N-511: the one wording every tier emits for a helper with no declared type. */
+export function undeclaredMissingReturnMessage(method: string): string {
+  return `Method '${method}' returns a value on some paths but not on every path`;
+}
+
 /**
  * N-511: whether a statement list returns a value on every path. A list
  * returns when one of its statements does; `return <value>` returns; an `if`
- * returns only when it has an else and both arms return; a loop never counts.
- * Tail value: an expression statement counts when it is the last statement of
- * an arm of an if/else that is itself last in its list, recursively up to the
- * method body (the .runar.rs / .runar.move tail if-expression). A top-level
- * trailing expression is not credited.
+ * returns only when it has an else and both arms return; a loop or an
+ * expression statement never counts. (Surfaces whose trailing expression is
+ * the value, .runar.rs / .runar.move / .runar.rb, turn it into a return in
+ * the parser.)
  */
-function returnsOnEveryPath(stmts: Statement[], tail = true, inArm = false): boolean {
-  return stmts.some((s, i) => {
-    const last = i === stmts.length - 1;
+function returnsOnEveryPath(stmts: Statement[]): boolean {
+  return stmts.some((s) => {
     if (s.kind === 'return_statement') return s.value !== undefined && s.value !== null;
     if (s.kind === 'if_statement') {
-      return s.else !== undefined
-        && returnsOnEveryPath(s.then, tail && last, true)
-        && returnsOnEveryPath(s.else, tail && last, true);
+      return s.else !== undefined && returnsOnEveryPath(s.then) && returnsOnEveryPath(s.else);
     }
-    if (s.kind === 'expression_statement') return tail && last && inArm;
     return false;
   });
 }

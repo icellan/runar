@@ -28,6 +28,7 @@ const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const tail_return = @import("tail_return.zig");
 const operand_loc = @import("operand_loc.zig");
 const identifier_collision = @import("identifier_collision.zig");
 
@@ -1158,15 +1159,10 @@ const Parser = struct {
         // Implicit return conversion for private methods:
         // Ruby methods implicitly return the value of their last expression.
         for (methods.items) |*m| {
-            if (!m.is_public and m.body.len > 0) {
-                const last = &m.body[m.body.len - 1];
-                switch (last.*) {
-                    .expr_stmt => |e| {
-                        last.* = .{ .return_stmt = .{ .value = e.expr, .source_loc = e.source_loc } };
-                    },
-                    else => {},
-                }
-            }
+            // N-511: through the arms of a trailing if/else too, but only in a
+            // helper that already returns a value explicitly somewhere, so a
+            // void helper ending in an if/else of asserts is left as it was.
+            if (!m.is_public) tail_return.promoteTailReturns(m.body, tail_return.hasValueReturn(m.body));
         }
 
         return ContractNode{

@@ -603,6 +603,12 @@ export class Neg extends SmartContract {
     source: stateless(`    assert(this.f(x));`, { extra: `  private f(v: bigint): boolean {\n    if (v > 0n) { return true; }\n  }\n` }),
   },
   {
+    // N-511
+    target: 'returns a value on some paths but not on every path',
+    name: 'private-undeclared-return-missing-on-a-path',
+    source: stateless(`    assert(this.f(x));`, { extra: `  private f(v: bigint) {\n    if (v > 0n) { return true; }\n  }\n` }),
+  },
+  {
     target: 'Cannot compare',
     name: 'compare-mixed-types',
     source: stateless(
