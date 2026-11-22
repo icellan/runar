@@ -1277,14 +1277,18 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // must be deleted, on the next edit to stack.py.
     // 2026-11-18 — that entry is SPENT and deleted: the D12 BM-F3 reverseBytes
     // guard edits stack.py and moves its own pin (byte-builtins golden).
+    // 2026-11-23 — seven entries, one per lowering/codegen file whose ONLY
+    // change is deleting file-private helpers nothing references (N-511
+    // dead-helper batch). No emitted code path changes (multi-format fold-OFF
+    // 892/892 against the goldens). Each is spent, and must be deleted, on the
+    // next edit to its file.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual([]);
+    expect(entries.map((e) => e.path).sort()).toEqual(["compilers/go/codegen/stack.go", "compilers/go/frontend/anf_lower.go", "compilers/java/src/main/java/runar/compiler/passes/StackLower.java", "compilers/rust/src/codegen/stack.rs", "compilers/rust/src/frontend/anf_lower.rs", "compilers/zig/src/codegen/emit.zig", "compilers/zig/src/passes/stack_lower.zig"]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {
-      const prF = e.path === 'compilers/python/runar_compiler/codegen/stack.py';
-      expect(e.expires).toBe(prF ? '2027-05-16' : '2027-05-11');
-      expect(e.reviewer).toBe(prF ? 'fix-session: PR F python ghost-property refusal' : 'fix-session: nVersion wording');
+      expect(e.expires).toBe('2027-05-22');
+      expect(e.reviewer).toBe('fix-session: N-511 dead-helper deletion');
       expect(e.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
   });
