@@ -10,14 +10,6 @@
       "reviewer": "fix-session: N-511 dead-helper deletion"
     },
     {
-      "path": "compilers/go/frontend/anf_lower.go",
-      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
-      "date": "2026-11-23",
-      "expires": "2027-05-22",
-      "sha256": "f9bf494c60d5fc330a201ab6af375091b77760ef9908c79ff17d4cf7b817b752",
-      "reviewer": "fix-session: N-511 dead-helper deletion"
-    },
-    {
       "path": "compilers/java/src/main/java/runar/compiler/passes/StackLower.java",
       "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
       "date": "2026-11-23",
@@ -31,22 +23,6 @@
       "date": "2026-11-23",
       "expires": "2027-05-22",
       "sha256": "312b22df33f127be2e8ab8836b3ce64b77139f860da0190fef89b9cd7bafd320",
-      "reviewer": "fix-session: N-511 dead-helper deletion"
-    },
-    {
-      "path": "compilers/rust/src/frontend/anf_lower.rs",
-      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
-      "date": "2026-11-23",
-      "expires": "2027-05-22",
-      "sha256": "a007730c9c090222d947c96816d886c40f2f2a1ddaf5ff47a48cc1890fd9250a",
-      "reviewer": "fix-session: N-511 dead-helper deletion"
-    },
-    {
-      "path": "compilers/zig/src/codegen/emit.zig",
-      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
-      "date": "2026-11-23",
-      "expires": "2027-05-22",
-      "sha256": "774c0091de98f66671a5bcef1f065b4defd99ddd3ab256a44331262aed5f383f",
       "reviewer": "fix-session: N-511 dead-helper deletion"
     },
     {
