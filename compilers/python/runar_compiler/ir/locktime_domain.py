@@ -33,10 +33,34 @@ from runar_compiler.ir.preimage_rules import _ref_target
 from runar_compiler.ir.types import ANFMethod, ANFProgram, ANFValue
 
 
+def is_self_pinned_locktime_read(bs, i: int) -> bool:
+    """``bs[i]`` is the ANF image of ``currentBlockHeight()`` (anf_lower.py):
+    ``call extractLocktime`` followed in the same block by ``load_const
+    500000000; bin_op < (bs[i], that const); assert (that compare)``. The
+    assert runs on every path through the block before any later use, so the
+    read is a height by construction and the --ir path does not count it as a
+    locktime read (nothing derived from it is a gate), as the source path does
+    not count ``currentBlockHeight()``. Its assert still counts as a pin.
+    Matches only that exact four-binding shape. Mirrors
+    ``isSelfPinnedLocktimeRead``.
+    """
+    if bs is None or i + 3 >= len(bs):
+        return False
+    r, l, c, a = bs[i], bs[i + 1], bs[i + 2], bs[i + 3]
+    return (
+        r.value.kind == "call" and r.value.func == "extractLocktime"
+        and l.value.kind == "load_const" and l.value.const_bool is None
+        and l.value.const_big_int is not None and l.value.const_big_int == 500000000
+        and c.value.kind == "bin_op" and c.value.op == "<"
+        and c.value.left == r.name and c.value.right == l.name
+        and a.value.kind == "assert" and a.value.value_ref == c.name
+    )
+
+
 def _reads(bindings) -> bool:
-    for b in bindings or []:
+    for i, b in enumerate(bindings or []):
         v = b.value
-        if v.kind == "call" and v.func == "extractLocktime":
+        if v.kind == "call" and v.func == "extractLocktime" and not is_self_pinned_locktime_read(bindings, i):
             return True
         if v.kind == "if" and (_reads(v.then) or _reads(v.else_)):
             return True
@@ -47,7 +71,8 @@ def _reads(bindings) -> bool:
 
 def locktime_domain_error(program: ANFProgram) -> str | None:
     """The D26 text for the first public method with an unpinned gate."""
-    # Prefilter (as contract_reads_locktime): no extractLocktime call, no gate.
+    # Prefilter (as contract_reads_locktime): no extractLocktime call that is
+    # not currentBlockHeight()'s self-pinned one, no gate.
     if not any(_reads(m.body) for m in program.methods):
         return None
     privates = {
@@ -96,9 +121,18 @@ class _IrGates:
         # Every binding of the method, by name (a name bound more than once
         # keeps all its values).
         self.defs: dict[str, list[ANFValue]] = {}
+        # currentBlockHeight()'s reads (no locktime reads) and their ``bin_op <``
+        # compares, whose assert still pins the domain on its path (the pin
+        # bounds the transaction's nLockTime, whichever read it is spelled on).
+        # By identity.
+        self_pinned: set[int] = set()
+        self.self_pin_compares: set[int] = set()
 
         def index(bs) -> None:
-            for b in bs or []:
+            for i, b in enumerate(bs or []):
+                if is_self_pinned_locktime_read(bs, i):
+                    self_pinned.add(id(b.value))
+                    self.self_pin_compares.add(id(bs[i + 2].value))
                 self.defs.setdefault(b.name, []).append(b.value)
                 v = b.value
                 if v.kind == "if":
@@ -118,7 +152,9 @@ class _IrGates:
             if r is not None:
                 return r in t
             if v.kind == "call":
-                return v.func == "extractLocktime" or any(a in t for a in v.args or [])
+                return (v.func == "extractLocktime" and id(v) not in self_pinned) or any(
+                    a in t for a in v.args or []
+                )
             if v.kind == "load_param":
                 return params.get(v.name, NONE) != NONE
             if v.kind == "bin_op":
@@ -134,7 +170,7 @@ class _IrGates:
             if r is not None:
                 return r in d
             if v.kind == "call":
-                return v.func == "extractLocktime"
+                return v.func == "extractLocktime" and id(v) not in self_pinned
             if v.kind == "load_param":
                 return params.get(v.name) == DIRECT
             return False
@@ -175,7 +211,7 @@ class _IrGates:
         if len(vs) != 1:
             return False
         v = vs[0]
-        if self._compare(v) == "pin":
+        if self._compare(v) == "pin" or id(v) in self.self_pin_compares:
             return True
         r = _ref_target(v)
         if r is not None:

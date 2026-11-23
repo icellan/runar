@@ -1146,6 +1146,7 @@ impl<'a> BindingsTask<'a> {
     ) -> Self {
         ctx.local_bindings = bindings.iter().map(|b| b.name.clone()).collect();
         let mut last_uses = compute_last_uses_with_arrays(bindings, inherited_arrays);
+        ctx.extend_last_uses_for_helpers(bindings, &mut last_uses);
 
         // Protect parent-scope refs that are still needed after this scope
         if let Some(ref protected) = ctx.outer_protected_refs {
@@ -1300,16 +1301,24 @@ struct InlineTask<'a> {
     method: &'a ANFMethod,
     shadowed: Vec<(String, String)>,
     body_lowered: bool,
+    /// The protected-ref set the helper body lowers under (None: unchanged),
+    /// and the caller's own, restored after the body.
+    protected: Option<HashSet<String>>,
+    prev_protected: Option<HashSet<String>>,
 }
 
 impl<'a> InlineTask<'a> {
     fn step(&mut self, ctx: &mut LoweringContext) -> LowerStep<'a> {
         if !self.body_lowered {
             self.body_lowered = true;
+            if let Some(p) = self.protected.take() {
+                ctx.outer_protected_refs = Some(p);
+            }
             // Lower the method body
             let task = BindingsTask::start(ctx, &self.method.body, false, None);
             return LowerStep::Child(LowerTask::Bindings(task));
         }
+        ctx.outer_protected_refs = self.prev_protected.take();
         ctx.inline_method_call_tail(self.binding_name, self.method, &self.shadowed);
         LowerStep::Done
     }
@@ -1354,6 +1363,7 @@ impl<'a> LoopTask<'a> {
                 ctx.sm.push(self.iter_var);
 
                 let mut last_uses = compute_last_uses_with_arrays(self.body, Some(&self.outer_arrays));
+                ctx.extend_last_uses_for_helpers(self.body, &mut last_uses);
 
                 // Prevent outer-scope refs from being consumed by setting their
                 // last-use beyond any body binding index:
@@ -1484,6 +1494,102 @@ struct LoweringContext {
     /// deserialized property slot (issue #130). Empty for the common
     /// no-collision case, so all other contracts are byte-identical.
     renamed_params: HashMap<String, String>,
+    /// Memo for `helper_outer_reads`, per private method name; shared by
+    /// every branch-arm context of one contract (like `private_methods`).
+    helper_reads_memo: std::rc::Rc<std::cell::RefCell<HashMap<String, HashSet<String>>>>,
+}
+
+/// The caller-scope stack slots a private method reads: every `load_param`
+/// name that is not one of its own parameters and every `load_prop` name that
+/// is not a contract property (`this.txPreimage` and `currentBlockHeight()` in
+/// a helper lower to `load_prop txPreimage`, the CALLER's preimage slot),
+/// including what the helpers it calls read, minus its own parameters (bound
+/// by the call). Searched through if arms and loop bodies. Private methods are
+/// inlined, so these are reads of the caller's slots at the call site;
+/// `collect_refs` of a `method_call` is its arguments only, so without
+/// `extend_last_uses_for_helpers` the caller consumed its preimage before the
+/// helper read it. N-264: an explicit work list over both the nesting and the
+/// call graph; a call cycle (`--ir` only) contributes nothing. Mirrors
+/// `helperOuterReads` in 05-stack-lower.ts.
+fn helper_outer_reads(
+    method: &ANFMethod,
+    private_methods: &HashMap<String, ANFMethod>,
+    property_names: &HashSet<String>,
+    memo: &mut HashMap<String, HashSet<String>>,
+) -> HashSet<String> {
+    fn direct<'m>(
+        m: &'m ANFMethod,
+        private_methods: &'m HashMap<String, ANFMethod>,
+        property_names: &HashSet<String>,
+    ) -> (HashSet<String>, Vec<&'m ANFMethod>) {
+        let mut reads = HashSet::new();
+        let mut callees = Vec::new();
+        let mut work: Vec<&[ANFBinding]> = vec![&m.body];
+        while let Some(bs) = work.pop() {
+            for b in bs {
+                match &b.value {
+                    ANFValue::LoadParam { name } => {
+                        reads.insert(name.clone());
+                    }
+                    ANFValue::LoadProp { name, .. } => {
+                        if !property_names.contains(name) {
+                            reads.insert(name.clone());
+                        }
+                    }
+                    ANFValue::If { then, else_branch, .. } => {
+                        work.push(then);
+                        work.push(else_branch);
+                    }
+                    ANFValue::Loop { body, .. } => work.push(body),
+                    ANFValue::MethodCall { method, .. } => {
+                        if let Some(callee) = private_methods.get(method) {
+                            callees.push(callee);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (reads, callees)
+    }
+    type Info<'m> = (HashSet<String>, Vec<&'m ANFMethod>);
+    let mut on_path: HashSet<String> = HashSet::new();
+    let mut stack: Vec<(&ANFMethod, Option<Info>)> = vec![(method, None)];
+    while let Some(top) = stack.last_mut() {
+        let m = top.0;
+        if memo.contains_key(&m.name) {
+            stack.pop();
+            continue;
+        }
+        if top.1.is_none() {
+            let info = direct(m, private_methods, property_names);
+            on_path.insert(m.name.clone());
+            let pending: Vec<&ANFMethod> = info
+                .1
+                .iter()
+                .copied()
+                .filter(|c| !memo.contains_key(&c.name) && !on_path.contains(&c.name))
+                .collect();
+            top.1 = Some(info);
+            for c in pending {
+                stack.push((c, None));
+            }
+            continue;
+        }
+        let (m, info) = stack.pop().unwrap();
+        let (mut reads, callees) = info.unwrap();
+        for c in callees {
+            if let Some(r) = memo.get(&c.name) {
+                reads.extend(r.iter().cloned());
+            }
+        }
+        for p in &m.params {
+            reads.remove(&p.name);
+        }
+        memo.insert(m.name.clone(), reads);
+        on_path.remove(&m.name);
+    }
+    memo.get(&method.name).cloned().unwrap_or_default()
 }
 
 impl LoweringContext {
@@ -1504,6 +1610,7 @@ impl LoweringContext {
             array_lengths: HashMap::new(),
             array_elements: HashMap::new(),
             renamed_params: HashMap::new(),
+            helper_reads_memo: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
         };
 
         // Issue #130 (stack layer): a method param whose name collides with a
@@ -1969,6 +2076,54 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
         self.sm.pop();
         self.sm.pop();
+    }
+
+    /// The caller-scope slots `method` reads (see `helper_outer_reads`).
+    fn helper_reads(&mut self, method: &ANFMethod) -> HashSet<String> {
+        let props: HashSet<String> = self.properties.iter().map(|p| p.name.clone()).collect();
+        let pm = std::rc::Rc::clone(&self.private_methods);
+        let memo = std::rc::Rc::clone(&self.helper_reads_memo);
+        let mut memo = memo.borrow_mut();
+        helper_outer_reads(method, &pm, &props, &mut memo)
+    }
+
+    /// A `method_call` to a private method at binding `i` (anywhere inside it,
+    /// if arms and loop bodies included) is a use, at `i`, of every
+    /// caller-scope slot the helper reads, so the caller keeps that slot on
+    /// the stack through the call. Only ever moves a last use LATER, and only
+    /// for a slot a helper reads. Mirrors `extendLastUsesForHelpers`.
+    fn extend_last_uses_for_helpers(&mut self, bindings: &[ANFBinding], last_uses: &mut HashMap<String, usize>) {
+        // N-264: an explicit work list over the nesting, not recursion.
+        fn calls<'b>(v: &'b ANFValue, out: &mut Vec<&'b str>) {
+            let mut work = vec![v];
+            while let Some(v) = work.pop() {
+                match v {
+                    ANFValue::MethodCall { method, .. } => out.push(method.as_str()),
+                    ANFValue::If { then, else_branch, .. } => {
+                        work.extend(then.iter().chain(else_branch.iter()).map(|b| &b.value));
+                    }
+                    ANFValue::Loop { body, .. } => work.extend(body.iter().map(|b| &b.value)),
+                    _ => {}
+                }
+            }
+        }
+        let pm = std::rc::Rc::clone(&self.private_methods);
+        for (i, b) in bindings.iter().enumerate() {
+            let mut names = Vec::new();
+            calls(&b.value, &mut names);
+            for m in names {
+                if let Some(callee) = pm.get(m) {
+                    for n in self.helper_reads(callee) {
+                        match last_uses.get(&n) {
+                            Some(&last) if last >= i => {}
+                            _ => {
+                                last_uses.insert(n, i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn is_last_use(&self, name: &str, current_index: usize, last_uses: &HashMap<String, usize>) -> bool {
@@ -3232,7 +3387,20 @@ impl LoweringContext {
             }
         }
 
-        LowerTask::Inline(InlineTask { binding_name, method, shadowed, body_lowered: false })
+        // A caller-scope slot the helper reads and the caller reads again
+        // after this call must survive the helper's body: protect it exactly
+        // as lower_if protects a parent-scope ref still needed after the `if`.
+        // One whose last caller use IS this call may be consumed by the
+        // helper's own last read.
+        let prev_protected = self.outer_protected_refs.clone();
+        let mut protected_refs: HashSet<String> = prev_protected.clone().unwrap_or_default();
+        for n in self.helper_reads(method) {
+            if last_uses.get(&n).map_or(false, |&l| l > binding_index) && self.sm.has(&n) {
+                protected_refs.insert(n);
+            }
+        }
+        let protected = if protected_refs.is_empty() { None } else { Some(protected_refs) };
+        LowerTask::Inline(InlineTask { binding_name, method, shadowed, body_lowered: false, protected, prev_protected })
     }
 
     /// The part of `inline_method_call` after the body is lowered (N-264).
@@ -3430,6 +3598,7 @@ impl LoweringContext {
         // that guard, silently emitted a constant-0 placeholder instead. An arm
         // is not a different scope for inlining.
         then_ctx.private_methods = self.private_methods.clone();
+        then_ctx.helper_reads_memo = std::rc::Rc::clone(&self.helper_reads_memo);
         // N-007 / issue #130: the arm's cloned stack carries the parent's
         // reserved `__param_<name>` slot for a param that shadows a mutable
         // property, so the arm must resolve `load_param` through the same map.
@@ -3498,6 +3667,7 @@ impl LoweringContext {
         else_ctx.outer_protected_refs = Some(protected_refs);
         else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.private_methods = self.private_methods.clone(); // N-051, see then_ctx above
+        else_ctx.helper_reads_memo = std::rc::Rc::clone(&self.helper_reads_memo);
         else_ctx.renamed_params = self.renamed_params.clone(); // N-007, see then_ctx above
         else_ctx.array_elements = self.array_elements.clone(); // F-081, see then_ctx above
         else_ctx.array_lengths = self.array_lengths.clone();
@@ -4187,6 +4357,15 @@ impl LoweringContext {
                 if r.as_str() != iter_var && !deep_body_binding_names.contains(&r) {
                     outer_refs.insert(r);
                 }
+            }
+        }
+        // An inlined helper's caller-scope reads are outer refs of the body
+        // too (see extend_last_uses_for_helpers): the next iteration reads them.
+        let mut helper_uses = HashMap::new();
+        self.extend_last_uses_for_helpers(body, &mut helper_uses);
+        for r in helper_uses.into_keys() {
+            if r.as_str() != iter_var && !deep_body_binding_names.contains(&r) {
+                outer_refs.insert(r);
             }
         }
 

@@ -197,6 +197,20 @@
       "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhR extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  public spend() {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    let lt = extractLocktime(this.txPreimage);\n    if (this.h > 5n) {\n      lt = currentBlockHeight();\n    }\n    assert(lt >= this.h);\n    this.count = this.count + 1n;\n  }\n}\n",
       "file": "Lt.runar.ts",
       "error": "method 'spend' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "current-block-height-ternary-raw-read-other-arm",
+      "method": "spend",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhX extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  public spend(flag: boolean) {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    const v = flag ? currentBlockHeight() : extractLocktime(this.txPreimage);\n    assert(v >= this.h);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'spend' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
+    },
+    {
+      "name": "near-miss-self-pin-inclusive",
+      "method": "spend",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhY extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  public spend(flag: boolean) {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    const lt = extractLocktime(this.txPreimage);\n    assert(lt <= 500000000n);\n    assert(lt >= this.h);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "file": "Lt.runar.ts",
+      "error": "method 'spend' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate"
     }
   ],
   "accept": [
@@ -308,6 +322,36 @@
     {
       "name": "current-block-height-two-calls",
       "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhF extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  public spend() {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    assert(currentBlockHeight() >= this.h);\n    assert(currentBlockHeight() <= this.h + 1000n);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "current-block-height-in-helper",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhH extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  private height(): bigint {\n    return currentBlockHeight();\n  }\n\n  public spend(flag: boolean) {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    assert(this.height() >= this.h);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "current-block-height-in-ternary-arm",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhT extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  public spend(flag: boolean) {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    const v = flag ? currentBlockHeight() : this.h;\n    assert(v >= this.h);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "current-block-height-in-helper-terminal",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhJ extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  private height(): bigint {\n    return currentBlockHeight();\n  }\n\n  public close() {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    assert(this.height() >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "pinned-this-txpreimage-helper-terminal",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhK extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  private height(): bigint {\n    const lt = extractLocktime(this.txPreimage);\n    assert(lt < 500000000n);\n    return lt;\n  }\n\n  public close() {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    assert(this.height() >= this.h);\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "current-block-height-in-helper-terminal-one-arm",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhL extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  private height(): bigint {\n    return currentBlockHeight();\n  }\n\n  public close(flag: boolean) {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    if (flag) {\n      assert(this.height() >= this.h);\n    } else {\n      assert(this.h > 0n);\n    }\n  }\n}\n",
+      "file": "Lt.runar.ts"
+    },
+    {
+      "name": "current-block-height-in-helper-in-loop",
+      "src": "import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';\n\nclass CbhM extends StatefulSmartContract {\n  readonly h: bigint;\n  count: bigint;\n\n  constructor(h: bigint, count: bigint) {\n    super(h, count);\n    this.h = h;\n    this.count = count;\n  }\n\n  private height(): bigint {\n    return currentBlockHeight();\n  }\n\n  public close() {\n    assert(extractSequence(this.txPreimage) !== 0xffffffffn);\n    for (let i = 0n; i < 2n; i++) {\n      assert(this.height() >= this.h + i);\n    }\n    assert(this.h > 0n);\n  }\n}\n",
       "file": "Lt.runar.ts"
     }
   ]

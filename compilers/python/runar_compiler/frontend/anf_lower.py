@@ -1920,8 +1920,12 @@ class _LowerCtx:
         # is a Unix timestamp). One pin per call; emission order matches
         # 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
         # Only valid in StatefulSmartContract methods (typecheck enforces).
+        # The preimage resolves as ``this.txPreimage`` does here: load_param in a
+        # public method, load_prop in a private helper (an inlined helper's
+        # load_param is its own last use of the caller's preimage and consumed it).
         if isinstance(callee, Identifier) and callee.name == "currentBlockHeight":
-            preimage_ref = self.emit(ANFValue(kind="load_param", name="txPreimage"))
+            preimage_kind = "load_param" if self.is_param("txPreimage") else "load_prop"
+            preimage_ref = self.emit(ANFValue(kind=preimage_kind, name="txPreimage"))
             height_ref = self.emit(_make_call("extractLocktime", [preimage_ref]))
             threshold_ref = self.emit(_make_load_const_int(500000000))
             in_domain_ref = self.emit(ANFValue(kind="bin_op", op="<", left=height_ref, right=threshold_ref))

@@ -2051,8 +2051,12 @@ module RunarCompiler
         # is a Unix timestamp). One pin per call; emission order matches
         # 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
         # Only valid in StatefulSmartContract methods (typecheck enforces).
+        # The preimage resolves as this.txPreimage does here: load_param in a
+        # public method, load_prop in a private helper (an inlined helper's
+        # load_param is its own last use of the caller's preimage and consumed it).
         if callee.is_a?(Identifier) && callee.name == "currentBlockHeight"
-          preimage_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
+          preimage_kind = param?("txPreimage") ? "load_param" : "load_prop"
+          preimage_ref = emit(IR::ANFValue.new(kind: preimage_kind).tap { |v| v.name = "txPreimage" })
           height_ref = emit(Frontend._make_call("extractLocktime", [preimage_ref]))
           threshold_ref = emit(Frontend._make_load_const_int(500_000_000))
           in_domain_ref = emit(IR::ANFValue.new(kind: "bin_op").tap do |v|

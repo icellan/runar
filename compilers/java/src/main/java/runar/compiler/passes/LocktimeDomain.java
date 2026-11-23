@@ -3,8 +3,10 @@ package runar.compiler.passes;
 import java.math.BigInteger;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -561,13 +563,40 @@ public final class LocktimeDomain {
         return null;
     }
 
+    /**
+     * {@code bs[i]} is the ANF image of {@code currentBlockHeight()}
+     * ({@link AnfLower}): a {@code call extractLocktime} followed in the same
+     * block by {@code load_const 500000000; bin_op < (bs[i], that const);
+     * assert (that compare)}. The assert runs on every path through the block
+     * before any later use, so the read is a height by construction and the
+     * --ir path does not count it as a locktime read (nothing derived from it
+     * is a gate), as the source path does not count currentBlockHeight(). Its
+     * assert still counts as a pin. Matches only that exact four-binding
+     * shape. Mirrors isSelfPinnedLocktimeRead.
+     */
+    static boolean isSelfPinnedLocktimeRead(List<AnfBinding> bs, int i) {
+        if (bs == null || i + 3 >= bs.size()) return false;
+        AnfBinding r = bs.get(i);
+        AnfBinding l = bs.get(i + 1);
+        AnfBinding c = bs.get(i + 2);
+        AnfBinding a = bs.get(i + 3);
+        return r.value() instanceof Call call && "extractLocktime".equals(call.func())
+            && l.value() instanceof LoadConst lc && lc.value() instanceof BigIntConst bi
+            && bi.value().equals(BigInteger.valueOf(500_000_000L))
+            && c.value() instanceof BinOp cmp && "<".equals(cmp.op())
+            && r.name().equals(cmp.left()) && l.name().equals(cmp.right())
+            && a.value() instanceof Assert as && c.name().equals(as.value());
+    }
+
     private static boolean readsIr(List<AnfBinding> body) {
         ArrayDeque<List<AnfBinding>> work = new ArrayDeque<>();
         if (body != null) work.push(body);
         while (!work.isEmpty()) {
-            for (AnfBinding b : work.pop()) {
+            List<AnfBinding> bs = work.pop();
+            for (int i = 0; i < bs.size(); i++) {
+                AnfBinding b = bs.get(i);
                 AnfValue v = b.value();
-                if (v instanceof Call c && "extractLocktime".equals(c.func())) return true;
+                if (v instanceof Call c && "extractLocktime".equals(c.func()) && !isSelfPinnedLocktimeRead(bs, i)) return true;
                 if (v instanceof If iff) {
                     if (iff.thenBranch() != null) work.push(iff.thenBranch());
                     if (iff.elseBranch() != null) work.push(iff.elseBranch());
@@ -637,16 +666,31 @@ public final class LocktimeDomain {
         /** Every binding of the method, by name (a name bound more than once keeps all its values). */
         private final Map<String, List<AnfValue>> defs = new HashMap<>();
         private final Map<String, Integer> taint;
+        /**
+         * The {@code bin_op <} of each currentBlockHeight() image: its read is
+         * no locktime read, but its assert still pins the domain on its path
+         * (the pin bounds the transaction's nLockTime, whichever read it is
+         * spelled on). By identity (ANF values are records).
+         */
+        private final Set<AnfValue> selfPinCompares = Collections.newSetFromMap(new IdentityHashMap<>());
 
         IrGates(IrProgram prog, AnfMethod method, Map<String, Integer> params) {
             this.prog = prog;
             List<String> names = new ArrayList<>();
             List<AnfValue> vals = new ArrayList<>();
+            // currentBlockHeight()'s reads: not locktime reads. By identity.
+            Set<AnfValue> selfPinned = Collections.newSetFromMap(new IdentityHashMap<>());
             ArrayDeque<List<AnfBinding>> work = new ArrayDeque<>();
             if (method.body() != null) work.add(method.body());
             // Breadth-first indexing: the binding order solveTaint sees does not change its result.
             while (!work.isEmpty()) {
-                for (AnfBinding b : work.poll()) {
+                List<AnfBinding> block = work.poll();
+                for (int i = 0; i < block.size(); i++) {
+                    AnfBinding b = block.get(i);
+                    if (isSelfPinnedLocktimeRead(block, i)) {
+                        selfPinned.add(b.value());
+                        selfPinCompares.add(block.get(i + 2).value());
+                    }
                     defs.computeIfAbsent(b.name(), k -> new ArrayList<>()).add(b.value());
                     names.add(b.name());
                     vals.add(b.value());
@@ -665,7 +709,7 @@ public final class LocktimeDomain {
                     String r = refOf(v);
                     if (r != null) return t.contains(r);
                     if (v instanceof Call c) {
-                        if ("extractLocktime".equals(c.func())) return true;
+                        if ("extractLocktime".equals(c.func()) && !selfPinned.contains(v)) return true;
                         for (String a : c.args()) if (t.contains(a)) return true;
                         return false;
                     }
@@ -682,7 +726,7 @@ public final class LocktimeDomain {
                 (v, d) -> {
                     String r = refOf(v);
                     if (r != null) return d.contains(r);
-                    if (v instanceof Call c) return "extractLocktime".equals(c.func());
+                    if (v instanceof Call c) return "extractLocktime".equals(c.func()) && !selfPinned.contains(v);
                     if (v instanceof LoadParam lp) return params.getOrDefault(lp.name(), NONE) == DIRECT;
                     return false;
                 });
@@ -728,7 +772,7 @@ public final class LocktimeDomain {
                 if (name == null || !seen.add(name)) continue;
                 AnfValue v = single(name);
                 if (v == null) continue;
-                if (compare(v) == Cls.PIN) return true;
+                if (compare(v) == Cls.PIN || selfPinCompares.contains(v)) return true;
                 String r = refOf(v);
                 if (r != null) {
                     work.push(r);

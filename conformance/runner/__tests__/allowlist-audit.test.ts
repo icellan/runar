@@ -197,7 +197,12 @@ describe('conformance allowlist audit', () => {
   // Move, Go, Rust-DSL and Zig surfaces have no conditional expression -- `if`
   // is a statement there -- so there is nothing for them to spell. All seven
   // compilers stay full hex/ANF parity targets for the five surfaces.
+  //
+  // `current-block-height-helper-ternary` follows it for the same reason: it
+  // pins currentBlockHeight() in a ternary arm (and in a private helper), so
+  // it ships only the five surfaces with a conditional expression.
   const APPROVED_PARSER_SKIPS: Record<string, string[]> = {
+    'current-block-height-helper-ternary': ['.runar.go', '.runar.move', '.runar.rs', '.runar.zig'],
     'embed-always-fixed-array': ['.runar.java'],
     'fixed-array-index': ['.runar.java'],
     'fixed-array-write': ['.runar.java'],

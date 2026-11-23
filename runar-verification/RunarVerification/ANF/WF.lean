@@ -358,7 +358,7 @@ def methodIsWF (props : List ANFProperty) (m : ANFMethod) (implicitParams : List
   let readonlyProps := (props.filter (·.readonly)).map ANFProperty.name
   let env : ScopeEnv :=
     { params := m.params.map (·.name) ++ implicitParams
-      props := propNames
+      props := propNames ++ implicitParams
       defined := []
       readonlyProps := readonlyProps }
   bindingsAreWF env m.body && methodSSAUnique m
@@ -366,11 +366,15 @@ def methodIsWF (props : List ANFProperty) (m : ANFMethod) (implicitParams : List
 /--
 Implicit parameters a method may reference without declaring them. A
 private helper of a StatefulSmartContract is inlined into its public
-callers, and `this.txPreimage` in it lowers to `load_param txPreimage`, the
-caller's implicit preimage (D25: an `addOutput` in a helper appends
-`sha256(extractOutpoint(txPreimage))`). The program is stateful exactly
-when some public method declares `txPreimage`; a public method and the
-constructor get nothing implicit.
+callers and reads the caller's implicit preimage under both spellings the
+seven compilers emit: `load_param txPreimage` (D25: an `addOutput` in a
+helper appends `sha256(extractOutpoint(txPreimage))`) and
+`load_prop txPreimage` (`this.txPreimage`, and `currentBlockHeight()`, in a
+helper: `txPreimage` is no param of the helper, so the property-access
+lowering falls through to `load_prop`). `methodIsWF` admits an implicit
+name in both scopes. The program is stateful exactly when some public
+method declares `txPreimage`; a public method and the constructor get
+nothing implicit.
 -/
 def privateImplicitParams (p : ANFProgram) (m : ANFMethod) : List String :=
   if !m.isPublic && m.name != "constructor"

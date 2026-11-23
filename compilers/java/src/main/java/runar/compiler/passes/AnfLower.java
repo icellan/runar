@@ -2425,7 +2425,13 @@ public final class AnfLower {
             // methods (typecheck enforces).
             if (callee instanceof Identifier cbhId
                 && "currentBlockHeight".equals(cbhId.name())) {
-                String preimageRef = emit(new LoadParam("txPreimage"));
+                // The preimage resolves as this.txPreimage does here:
+                // load_param in a public method, load_prop in a private helper
+                // (an inlined helper's load_param is its own last use of the
+                // caller's preimage and consumed it).
+                String preimageRef = isParam("txPreimage")
+                    ? emit(new LoadParam("txPreimage"))
+                    : emit(new LoadProp("txPreimage"));
                 String heightRef = emit(new Call("extractLocktime", List.of(preimageRef)));
                 String thresholdRef = emit(makeLoadConstInt(BigInteger.valueOf(500_000_000L)));
                 String inDomainRef = emit(new BinOp("<", heightRef, thresholdRef, null));

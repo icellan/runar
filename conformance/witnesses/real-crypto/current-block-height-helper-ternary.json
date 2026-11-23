@@ -1,0 +1,49 @@
+{
+  "fixture": "current-block-height-helper-ternary",
+  "kind": "stateful",
+  "note": "spend(): assert(this.height() >= start), where the private helper height() returns currentBlockHeight(), then h = count > 5 ? currentBlockHeight() : start with assert(h >= start), then count++. count is 10, so the ternary takes its currentBlockHeight() arm: both the inlined helper call and the ternary arm read the nLockTime and pin it < 500000000. The call nLockTime is threaded via CallOptions.locktime. Real checkPreimage continuation: the helper's preimage read must not consume the caller's preimage, or the continuation could not be built.",
+  "constructorArgs": [
+    "100n",
+    "10n"
+  ],
+  "signerKey": "alice",
+  "spends": [
+    {
+      "method": "spend",
+      "args": [],
+      "lockTime": 500000,
+      "expect": "accept",
+      "note": "height 500000 >= start 100 through the helper and the ternary arm, count 10->11",
+      "expectedState": {
+        "count": "11n"
+      }
+    },
+    {
+      "method": "spend",
+      "args": [],
+      "lockTime": 500000000,
+      "expect": "reject",
+      "note": "nLockTime 500000000 is a Unix timestamp: refused by the currentBlockHeight() height-domain pin although it is >= start"
+    },
+    {
+      "method": "spend",
+      "args": [],
+      "lockTime": 99,
+      "expect": "reject",
+      "note": "height 99 < start 100: the helper's lower-bound gate refuses"
+    },
+    {
+      "method": "spend",
+      "args": [],
+      "lockTime": 500000,
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered continuation output"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "2bc0e4f6abbb6c3d54e766557a03680e1527f52fdd8173f30a0f11573600ed6d",
+    "expected-ir.json": "fb9327ff01b3b4135f2ee3207696a87285cbcfe0ccfcaee86682614f85cc4438"
+  }
+}

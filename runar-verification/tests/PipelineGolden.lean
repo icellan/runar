@@ -781,15 +781,22 @@ the constants had been honest all along.
 -- v1:65f:7265545b:740cdff55a73544a. Eval is not on the compile path; a full live regen of the merged
 -- model returned all three `.regenLive` anchors `[fresh]` and byte-equal to
 -- their expected-script.hex, so only their fingerprints move (80/100).
+-- 2026-11-23: ANF/WF.lean admits the caller's implicit txPreimage in a stateful
+-- private helper under `load_prop` too (`this.txPreimage` and
+-- `currentBlockHeight()` in a helper lower to it in every tier), moving the
+-- fingerprint to v1:65f:7265823b:a0b6499a8b856f41. WF is not on the compile
+-- path; a live regen of the three `.regenLive` anchors (shards 1, 8, 22 of 22)
+-- returned each `[fresh]` and byte-equal to its expected-script.hex, so only
+-- their fingerprints move (81/101).
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:65f:7265545b:740cdff55a73544a"⟩,
+  ⟨"babybear", .regenLive, "v1:65f:7265823b:a0b6499a8b856f41"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:65f:7265545b:740cdff55a73544a"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:65f:7265823b:a0b6499a8b856f41"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -812,7 +819,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:65f:7265545b:740cdff55a73544a"⟩,
+  ⟨"state-covenant", .regenLive, "v1:65f:7265823b:a0b6499a8b856f41"⟩,
 ]
 
 /--
@@ -975,7 +982,11 @@ number. It is pinned from both sides:
 -- 2026-11-16 (GK-GAP-003): `ternary-expression` (byte-exact, baselineMatches;
 -- the first fixture pinning a surface-level conditional expression):
 -- 80 = baselineMatches (77) + (22 - 19).
-def expectedByteExact : Nat := 80
+--
+-- 2026-11-23: `current-block-height-helper-ternary` (byte-exact,
+-- baselineMatches; currentBlockHeight() in a private helper and a ternary arm):
+-- 81 = baselineMatches (78) + (22 - 19).
+def expectedByteExact : Nat := 81
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -1006,8 +1017,10 @@ compiles to `OP_RUNAR_UNKNOWN_BUILTIN` and is not byte-exact).
 (in `baselineMatches`; pins the fused OP_CHECKMULTISIGVERIFY).
 2026-11-16 (GK-GAP-003): 99 -> 100 for `ternary-expression` (in
 `baselineMatches`; bigint, ByteString and nested conditional-expression arms).
+2026-11-23: 100 -> 101 for `current-block-height-helper-ternary` (in
+`baselineMatches`; currentBlockHeight() in a private helper and a ternary arm).
 -/
-def expectedFixtureTotal : Nat := 100
+def expectedFixtureTotal : Nat := 101
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -1034,6 +1047,7 @@ def baselineMatches : List String := [
   "countdown-loop",
   "covenant-vault",
   "cross-covenant",
+  "current-block-height-helper-ternary",
   "embed-always-fixed-array",
   "escrow",
   "fixed-array-index",
@@ -1411,7 +1425,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 100 := by rfl
+        + lowerDivergencePending.length = 101 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

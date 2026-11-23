@@ -2896,8 +2896,14 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     // is a Unix timestamp). One pin per call; emission order matches
     // 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
     // Only valid in StatefulSmartContract methods (typecheck enforces).
+    // The preimage resolves as `this.txPreimage` does here: load_param in a
+    // public method, load_prop in a private helper (an inlined helper's
+    // load_param is its own last use of the caller's preimage and consumed it).
     if (std.mem.eql(u8, c.callee, "currentBlockHeight")) {
-        const preimage_ref = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
+        const preimage_ref = if (ctx.isParam("txPreimage"))
+            try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } })
+        else
+            try ctx.emit(.{ .load_prop = .{ .name = "txPreimage" } });
         const height_ref = try ctx.emit(.{ .call = .{
             .func = "extractLocktime",
             .args = try ctx.allocSlice(&.{preimage_ref}),

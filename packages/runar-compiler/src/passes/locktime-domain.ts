@@ -447,12 +447,39 @@ function collectLocktimeLocals(body: Statement[], params: Map<string, number>): 
  * compare, or to the `&&` lowering (a value `if` whose `else` arm is the
  * constant `false`) of a chain with a pin conjunct.
  */
+/**
+ * The ANF image of `currentBlockHeight()` (04-anf-lower.ts): `bs[i]` is a
+ * `call extractLocktime` and the next three bindings of the same block are
+ * `load_const 500000000; bin_op < (bs[i], that const); assert (that compare)`.
+ * The assert runs on every path through the block and before any later use of
+ * the read, so the read is a height by construction: the --ir path does not
+ * count it as a locktime read (nothing derived from it is a gate), as the
+ * source path does not count currentBlockHeight(), so a ternary arm holding
+ * one no longer taints the other arm's path. Its assert still counts as a pin.
+ * Matches only that exact four-binding shape.
+ */
+export function isSelfPinnedLocktimeRead(bs: ANFBinding[], i: number): boolean {
+  const [read, lit, cmp, pin] = [bs[i], bs[i + 1], bs[i + 2], bs[i + 3]];
+  if (!read || !lit || !cmp || !pin) return false;
+  const r = read.value;
+  const l = lit.value;
+  const c = cmp.value;
+  const a = pin.value;
+  return (
+    r.kind === 'call' && r.func === 'extractLocktime' &&
+    l.kind === 'load_const' && typeof l.value === 'bigint' && l.value === LOCKTIME_THRESHOLD &&
+    c.kind === 'bin_op' && c.op === '<' && c.left === read.name && c.right === lit.name &&
+    a.kind === 'assert' && a.value === cmp.name
+  );
+}
+
 export function assertIrLocktimeDomain(program: ANFProgram): void {
-  // Prefilter (as contractReadsLocktime): no extractLocktime call, no gate.
+  // Prefilter (as contractReadsLocktime): no extractLocktime call that is not
+  // currentBlockHeight()'s self-pinned one, no gate.
   const reads = (bs: ANFBinding[]): boolean =>
-    bs.some((b) => {
+    bs.some((b, i) => {
       const v = b.value;
-      if (v.kind === 'call') return v.func === 'extractLocktime';
+      if (v.kind === 'call') return v.func === 'extractLocktime' && !isSelfPinnedLocktimeRead(bs, i);
       if (v.kind === 'if') return reads(v.then) || reads(v.else);
       if (v.kind === 'loop') return reads(v.body);
       return false;
@@ -499,7 +526,11 @@ class IrGates {
     private readonly helperExits: (name: string, argLevels: number[]) => Set<number> | undefined,
   ) {
     const index = (bs: ANFBinding[]): void => {
-      for (const b of bs) {
+      for (const [i, b] of bs.entries()) {
+        if (isSelfPinnedLocktimeRead(bs, i)) {
+          selfPinned.add(b.value);
+          this.selfPinCompares.add(bs[i + 2]!.value);
+        }
         const list = this.defs.get(b.name) ?? [];
         list.push(b.value);
         this.defs.set(b.name, list);
@@ -510,6 +541,8 @@ class IrGates {
         } else if (v.kind === 'loop') index(v.body);
       }
     };
+    // currentBlockHeight()'s reads: not locktime reads (isSelfPinnedLocktimeRead).
+    const selfPinned = new Set<ANFValue>();
     index(method.body);
     const binds: Array<[string, ANFValue]> = [];
     for (const [n, vs] of this.defs) for (const v of vs) binds.push([n, v]);
@@ -523,7 +556,7 @@ class IrGates {
         if (r !== undefined) return t.has(r);
         switch (v.kind) {
           case 'call':
-            return v.func === 'extractLocktime' || v.args.some((a) => t.has(a));
+            return (v.func === 'extractLocktime' && !selfPinned.has(v)) || v.args.some((a) => t.has(a));
           case 'load_param':
             return (params.get(v.name) ?? NONE) !== NONE;
           case 'bin_op':
@@ -539,12 +572,21 @@ class IrGates {
       (v, d) => {
         const r = ref(v);
         if (r !== undefined) return d.has(r);
-        if (v.kind === 'call') return v.func === 'extractLocktime';
+        if (v.kind === 'call') return v.func === 'extractLocktime' && !selfPinned.has(v);
         if (v.kind === 'load_param') return params.get(v.name) === DIRECT;
         return false;
       },
     );
   }
+
+  /**
+   * The `bin_op <` of each currentBlockHeight() image. Its read is no
+   * locktime read (no gate can derive from it), but its assert still PINS the
+   * domain on its path, exactly as the same compare written by hand did
+   * before: the pin bounds the transaction's nLockTime, whichever read it is
+   * spelled on.
+   */
+  private readonly selfPinCompares = new Set<ANFValue>();
 
   /** Taint level of every temp (solveTaint over the method's bindings). */
   private readonly taint: Map<string, number>;
@@ -572,7 +614,7 @@ class IrGates {
     const vs = this.defs.get(name) ?? [];
     if (vs.length !== 1) return false;
     const v = vs[0]!;
-    if (this.compare(v) === 'pin') return true;
+    if (this.compare(v) === 'pin' || this.selfPinCompares.has(v)) return true;
     if (v.kind === 'load_const' && typeof v.value === 'string' && v.value.startsWith('@ref:')) {
       return this.assertedPin(v.value.slice(5), seen);
     }

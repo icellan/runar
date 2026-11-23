@@ -600,6 +600,82 @@ public final class StackLower {
     // Last-use analysis
     // ------------------------------------------------------------------
 
+    /**
+     * The caller-scope stack slots a private method reads: every
+     * {@code load_param} name that is not one of its own parameters and every
+     * {@code load_prop} name that is not a contract property
+     * ({@code this.txPreimage} and {@code currentBlockHeight()} in a helper
+     * lower to {@code load_prop txPreimage}, the CALLER's preimage slot),
+     * including what the helpers it calls read, minus its own parameters
+     * (bound by the call). Searched through if arms and loop bodies. Private
+     * methods are inlined, so these are reads of the caller's slots at the
+     * call site; {@code collectRefs} of a {@code method_call} is its arguments
+     * only, so without {@code extendLastUsesForHelpers} the caller consumed its
+     * preimage before the helper read it. N-264: an explicit work list over
+     * both the nesting and the call graph; a call cycle ({@code --ir} only)
+     * contributes nothing. Mirrors helperOuterReads in 05-stack-lower.ts.
+     */
+    static Set<String> helperOuterReads(AnfMethod method, Map<String, AnfMethod> privateMethods,
+                                        Set<String> propertyNames, Map<String, Set<String>> memo) {
+        final class Frame {
+            final AnfMethod m;
+            Set<String> reads;
+            List<AnfMethod> callees;
+            Frame(AnfMethod m) { this.m = m; }
+        }
+        Set<String> onPath = new java.util.HashSet<>();
+        java.util.ArrayDeque<Frame> stack = new java.util.ArrayDeque<>();
+        stack.push(new Frame(method));
+        while (!stack.isEmpty()) {
+            Frame top = stack.peek();
+            if (memo.containsKey(top.m.name())) {
+                stack.pop();
+                continue;
+            }
+            if (top.reads == null) {
+                top.reads = new java.util.HashSet<>();
+                top.callees = new ArrayList<>();
+                java.util.ArrayDeque<List<AnfBinding>> work = new java.util.ArrayDeque<>();
+                if (top.m.body() != null) work.push(top.m.body());
+                while (!work.isEmpty()) {
+                    for (AnfBinding b : work.pop()) {
+                        AnfValue v = b.value();
+                        if (v instanceof LoadParam lp) {
+                            top.reads.add(lp.name());
+                        } else if (v instanceof LoadProp lp) {
+                            if (!propertyNames.contains(lp.name())) top.reads.add(lp.name());
+                        } else if (v instanceof If iff) {
+                            if (iff.thenBranch() != null) work.push(iff.thenBranch());
+                            if (iff.elseBranch() != null) work.push(iff.elseBranch());
+                        } else if (v instanceof Loop lp) {
+                            if (lp.body() != null) work.push(lp.body());
+                        } else if (v instanceof MethodCall mc) {
+                            AnfMethod callee = privateMethods.get(mc.method());
+                            if (callee != null) top.callees.add(callee);
+                        }
+                    }
+                }
+                onPath.add(top.m.name());
+                for (AnfMethod c : top.callees) {
+                    if (!memo.containsKey(c.name()) && !onPath.contains(c.name())) stack.push(new Frame(c));
+                }
+                continue;
+            }
+            stack.pop();
+            Set<String> reads = new java.util.HashSet<>(top.reads);
+            for (AnfMethod c : top.callees) {
+                Set<String> r = memo.get(c.name());
+                if (r != null) reads.addAll(r);
+            }
+            if (top.m.params() != null) {
+                for (var p : top.m.params()) reads.remove(p.name());
+            }
+            memo.put(top.m.name(), reads);
+            onPath.remove(top.m.name());
+        }
+        return memo.getOrDefault(method.name(), Set.of());
+    }
+
     static Map<String, Integer> computeLastUses(List<AnfBinding> bindings) {
         return computeLastUses(bindings, null);
     }
@@ -1371,6 +1447,11 @@ public final class StackLower {
         Map<String, AnfMethod> privateMethods = new HashMap<>();
         Map<String, Boolean> localBindings = new HashMap<>();
         Set<String> outerProtectedRefs;
+        /**
+         * Memo for {@link #helperOuterReads}, per private method name; shared
+         * by every branch-arm context of one contract (like privateMethods).
+         */
+        Map<String, Set<String>> helperReadsMemo = new HashMap<>();
         boolean insideBranch;
         /**
          * R-010, contract-level: true when ANY public method of this contract
@@ -1435,6 +1516,45 @@ public final class StackLower {
 
         void trackDepth() {
             if (sm.depth() > maxDepth) maxDepth = sm.depth();
+        }
+
+        /** The caller-scope slots {@code method} reads (see {@link #helperOuterReads}). */
+        Set<String> helperReads(AnfMethod method) {
+            Set<String> props = new java.util.HashSet<>();
+            if (properties != null) for (AnfProperty p : properties) props.add(p.name());
+            return helperOuterReads(method, privateMethods, props, helperReadsMemo);
+        }
+
+        /**
+         * A {@code method_call} to a private method at binding {@code i}
+         * (anywhere inside it, if arms and loop bodies included) is a use, at
+         * {@code i}, of every caller-scope slot the helper reads, so the caller
+         * keeps that slot on the stack through the call. Only ever moves a last
+         * use LATER, and only for a slot a helper reads. Mirrors
+         * extendLastUsesForHelpers.
+         */
+        void extendLastUsesForHelpers(List<AnfBinding> bindings, Map<String, Integer> lastUses) {
+            // N-264: an explicit work list over the nesting, not recursion.
+            for (int i = 0; i < bindings.size(); i++) {
+                java.util.ArrayDeque<AnfValue> work = new java.util.ArrayDeque<>();
+                work.push(bindings.get(i).value());
+                while (!work.isEmpty()) {
+                    AnfValue v = work.pop();
+                    if (v instanceof MethodCall mc) {
+                        AnfMethod callee = privateMethods.get(mc.method());
+                        if (callee == null) continue;
+                        for (String n : helperReads(callee)) {
+                            Integer last = lastUses.get(n);
+                            if (last == null || last < i) lastUses.put(n, i);
+                        }
+                    } else if (v instanceof If iff) {
+                        if (iff.thenBranch() != null) for (AnfBinding b : iff.thenBranch()) work.push(b.value());
+                        if (iff.elseBranch() != null) for (AnfBinding b : iff.elseBranch()) work.push(b.value());
+                    } else if (v instanceof Loop lp) {
+                        if (lp.body() != null) for (AnfBinding b : lp.body()) work.push(b.value());
+                    }
+                }
+            }
         }
 
         void emitOp(StackOp op) {
@@ -1529,6 +1649,7 @@ public final class StackLower {
             LoweringContext c = new LoweringContext(null, properties);
             c.sm.slots.addAll(this.sm.slots);
             c.privateMethods = this.privateMethods;
+            c.helperReadsMemo = this.helperReadsMemo; // shared: one contract
             // Issue #130: a `load_param` for a shadowed param inside a branch
             // body must resolve to the same reserved renamed slot the parent set
             // up (the parent copied its renamed slot names into c.sm above).
@@ -1959,6 +2080,7 @@ public final class StackLower {
                     for (AnfBinding b : bindings) localBindings.put(b.name(), true);
 
                     lastUses = computeLastUses(bindings, inheritedArrays);
+                    extendLastUsesForHelpers(bindings, lastUses);
 
                     if (outerProtectedRefs != null) {
                         for (String ref : outerProtectedRefs) {
@@ -3321,6 +3443,7 @@ public final class StackLower {
             private final Map<String, Integer> lastUses;
             private final List<Map<String, String>> shadowed = new ArrayList<>();
             private boolean bodyLowered;
+            private Set<String> prevProtected;
 
             InlineTask(String bindingName, AnfMethod m, List<String> args,
                        int idx, Map<String, Integer> lastUses) {
@@ -3336,8 +3459,22 @@ public final class StackLower {
                 if (!bodyLowered) {
                     bodyLowered = true;
                     inlineMethodCallHead(bindingName, m, args, idx, lastUses, shadowed);
+                    // A caller-scope slot the helper reads and the caller reads
+                    // again after this call must survive the helper's body:
+                    // protect it exactly as lowerIf protects a parent-scope ref
+                    // still needed after the `if`. One whose last caller use IS
+                    // this call may be consumed by the helper's own last read.
+                    prevProtected = outerProtectedRefs;
+                    Set<String> protectedRefs = new java.util.HashSet<>();
+                    if (prevProtected != null) protectedRefs.addAll(prevProtected);
+                    for (String n : helperReads(m)) {
+                        Integer last = lastUses.get(n);
+                        if (last != null && last > idx && sm.has(n)) protectedRefs.add(n);
+                    }
+                    if (!protectedRefs.isEmpty()) outerProtectedRefs = protectedRefs;
                     return new BindingsTask(m.body(), false, null);
                 }
+                outerProtectedRefs = prevProtected;
                 inlineMethodCallTail(bindingName, m, shadowed);
                 return null;
             }
@@ -4323,6 +4460,14 @@ public final class StackLower {
                             }
                         }
                     }
+                    // An inlined helper's caller-scope reads are outer refs of the
+                    // body too (see extendLastUsesForHelpers): the next iteration
+                    // reads them again.
+                    Map<String, Integer> helperUses = new HashMap<>();
+                    extendLastUsesForHelpers(body, helperUses);
+                    for (String ref : helperUses.keySet()) {
+                        if (!ref.equals(iterVar) && !deepBodyBindingNames.contains(ref)) outerRefs.add(ref);
+                    }
 
                     // A local the body REBINDS and then READS AGAIN in the same
                     // iteration is carried across iterations through the rebound slot,
@@ -4369,6 +4514,7 @@ public final class StackLower {
                             start.add(BigInteger.valueOf((long) i * step)))));
                         sm.push(iterVar);
                         lastUses = computeLastUses(body, outerArrays);
+                        extendLastUsesForHelpers(body, lastUses);
 
                         // Prevent outer-scope refs from being consumed by setting their
                         // last-use beyond any body binding index:

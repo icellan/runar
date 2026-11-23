@@ -617,14 +617,36 @@ fn ref_of(v: &ANFValue) -> Option<&str> {
     }
 }
 
+/// `bs[i]` is the ANF image of `currentBlockHeight()` (anf_lower.rs): a
+/// `call extractLocktime` followed in the same block by `load_const 500000000;
+/// bin_op < (bs[i], that const); assert (that compare)`. The assert runs on
+/// every path through the block before any later use, so the read is a height
+/// by construction and the `--ir` path does not count it as a locktime read
+/// (nothing derived from it is a gate), as the source path does not count
+/// `currentBlockHeight()`. Its assert still counts as a pin. Matches only that
+/// exact four-binding shape. Mirrors `isSelfPinnedLocktimeRead`.
+pub fn is_self_pinned_locktime_read(bs: &[ANFBinding], i: usize) -> bool {
+    if i + 3 >= bs.len() {
+        return false;
+    }
+    let (r, l, c, a) = (&bs[i], &bs[i + 1], &bs[i + 2], &bs[i + 3]);
+    matches!(&r.value, ANFValue::Call { func, .. } if func == "extractLocktime")
+        && matches!(&l.value, ANFValue::LoadConst { .. })
+        && matches!(l.value.const_value(), Some(ConstValue::Int(n)) if n == BigInt::from(500_000_000i64))
+        && matches!(&c.value, ANFValue::BinOp { op, left, right, .. }
+            if op == "<" && *left == r.name && *right == l.name)
+        && matches!(&a.value, ANFValue::Assert { value, .. } if *value == c.name)
+}
+
 /// D26 on the `--ir` path: `--ir` skips typecheck, so the rule is re-derived
 /// from the ANF of every public method (stateless and stateful). Mirrors
 /// `assertIrLocktimeDomain`.
 pub fn assert_ir_locktime_domain(program: &ANFProgram) -> Result<(), String> {
-    // Prefilter (as contract_reads_locktime): no extractLocktime call, no gate.
+    // Prefilter (as contract_reads_locktime): no extractLocktime call that is
+    // not currentBlockHeight()'s self-pinned one, no gate.
     fn reads(bs: &[ANFBinding]) -> bool {
-        bs.iter().any(|b| match &b.value {
-            ANFValue::Call { func, .. } => func == "extractLocktime",
+        bs.iter().enumerate().any(|(i, b)| match &b.value {
+            ANFValue::Call { func, .. } => func == "extractLocktime" && !is_self_pinned_locktime_read(bs, i),
             ANFValue::If { then, else_branch, .. } => reads(then) || reads(else_branch),
             ANFValue::Loop { body, .. } => reads(body),
             _ => false,
@@ -688,27 +710,45 @@ struct IrGates<'a> {
     defs: HashMap<&'a str, Vec<&'a ANFValue>>,
     /// Taint level of every temp.
     taint: HashMap<String, u8>,
+    /// The `bin_op <` of each currentBlockHeight() image: its read is no
+    /// locktime read, but its assert still pins the domain on its path (the
+    /// pin bounds the transaction's nLockTime, whichever read it is spelled on).
+    self_pin_compares: HashSet<*const ANFValue>,
 }
 
 impl<'a> IrGates<'a> {
     fn new(method: &'a ANFMethod, params: &HashMap<String, u8>) -> Self {
-        fn index<'a>(bs: &'a [ANFBinding], defs: &mut HashMap<&'a str, Vec<&'a ANFValue>>, binds: &mut Vec<(String, &'a ANFValue)>) {
-            for b in bs {
+        type Pinned = (HashSet<*const ANFValue>, HashSet<*const ANFValue>);
+        fn index<'a>(
+            bs: &'a [ANFBinding],
+            defs: &mut HashMap<&'a str, Vec<&'a ANFValue>>,
+            binds: &mut Vec<(String, &'a ANFValue)>,
+            pinned: &mut Pinned,
+        ) {
+            for (i, b) in bs.iter().enumerate() {
+                if is_self_pinned_locktime_read(bs, i) {
+                    pinned.0.insert(&b.value as *const ANFValue);
+                    pinned.1.insert(&bs[i + 2].value as *const ANFValue);
+                }
                 defs.entry(b.name.as_str()).or_default().push(&b.value);
                 binds.push((b.name.clone(), &b.value));
                 match &b.value {
                     ANFValue::If { then, else_branch, .. } => {
-                        index(then, defs, binds);
-                        index(else_branch, defs, binds);
+                        index(then, defs, binds, pinned);
+                        index(else_branch, defs, binds, pinned);
                     }
-                    ANFValue::Loop { body, .. } => index(body, defs, binds),
+                    ANFValue::Loop { body, .. } => index(body, defs, binds, pinned),
                     _ => {}
                 }
             }
         }
         let mut defs = HashMap::new();
         let mut binds = Vec::new();
-        index(&method.body, &mut defs, &mut binds);
+        // currentBlockHeight()'s reads (not locktime reads) and their compares.
+        let mut pinned: Pinned = (HashSet::new(), HashSet::new());
+        index(&method.body, &mut defs, &mut binds, &mut pinned);
+        let (self_pinned, self_pin_compares) = pinned;
+        let raw_read = |v: &ANFValue| !self_pinned.contains(&(v as *const ANFValue));
         let last = |arm: &[ANFBinding]| arm.last().map(|b| b.name.clone());
         let taint = solve_taint(
             &binds,
@@ -717,7 +757,9 @@ impl<'a> IrGates<'a> {
                     return t.contains(r);
                 }
                 match v {
-                    ANFValue::Call { func, args, .. } => func == "extractLocktime" || args.iter().any(|a| t.contains(a)),
+                    ANFValue::Call { func, args, .. } => {
+                        (func == "extractLocktime" && raw_read(v)) || args.iter().any(|a| t.contains(a))
+                    }
                     ANFValue::LoadParam { name } => params.get(name).copied().unwrap_or(NONE) != NONE,
                     ANFValue::BinOp { op, left, right, .. } => propagates(op) && (t.contains(left) || t.contains(right)),
                     ANFValue::UnaryOp { op, operand, .. } => propagates_unary(op) && t.contains(operand),
@@ -732,13 +774,13 @@ impl<'a> IrGates<'a> {
                     return d.contains(r);
                 }
                 match v {
-                    ANFValue::Call { func, .. } => func == "extractLocktime",
+                    ANFValue::Call { func, .. } => func == "extractLocktime" && raw_read(v),
                     ANFValue::LoadParam { name } => params.get(name).copied() == Some(DIRECT),
                     _ => false,
                 }
             },
         );
-        IrGates { defs, taint }
+        IrGates { defs, taint, self_pin_compares }
     }
 
     fn level(&self, name: &str) -> u8 {
@@ -782,7 +824,7 @@ impl<'a> IrGates<'a> {
             return false;
         }
         let v = vs[0];
-        if self.compare(v) == Kind::Pin {
+        if self.compare(v) == Kind::Pin || self.self_pin_compares.contains(&(v as *const ANFValue)) {
             return true;
         }
         if let Some(r) = ref_of(v) {

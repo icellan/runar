@@ -657,15 +657,35 @@ func collectLocktimeLocals(body []Statement, params map[string]int) map[string]i
 // AssertIRLocktimeDomain is D26 on the --ir path: CompileFromIR* skips
 // validate, so the rule is re-derived from the ANF of every public method
 // (stateless and stateful). Mirrors assertIrLocktimeDomain.
+// IsSelfPinnedLocktimeRead: bs[i] is the ANF image of currentBlockHeight()
+// (anf_lower.go): `call extractLocktime` followed in the same block by
+// `load_const 500000000; bin_op < (bs[i], that const); assert (that compare)`.
+// The assert runs on every path through the block before any later use, so
+// the read is a height by construction and the --ir path does not count it as
+// a locktime read (nothing derived from it is a gate), as the source path does
+// not count currentBlockHeight(). Its assert still counts as a pin. Matches
+// only that exact four-binding shape. Mirrors isSelfPinnedLocktimeRead.
+func IsSelfPinnedLocktimeRead(bs []ir.ANFBinding, i int) bool {
+	if i+3 >= len(bs) {
+		return false
+	}
+	r, l, c, a := &bs[i].Value, &bs[i+1].Value, &bs[i+2].Value, &bs[i+3].Value
+	return r.Kind == "call" && r.Func == "extractLocktime" &&
+		l.Kind == "load_const" && l.ConstBigInt != nil && l.ConstBigInt.Cmp(locktimeThreshold) == 0 &&
+		c.Kind == "bin_op" && c.Op == "<" && c.Left == bs[i].Name && c.Right == bs[i+1].Name &&
+		a.Kind == "assert" && a.ValueRef == bs[i+2].Name
+}
+
 func AssertIRLocktimeDomain(program *ir.ANFProgram) error {
-	// Prefilter (as ContractReadsLocktime): no extractLocktime call, no gate.
+	// Prefilter (as ContractReadsLocktime): no extractLocktime call that is not
+	// currentBlockHeight()'s self-pinned one, no gate.
 	var reads func(bs []ir.ANFBinding) bool
 	reads = func(bs []ir.ANFBinding) bool {
 		for i := range bs {
 			v := &bs[i].Value
 			switch v.Kind {
 			case "call":
-				if v.Func == "extractLocktime" {
+				if v.Func == "extractLocktime" && !IsSelfPinnedLocktimeRead(bs, i) {
 					return true
 				}
 			case "if":
@@ -743,9 +763,13 @@ func AssertIRLocktimeDomain(program *ir.ANFProgram) error {
 
 type irGates struct {
 	// Every binding of the method, by name (a name bound more than once keeps all its values).
-	defs        map[string][]*ir.ANFValue
-	taint       map[string]int
-	helperExits func(name string, argLevels []int) (pathSet, bool)
+	defs  map[string][]*ir.ANFValue
+	taint map[string]int
+	// The `bin_op <` of each currentBlockHeight() image: its read is no
+	// locktime read, but its assert still pins the domain on its path (the pin
+	// bounds the transaction's nLockTime, whichever read it is spelled on).
+	selfPinCompares map[*ir.ANFValue]bool
+	helperExits     func(name string, argLevels []int) (pathSet, bool)
 }
 
 func ltRef(v *ir.ANFValue) (string, bool) {
@@ -756,12 +780,18 @@ func ltRef(v *ir.ANFValue) (string, bool) {
 }
 
 func newIRGates(method *ir.ANFMethod, params map[string]int, helperExits func(string, []int) (pathSet, bool)) *irGates {
-	g := &irGates{defs: map[string][]*ir.ANFValue{}, helperExits: helperExits}
+	g := &irGates{defs: map[string][]*ir.ANFValue{}, selfPinCompares: map[*ir.ANFValue]bool{}, helperExits: helperExits}
 	var binds []ltBind[*ir.ANFValue]
+	// currentBlockHeight()'s reads: not locktime reads (IsSelfPinnedLocktimeRead).
+	selfPinned := map[*ir.ANFValue]bool{}
 	var index func(bs []ir.ANFBinding)
 	index = func(bs []ir.ANFBinding) {
 		for i := range bs {
 			v := &bs[i].Value
+			if IsSelfPinnedLocktimeRead(bs, i) {
+				selfPinned[v] = true
+				g.selfPinCompares[&bs[i+2].Value] = true
+			}
 			g.defs[bs[i].Name] = append(g.defs[bs[i].Name], v)
 			binds = append(binds, ltBind[*ir.ANFValue]{bs[i].Name, v})
 			if v.Kind == "if" {
@@ -786,7 +816,7 @@ func newIRGates(method *ir.ANFMethod, params map[string]int, helperExits func(st
 			}
 			switch v.Kind {
 			case "call":
-				if v.Func == "extractLocktime" {
+				if v.Func == "extractLocktime" && !selfPinned[v] {
 					return true
 				}
 				for _, a := range v.Args {
@@ -818,7 +848,7 @@ func newIRGates(method *ir.ANFMethod, params map[string]int, helperExits func(st
 			}
 			switch v.Kind {
 			case "call":
-				return v.Func == "extractLocktime"
+				return v.Func == "extractLocktime" && !selfPinned[v]
 			case "load_param":
 				return params[v.Name] == ltDirect
 			}
@@ -871,7 +901,7 @@ func (g *irGates) assertedPin(name string, seen map[string]bool) bool {
 		return false
 	}
 	v := vs[0]
-	if g.compare(v) == ltPinK {
+	if g.compare(v) == ltPinK || g.selfPinCompares[v] {
 		return true
 	}
 	if r, ok := ltRef(v); ok {
