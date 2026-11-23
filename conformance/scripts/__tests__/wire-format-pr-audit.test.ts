@@ -1284,8 +1284,13 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // next edit to its file.
     // 2026-11-23 — SPENT and deleted by the PQ-F1 / currentBlockHeight pin PR
     // (it edits these files and moves its own pins): compilers/go/frontend/anf_lower.go, compilers/rust/src/frontend/anf_lower.rs, compilers/zig/src/codegen/emit.zig.
+    // 2026-11-23 — SPENT and deleted by the currentBlockHeight helper/ternary
+    // fix (it edits all four for the helper-read liveness extension and moves
+    // its own pins: the current-block-height-helper-ternary goldens + witness):
+    // compilers/go/codegen/stack.go, compilers/java/src/main/java/runar/compiler/passes/StackLower.java,
+    // compilers/rust/src/codegen/stack.rs, compilers/zig/src/passes/stack_lower.zig.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual(["compilers/go/codegen/stack.go", "compilers/java/src/main/java/runar/compiler/passes/StackLower.java", "compilers/rust/src/codegen/stack.rs", "compilers/zig/src/passes/stack_lower.zig"]);
+    expect(entries.map((e) => e.path).sort()).toEqual([]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {
