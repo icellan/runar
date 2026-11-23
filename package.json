@@ -19,7 +19,7 @@
     "conformance:go": "cd compilers/go && go test -v -run TestSourceCompile ./...",
     "conformance:rust": "cd compilers/rust && PATH=\"$HOME/.cargo/bin:$PATH\" cargo test --test compiler_tests",
     "conformance:python": "cd compilers/python && python3 -m pytest tests/ -v",
-    "conformance:zig": "cd compilers/zig && zig build test",
+    "conformance:zig": "scripts/zig-build-test.sh",
     "conformance:ruby": "cd compilers/ruby && rake test",
     "conformance:java": "cd compilers/java && ./gradlew test --no-daemon",
     "conformance:multi": "cd conformance && npx tsx runner/index.ts --tests-dir tests --multi-format",

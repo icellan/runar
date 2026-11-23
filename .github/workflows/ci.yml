@@ -694,17 +694,8 @@ jobs:
           # Counts PEERS, which excludes Zig itself. Verified locally: with 5
           # peers built, 5 exits 0 and 7 exits non-zero naming what is missing.
           RUNAR_CROSS_TIER_MIN: '3'
-        # A passing test must write nothing to stderr: Zig 0.16's build runner
-        # renders any step with stderr output as `failed command: ...` even
-        # when every test passed, which reads as a failure (see build.zig).
-        run: |
-          cd compilers/zig
-          set -o pipefail
-          zig build test 2>&1 | tee "$RUNNER_TEMP/zig-build-test.log"
-          if grep -q 'failed command:' "$RUNNER_TEMP/zig-build-test.log"; then
-            echo "::error::zig build test: a test wrote to stderr; lower std.testing.log_level for an expected refusal instead"
-            exit 1
-          fi
+        # Fails if a passing test wrote to stderr (see the script).
+        run: scripts/zig-build-test.sh
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
       # N-391: `zig build test` does not depend on this step, so the per-tier
