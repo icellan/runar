@@ -376,9 +376,15 @@ async function main(): Promise<void> {
   if (opts.updateGolden) {
     console.log('Updating golden files from TypeScript compiler output...');
     const entries = readdirSync(opts.testsDir, { withFileTypes: true });
+    // --filter scopes this mode like every other (substring, case-insensitive,
+    // as discoverTestDirs applies it): without it a request to stamp one
+    // fixture restamped every golden under --tests-dir.
+    const filterLower = opts.filter?.toLowerCase();
     const testDirs = entries
       .filter((e) => e.isDirectory())
+      .filter((e) => filterLower === undefined || e.name.toLowerCase().includes(filterLower))
       .map((e) => join(opts.testsDir, e.name));
+    if (opts.filter) console.log(`Filter: ${opts.filter}`);
 
     const failedDirs: string[] = [];
     for (const testDir of testDirs) {

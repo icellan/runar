@@ -90,3 +90,31 @@ describe('N-088: --update-golden exits non-zero when a fixture fails or is refus
     expect(existsSync(join(testsDir, 'broken-source', 'expected-script.hex'))).toBe(false);
   }, 120_000);
 });
+
+// `--update-golden --filter <name>` ignored the filter and restamped EVERY
+// fixture under --tests-dir from TS output (the help text documents --filter
+// for every mode). Restamping a golden nobody meant to touch is exactly what
+// the golden-provenance gate exists to catch, and a session that asked for one
+// new fixture had no way to stamp only that one.
+//
+// What this proves: with --filter naming one of two broken fixtures, only the
+// named one is attempted (and reported), the other is never touched. What it
+// does not prove: anything about which bytes a stamped golden holds.
+describe('--update-golden honours --filter', () => {
+  it('attempts only the fixtures whose name includes the filter', () => {
+    const testsDir = makeTestsDir();
+    const loader = tsxLoader();
+    expect(loader, 'no tsx loader found').not.toBeNull();
+
+    const res = spawnSync(
+      process.execPath,
+      ['--import', loader!, INDEX_TS, '--update-golden', '--tests-dir', testsDir, '--filter', 'broken-source'],
+      { cwd: ROOT, encoding: 'utf-8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
+    );
+
+    const combined = `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
+    expect(res.status, `expected a non-zero exit code; output:\n${combined}`).not.toBe(0);
+    expect(combined).toMatch(/broken-source/);
+    expect(combined).not.toMatch(/refused-go-only/);
+  }, 120_000);
+});
