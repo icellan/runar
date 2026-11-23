@@ -49,10 +49,12 @@ class MockProviderTest {
 
         String t1 = p.broadcastRaw(raw);
         String t2 = p.broadcastRaw(raw);
-        assertEquals(2, p.getBroadcastedTxs().size());
+        // Re-broadcasting the identical tx is idempotent, as on a node: a
+        // second distinct txid would register its one real output twice.
+        assertEquals(1, p.getBroadcastedTxs().size());
         assertEquals(raw, p.getBroadcastedTxs().get(0));
         assertEquals(64, t1.length());
-        assertNotEquals(t1, t2, "broadcast counter ensures distinct txids for identical hex");
+        assertEquals(t1, t2, "an identical re-broadcast returns the first txid");
     }
 
     /** Fail-closed: a payload that is not a Bitcoin transaction is refused. */

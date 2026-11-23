@@ -337,27 +337,6 @@ func opsToString(ops []StackOp) string {
 	return strings.Join(parts, " ")
 }
 
-// collectOpcodes flattens all opcode values from a nested StackOp slice.
-func collectOpcodes(ops []StackOp) []string {
-	var result []string
-	for _, op := range ops {
-		if op.Op == "opcode" {
-			result = append(result, op.Code)
-		} else if op.Op == "push" && op.Value.Kind == "bigint" && op.Value.BigInt != nil {
-			result = append(result, "PUSH("+op.Value.BigInt.String()+")")
-		} else if op.Op == "if" {
-			result = append(result, "IF")
-			result = append(result, collectOpcodes(op.Then)...)
-			result = append(result, "ELSE")
-			result = append(result, collectOpcodes(op.Else)...)
-			result = append(result, "ENDIF")
-		} else {
-			result = append(result, strings.ToUpper(op.Op))
-		}
-	}
-	return result
-}
-
 // ---------------------------------------------------------------------------
 // Fix #1: extractOutputHash offset must be 40, not 44
 // ---------------------------------------------------------------------------

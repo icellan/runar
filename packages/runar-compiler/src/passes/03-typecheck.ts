@@ -1094,6 +1094,27 @@ class TypeChecker {
       }
     }
 
+    // N-511: a private method that declares a non-void return type, or that
+    // declares none but returns a non-void value on some path, must return a
+    // value on every path (rule: `returnsOnEveryPath`).
+    if (method.visibility === 'private') {
+      const declared = method.returnType ? typeNodeToTType(method.returnType) : null;
+      const missing = hasBareReturn(method.body) || !returnsOnEveryPath(method.body);
+      if (declared !== null && declared !== 'void' && missing) {
+        this.errors.push(makeDiagnostic(
+          missingReturnMessage(method.name, declared),
+          'error',
+          method.sourceLocation,
+        ));
+      } else if (declared === null && this.currentReturnTypes.some((t) => t !== 'void') && missing) {
+        this.errors.push(makeDiagnostic(
+          undeclaredMissingReturnMessage(method.name),
+          'error',
+          method.sourceLocation,
+        ));
+      }
+    }
+
     // F-075: every guard below reads the method's effects from the shared
     // side-effect summary, which follows the private-helper call graph. That is
     // the same analysis ANF lowering uses to inject the continuation, and ANF
@@ -2908,6 +2929,44 @@ export function unresolvedOperandTypesMessage(op: string, left: string, right: s
 /** D12 FE-F4: the one wording every tier emits (types in first-seen order). */
 export function incompatibleReturnTypesMessage(method: string, types: string[]): string {
   return `Method '${method}' returns values of incompatible types (${types.map((t) => `'${t}'`).join(', ')}); declare its return type`;
+}
+
+/** N-511: the one wording every tier emits. */
+export function missingReturnMessage(method: string, declared: string): string {
+  return `Method '${method}' declares return type '${declared}' but does not return a value on every path`;
+}
+
+/** N-511: the one wording every tier emits for a helper with no declared type. */
+export function undeclaredMissingReturnMessage(method: string): string {
+  return `Method '${method}' returns a value on some paths but not on every path`;
+}
+
+/**
+ * N-511: whether a statement list returns a value on every path. A list
+ * returns when one of its statements does; `return <value>` returns; an `if`
+ * returns only when it has an else and both arms return; a loop or an
+ * expression statement never counts. (Surfaces whose trailing expression is
+ * the value, .runar.rs / .runar.move / .runar.rb, turn it into a return in
+ * the parser.)
+ */
+function returnsOnEveryPath(stmts: Statement[]): boolean {
+  return stmts.some((s) => {
+    if (s.kind === 'return_statement') return s.value !== undefined && s.value !== null;
+    if (s.kind === 'if_statement') {
+      return s.else !== undefined && returnsOnEveryPath(s.then) && returnsOnEveryPath(s.else);
+    }
+    return false;
+  });
+}
+
+/** N-511: whether a value-less `return` appears anywhere in the list. */
+function hasBareReturn(stmts: Statement[]): boolean {
+  return stmts.some((s) => {
+    if (s.kind === 'return_statement') return s.value === undefined || s.value === null;
+    if (s.kind === 'if_statement') return hasBareReturn(s.then) || (s.else !== undefined && hasBareReturn(s.else));
+    if (s.kind === 'for_statement') return hasBareReturn(s.body);
+    return false;
+  });
 }
 
 /** D12 FE-F4: the one wording every tier emits. */

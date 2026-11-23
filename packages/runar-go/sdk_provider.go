@@ -79,6 +79,15 @@ type MockProvider struct {
 	// the most recent validating Broadcast.
 	lastValidatedInputs int
 	lastTotalInputs     int
+	// spentOutpoints maps "txid:vout" -> the real txid of the accepted
+	// broadcast that spent it. Checked on EVERY Broadcast, whatever
+	// validateBroadcasts says: a node refuses a second transaction spending
+	// an outpoint already spent.
+	spentOutpoints map[string]string
+	// acceptedTxids maps the real txid of every accepted Broadcast to the
+	// txid this provider returned for it: re-broadcasting the identical tx is
+	// idempotent, as on a node.
+	acceptedTxids map[string]string
 }
 
 // NewMockProvider creates a new MockProvider for the given network.
@@ -93,6 +102,8 @@ func NewMockProvider(network string) *MockProvider {
 		utxos:              make(map[string][]UTXO),
 		contractUtxos:      make(map[string]*UTXO),
 		knownOutpoints:     make(map[string]knownOutpoint),
+		spentOutpoints:     make(map[string]string),
+		acceptedTxids:      make(map[string]string),
 		network:            network,
 		feeRate:            100,
 		validateBroadcasts: true,
@@ -270,6 +281,41 @@ func (m *MockProvider) Broadcast(tx *transaction.Transaction) (string, error) {
 		}
 	}
 
+	// Double-spend gate, independent of validateBroadcasts. Re-broadcasting the
+	// identical tx is not a conflict (a node treats it as already known).
+	spendingTxid := tx.TxID().String()
+	prior, rebroadcast := m.acceptedTxids[spendingTxid]
+	inputOutpoints := make([]string, 0, len(tx.Inputs))
+	for _, in := range tx.Inputs {
+		if in.SourceTXID == nil {
+			// Names no outpoint, so there is nothing to check here; validation
+			// (when on) counts it as unknown.
+			continue
+		}
+		key := fmt.Sprintf("%s:%d", in.SourceTXID.String(), in.SourceTxOutIndex)
+		for _, seen := range inputOutpoints {
+			if seen == key {
+				return "", fmt.Errorf("MockProvider: refusing to broadcast a transaction that spends %s more than once", key)
+			}
+		}
+		inputOutpoints = append(inputOutpoints, key)
+		if spender, ok := m.spentOutpoints[key]; ok && !rebroadcast {
+			return "", fmt.Errorf("MockProvider: refusing to broadcast a double spend: %s is already spent by %s", key, spender)
+		}
+	}
+
+	// Re-broadcasting a tx already accepted is idempotent, as on a node: same
+	// txid, nothing registered twice. It is still validated above, so a tx an
+	// always-ack provider acked is not waved through once validation is on.
+	if rebroadcast {
+		return prior, nil
+	}
+
+	// Accepted: its inputs are now spent.
+	for _, key := range inputOutpoints {
+		m.spentOutpoints[key] = spendingTxid
+	}
+
 	rawTx := tx.Hex()
 	m.broadcastedTxs = append(m.broadcastedTxs, rawTx)
 	m.broadcastCount++
@@ -298,8 +344,37 @@ func (m *MockProvider) Broadcast(tx *transaction.Transaction) (string, error) {
 		}
 		m.rememberOutpoint(fakeTxid, i, out.LockingScript.String(), int64(out.Satoshis))
 	}
+	m.acceptedTxids[spendingTxid] = fakeTxid
+
+	// A P2PKH output paying an address this provider lists (e.g. the change
+	// of a deploy) is a new UTXO of that address, as a node's listing would
+	// show it, so a later call can be funded from it.
+	for address := range m.utxos {
+		p2pkh := p2pkhScriptOrEmpty(address)
+		if p2pkh == "" {
+			continue
+		}
+		for i, out := range tx.Outputs {
+			if out.LockingScript != nil && strings.EqualFold(out.LockingScript.String(), p2pkh) {
+				m.utxos[address] = append(m.utxos[address], UTXO{
+					Txid: fakeTxid, OutputIndex: i, Satoshis: int64(out.Satoshis), Script: out.LockingScript.String(),
+				})
+			}
+		}
+	}
 
 	return fakeTxid, nil
+}
+
+// p2pkhScriptOrEmpty is BuildP2PKHScript for an address label that may not be
+// a real address (a test label): "" instead of a panic.
+func p2pkhScriptOrEmpty(address string) (script string) {
+	defer func() {
+		if recover() != nil {
+			script = ""
+		}
+	}()
+	return BuildP2PKHScript(address)
 }
 
 // broadcastTxData converts a just-broadcast transaction into the
@@ -348,7 +423,14 @@ func broadcastTxData(txid string, tx *transaction.Transaction, rawTx string) *Tr
 // GetUtxos returns UTXOs for the given address from the mock store.
 // DoS-bound: rejects pathological UTXO scripts BEFORE they enter the SDK.
 func (m *MockProvider) GetUtxos(address string) ([]UTXO, error) {
-	utxos := m.utxos[address]
+	// An outpoint an accepted Broadcast spent is no longer a UTXO (a node's
+	// listing would not return it either).
+	utxos := make([]UTXO, 0, len(m.utxos[address]))
+	for _, u := range m.utxos[address] {
+		if _, spent := m.spentOutpoints[fmt.Sprintf("%s:%d", u.Txid, u.OutputIndex)]; !spent {
+			utxos = append(utxos, u)
+		}
+	}
 	for _, u := range utxos {
 		if u.Script == "" {
 			continue

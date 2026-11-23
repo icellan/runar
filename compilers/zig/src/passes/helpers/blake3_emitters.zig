@@ -142,11 +142,6 @@ const Emitter = struct {
         self.depth += 1;
     }
 
-    fn nip(self: *Emitter) Blake3EmitterError!void {
-        try self.emitOp("OP_NIP");
-        self.depth -= 1;
-    }
-
     fn rot(self: *Emitter) Blake3EmitterError!void {
         try self.emitOp("OP_ROT");
     }

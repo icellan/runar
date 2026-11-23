@@ -1219,8 +1219,13 @@ func Ripemd160(data ByteString) Ripemd160Hash {
 	return Ripemd160Func(data)
 }
 
-// ReverseBytes returns a reversed copy of a byte string.
+// ReverseBytes returns a reversed copy of a byte string. Panics past 520
+// bytes: the compiled reverseBytes ends in OP_0 OP_EQUALVERIFY (D12 BM-F3), so
+// the script ABORTS on a longer input rather than reversing it.
 func ReverseBytes(data ByteString) ByteString {
+	if len(data) > 520 {
+		panic(fmt.Sprintf("reverseBytes: input of %d bytes exceeds the 520-byte limit; the script aborts", len(data)))
+	}
 	b := []byte(data)
 	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
 		b[i], b[j] = b[j], b[i]

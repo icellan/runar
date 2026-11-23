@@ -702,43 +702,6 @@ func EmitProofBlobBindingHash(emit func(StackOp), numFields, numericFields int) 
 	emit(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
 }
 
-// emitAbsorbCommitment absorbs an 8-element Poseidon2-KB Merkle digest into
-// the Fiat-Shamir transcript. Used for trace, quotient-chunks, random, and
-// FRI fold-step commitments.
-//
-// Stack in:  [..., fs0..fs15, d0, d1, ..., d7]   (d7 on top)
-// Stack out: [..., fs0'..fs15']                   (digest consumed)
-//
-// Composes 8 × FiatShamirState.EmitObserve — one permutation fires when the
-// rate slots fill (every 8 observations, which is exactly one digest).
-func emitAbsorbCommitment(fs *FiatShamirState, t *KBTracker) {
-	// Each EmitObserve consumes the element on top of the stack. The caller
-	// is responsible for leaving d0 deepest / d7 on top so the observe
-	// sequence absorbs in canonical order d0, d1, ..., d7.
-	// We pop d7 first (top) — but observe semantics require d0 first, so we
-	// need to either reverse at the caller or use a loop that renames.
-	//
-	// Plonky3's DuplexChallenger.observe_slice absorbs elements in slice
-	// order (d0 first). To match on-chain, the caller must push d7 first
-	// and d0 last so d0 ends up on top.
-	for i := 0; i < 8; i++ {
-		fs.EmitObserve(t)
-	}
-	_ = t // silence lint when the compiler does not materially use t
-}
-
-// emitAbsorbExt4 absorbs a KoalaBear Ext4 element (4 base-field elements)
-// into the transcript. Used for opened values.
-//
-// Stack in:  [..., fs0..fs15, c0, c1, c2, c3]   (c3 on top)
-// Stack out: [..., fs0'..fs15']                  (Ext4 consumed)
-func emitAbsorbExt4(fs *FiatShamirState, t *KBTracker) {
-	for i := 0; i < 4; i++ {
-		fs.EmitObserve(t)
-	}
-	_ = t
-}
-
 // (Refined Plonky3 / sp1fri pointers for downstream sub-step ports.)
 //
 // Step 2 (transcript init + outer SP1 absorbs):
@@ -1186,45 +1149,6 @@ func emitFinalPolyHorner(
 	}
 }
 
-// emitSumcheckRound verifies one sumcheck round by checking
-// `poly(0) + poly(1) == claim` and updating `claim ← poly(β)`.
-//
-// Stack expectations depend on the polynomial-encoding convention chosen in
-// the port — Plonky3 ships coefficient form (constant, linear, quadratic,
-// cubic) over Ext4 for cubic constraints; the verifier evaluates at three
-// points using a 4-coefficient Horner scheme over Ext4.
-//
-// See Plonky3 `uni-stark/src/verifier.rs::verify_constraints` for the exact
-// polynomial-coefficient order + the interaction with the batch challenge α.
-func emitSumcheckRound(fs *FiatShamirState, t *KBTracker, round int) {
-	panicSP1FriStub(
-		fmt.Sprintf("sumcheck round %d", round),
-		"Plonky3 `uni-stark/src/verifier.rs::verify_constraints` (lines 97-160) — "+
-			"recomposes the quotient polynomial at zeta from chunk openings + selector "+
-			"evaluations + the alpha-batched constraint folder. NOTE: Plonky3 uni-stark "+
-			"does NOT use a multi-round sumcheck — it reconstructs the quotient in a "+
-			"single algebraic step using the FRI-opened values. The Phase-1 skeleton's "+
-			"\"sumcheck\" naming is a misnomer inherited from the BSVM handoff text; it "+
-			"refers to the constraint-quotient consistency check at uni-stark/src/verifier.rs:150-160 "+
-			"(`Recompose the quotient` + `Check that constraints(zeta) / Z_H(zeta) == quotient(zeta)`).",
-		"Structural shape: NOT a per-round loop — a single Ext4 polynomial reconstruction:\n"+
-			"  1. Compute selector evaluations at zeta (Z_H, first/last selectors) over Ext4.\n"+
-			"  2. Run the AIR's symbolic constraint evaluator (Plonky3 `uni-stark/src/folder.rs`) "+
-			"with the opened trace_local + trace_next as input, producing a vector of "+
-			"constraint evaluations.\n"+
-			"  3. Linearly combine constraints via powers of alpha (Horner over alpha).\n"+
-			"  4. Recompose quotient(zeta) from chunk openings via "+
-			"`recompose_quotient_from_chunks` (uni-stark/src/verifier.rs:42-90).\n"+
-			"  5. Assert constraints(zeta) == quotient(zeta) * Z_H(zeta) (Ext4 equality, 4 × OP_NUMEQUALVERIFY).\n"+
-			"This step is AIR-specific — it depends on the guest program's constraint set. "+
-			"For the PoC Fibonacci AIR (Plonky3 `uni-stark/examples/fibonacci_air.rs`) the "+
-			"constraint count is small (~3 constraints over 2 columns); for the SP1 EVM guest "+
-			"it's hundreds of constraints over ~30+ columns. The codegen needs an AIR-description "+
-			"input parameter to emit the right symbolic-evaluator unrolling.")
-	_ = fs
-	_ = t
-}
-
 // emitQueryIndexDerive squeezes log_trace_height bits of transcript randomness
 // to produce a query index in [0, trace_height). Direct wrapper around
 // FiatShamirState.EmitSampleBits.
@@ -1234,23 +1158,6 @@ func emitSumcheckRound(fs *FiatShamirState, t *KBTracker, round int) {
 func emitQueryIndexDerive(fs *FiatShamirState, t *KBTracker, logTraceHeight int) {
 	fs.EmitSampleBits(t, logTraceHeight)
 	// _fs_bits is on top and holds the derived index.
-}
-
-// emitCommitPoWCheck invokes the commit-phase proof-of-work check. Wraps
-// FiatShamirState.EmitCheckWitness. A no-op when CommitPoWBits is zero.
-func emitCommitPoWCheck(fs *FiatShamirState, t *KBTracker, bits int) {
-	if bits == 0 {
-		return
-	}
-	fs.EmitCheckWitness(t, bits)
-}
-
-// emitQueryPoWCheck invokes the query-phase proof-of-work check.
-func emitQueryPoWCheck(fs *FiatShamirState, t *KBTracker, bits int) {
-	if bits == 0 {
-		return
-	}
-	fs.EmitCheckWitness(t, bits)
 }
 
 // emitFinalPolyEqualityCheck asserts that two named Ext4 slots hold equal
@@ -2389,54 +2296,7 @@ func emitReducedOpeningAccumulator(
 // emitObserveByteString above; kept for documentation cross-reference).
 // =============================================================================
 
-// emitAbsorbByteString is the original, never-implemented stub. Use
-// emitObserveByteString instead. Kept only so the panic-string regression
-// tests that look for the old reference-pointer text still pass; will be
-// removed once all step ports are wired through emitObserveByteString.
-func emitAbsorbByteString(fs *FiatShamirState, t *KBTracker) {
-	_ = fs
-	_ = t
-	panicSP1FriStub(
-		"absorb-ByteString-as-field-elements (legacy)",
-		"superseded by emitObserveByteString in this same file; see "+
-			"docs/sp1-fri-verifier.md §3.1 for the byte-to-field convention.",
-		"Caller migration: replace emitAbsorbByteString(fs, t) with "+
-			"emitObserveByteString(fs, t, byteSize) where byteSize is the "+
-			"static length of the ByteString.")
-}
-
 // =============================================================================
 // Internal error helper
 // =============================================================================
 
-// panicSP1FriStub is the uniform panic body used by the small number of
-// SP1 FRI sub-steps that survive in the codebase as dead-code placeholders.
-// They are NOT live failure modes today — `lowerVerifySP1FRI` dispatches to
-// `EmitFullSP1FriVerifierBody`, which is exercised end-to-end by
-// `compilers/go/codegen.TestSp1FriVerifier_AcceptsMinimalGuestFixture` and at
-// the contract-frontend level by
-// `integration/go/sp1_fri_poc_test.go::TestSp1FriVerifierPoc_CodegenAccepts`.
-//
-// The placeholders remain so any future refactor that re-introduces a stub
-// path through `panicSP1FriStub` produces a single, consistent message
-// pointing at both the spec doc (`docs/sp1-fri-verifier.md` §8) and the
-// canonical "Status — Not production-ready" disclaimer in
-// `docs/fri-verifier-measurements.md`. The panic text deliberately keeps
-// both the `verifySP1FRI` and `docs/sp1-fri-verifier.md` substrings so that
-// callsite-discoverability works via grep across the repo.
-//
-// The three arguments are:
-//
-//   - what: the name of the sub-step ("sumcheck round 2").
-//   - ref:  the Plonky3 / SP1 source file + symbol the port should mirror.
-//   - shape: the expected Bitcoin Script emission shape in one paragraph.
-func panicSP1FriStub(what, ref, shape string) {
-	panic(fmt.Sprintf(
-		"verifySP1FRI codegen sub-step still on the placeholder path — see "+
-			"docs/sp1-fri-verifier.md §8 and the Status disclaimer in "+
-			"docs/fri-verifier-measurements.md.\n"+
-			"  Unimplemented sub-step: %s.\n"+
-			"  Reference: %s\n"+
-			"  Shape: %s",
-		what, ref, shape))
-}

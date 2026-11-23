@@ -21,6 +21,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { checkReturnType, declaredReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
+import { promoteTailReturns } from './tail-return.js';
 import { normalizeLoopCondition } from './loop-condition.js';
 import { lostDirectiveMessage, resolveNativeSighash, unknownMoveAttributeMessage } from './sighash-directive.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
@@ -675,16 +676,8 @@ class MoveParser {
     // Move allows an implicit return of the final expression when the function
     // declares a return type. Convert the trailing expression statement into
     // an explicit return statement so the type checker can infer it.
-    if (hasReturnType && body.length > 0) {
-      const last = body[body.length - 1];
-      if (last && last.kind === 'expression_statement') {
-        body[body.length - 1] = {
-          kind: 'return_statement',
-          value: last.expression,
-          sourceLocation: last.sourceLocation,
-        };
-      }
-    }
+    // N-511: also through the arms of a trailing if/else.
+    if (hasReturnType) promoteTailReturns(body);
 
     // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
     // annotates nothing.

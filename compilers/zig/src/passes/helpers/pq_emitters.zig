@@ -127,10 +127,6 @@ const SLHTracker = struct {
         try self.pushName(name);
     }
 
-    fn op(self: *SLHTracker, code: []const u8) PqEmitterError!void {
-        try self.builder.emitOp(code);
-    }
-
     fn dup(self: *SLHTracker, name: ?[]const u8) PqEmitterError!void {
         try self.builder.emitOp("OP_DUP");
         try self.pushName(name);
@@ -158,14 +154,6 @@ const SLHTracker = struct {
             const idx = len - 3;
             const moved = self.names.orderedRemove(idx);
             try self.names.append(self.allocator, moved);
-        }
-    }
-
-    fn nip(self: *SLHTracker) PqEmitterError!void {
-        try self.builder.emitOp("OP_NIP");
-        const len = self.names.items.len;
-        if (len >= 2) {
-            _ = self.names.orderedRemove(len - 2);
         }
     }
 
@@ -232,12 +220,6 @@ const SLHTracker = struct {
     fn cat(self: *SLHTracker, name: ?[]const u8) PqEmitterError!void {
         try self.builder.emitOp("OP_CAT");
         self.popName();
-        self.popName();
-        try self.pushName(name);
-    }
-
-    fn sha256(self: *SLHTracker, name: ?[]const u8) PqEmitterError!void {
-        try self.builder.emitOp("OP_SHA256");
         self.popName();
         try self.pushName(name);
     }
@@ -500,29 +482,6 @@ fn emitSLHTRaw(builder: *Builder, n: usize, pk_seed_pad_depth: usize) PqEmitterE
         try builder.emitPushInt(@intCast(n));
         try builder.emitOp("OP_SPLIT");
         try builder.emitOp("OP_DROP");
-    }
-}
-
-fn emitSLHTTracked(
-    tracker: *SLHTracker,
-    n: usize,
-    adrs: []const u8,
-    msg: []const u8,
-    result: []const u8,
-) PqEmitterError!void {
-    try tracker.toTop(adrs);
-    try tracker.toTop(msg);
-    try tracker.cat("_am");
-    try tracker.copyToTop("_pkSeedPad", "_psp");
-    try tracker.swap();
-    try tracker.cat("_pre");
-    try tracker.sha256("_h32");
-    if (n < 32) {
-        try tracker.pushInt(null, @intCast(n));
-        try tracker.split(result, "_tr");
-        try tracker.drop();
-    } else {
-        tracker.rename(result);
     }
 }
 

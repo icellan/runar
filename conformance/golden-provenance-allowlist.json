@@ -3788,6 +3788,27 @@
       "reviewer": "fix-session: PR F follow-ups (D9-D11)"
     },
     {
+      "path": "conformance/anf-interpreter/expected-strict/reverse-bytes-0.json",
+      "sha256": "134a969fe7dae12b6867253efeb780028c9a412c3435af4da35474b7bc9858c1",
+      "verified-against": "second-implementation",
+      "reason": "reverseBytes 520-byte bound vectors (lengths 0 / 1 / 520). Golden written by hand from Python bytes[::-1], not stamped from any interpreter, and identical to the lenient golden for the same case; the compiled ReverseBytesProbe script on the real @bsv/sdk Spend agrees (script oracle in cross-interpreter.test.ts), and all seven SDK interpreters reproduce it in cross-interpreter-strict.test.ts. New file; no existing golden moved.",
+      "reviewer": "fix-session: SDK interpreter follow-ups"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/reverse-bytes-1.json",
+      "sha256": "e236cb7d15c17ca6afff8834243356d131e3e5d5e950b430e5336bae84e8ab26",
+      "verified-against": "second-implementation",
+      "reason": "reverseBytes 520-byte bound vectors (lengths 0 / 1 / 520). Golden written by hand from Python bytes[::-1], not stamped from any interpreter, and identical to the lenient golden for the same case; the compiled ReverseBytesProbe script on the real @bsv/sdk Spend agrees (script oracle in cross-interpreter.test.ts), and all seven SDK interpreters reproduce it in cross-interpreter-strict.test.ts. New file; no existing golden moved.",
+      "reviewer": "fix-session: SDK interpreter follow-ups"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/reverse-bytes-520.json",
+      "sha256": "1263336c78ec5c888f82f9fe47f850005d4b4ed113608277337dc1c1e279db0f",
+      "verified-against": "second-implementation",
+      "reason": "reverseBytes 520-byte bound vectors (lengths 0 / 1 / 520). Golden written by hand from Python bytes[::-1], not stamped from any interpreter, and identical to the lenient golden for the same case; the compiled ReverseBytesProbe script on the real @bsv/sdk Spend agrees (script oracle in cross-interpreter.test.ts), and all seven SDK interpreters reproduce it in cross-interpreter-strict.test.ts. New file; no existing golden moved.",
+      "reviewer": "fix-session: SDK interpreter follow-ups"
+    },
+    {
       "path": "conformance/anf-interpreter/expected-strict/sha256-finalize-one-block.json",
       "sha256": "1f0271a2dc1aa405f7cfa9bb1dfbabaf1ba3cde1801ee03c5a902943b221b192",
       "verified-against": "second-implementation",

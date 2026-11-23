@@ -20,6 +20,7 @@
 
 require "set"
 require_relative "ast_nodes"
+require_relative "tail_return"
 require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "identifier_collision"
@@ -1014,15 +1015,10 @@ module RunarCompiler
         # promote it to a ReturnStmt so the AST has an explicit return node
         # for ANF lowering and type checking to consume.
         methods.each do |m|
-          if m.visibility == "private" && !m.body.empty?
-            last = m.body[-1]
-            if last.is_a?(ExpressionStmt)
-              m.body[-1] = ReturnStmt.new(
-                value: last.expr,
-                source_location: last.source_location
-              )
-            end
-          end
+          # N-511: through the arms of a trailing if/else too, but only in a
+          # helper that already returns a value explicitly somewhere, so a
+          # void helper ending in an if/else of asserts is left as it was.
+          TailReturn.promote(m.body, TailReturn.value_return?(m.body)) if m.visibility == "private"
         end
 
         ContractNode.new(

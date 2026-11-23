@@ -10,11 +10,11 @@ const FUNDING_TXID = '00'.repeat(32);
  * `FUNDING_TXID:0`, an OP_TRUE UTXO — pair with `registerFundingUtxo()` on
  * the provider under test before broadcasting, or the default-on C8
  * validation has nothing to validate (P1-1) and `broadcast()` throws. */
-function makeBsvTx(marker?: string): BsvTransaction {
+function makeBsvTx(marker?: string, vout = 0): BsvTransaction {
   const tx = new BsvTransaction();
   tx.addInput({
     sourceTXID: FUNDING_TXID,
-    sourceOutputIndex: 0,
+    sourceOutputIndex: vout,
     unlockingScript: new UnlockingScript(),
     sequence: 0xffffffff,
   });
@@ -29,10 +29,10 @@ function makeBsvTx(marker?: string): BsvTransaction {
  * floor at the default 100 sat/KB rate) so the provider's C8 broadcast
  * validation actually runs `Spend.validate()` against a known input instead
  * of vacuously passing with zero validated inputs. */
-function registerFundingUtxo(provider: MockProvider): void {
-  provider.addContractUtxo('providers-test-funding', {
+function registerFundingUtxo(provider: MockProvider, vout = 0): void {
+  provider.addContractUtxo(`providers-test-funding-${vout}`, {
     txid: FUNDING_TXID,
-    outputIndex: 0,
+    outputIndex: vout,
     satoshis: 100000,
     script: '51', // OP_TRUE
   });
@@ -178,8 +178,9 @@ describe('MockProvider: broadcast', () => {
   it('records broadcasted transactions', async () => {
     const provider = new MockProvider();
     registerFundingUtxo(provider);
+    registerFundingUtxo(provider, 1);
     const tx1 = makeBsvTx('5151'); // distinct script
-    const tx2 = makeBsvTx('5252'); // distinct script
+    const tx2 = makeBsvTx('5252', 1); // distinct script, distinct coin (no double spend)
 
     await provider.broadcast(tx1);
     await provider.broadcast(tx2);
@@ -204,8 +205,9 @@ describe('MockProvider: broadcast', () => {
   it('returns different txids for different broadcasts', async () => {
     const provider = new MockProvider();
     registerFundingUtxo(provider);
+    registerFundingUtxo(provider, 1);
     const txid1 = await provider.broadcast(makeBsvTx('aa'));
-    const txid2 = await provider.broadcast(makeBsvTx('bb'));
+    const txid2 = await provider.broadcast(makeBsvTx('bb', 1));
     expect(txid1).not.toBe(txid2);
   });
 

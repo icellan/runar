@@ -530,9 +530,6 @@ const Tokenizer = struct {
         return isIdentStart(c) or (c >= '0' and c <= '9');
     }
 
-    fn isHexDigit(c: u8) bool {
-        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-    }
 };
 
 // ============================================================================
@@ -1111,28 +1108,6 @@ const Parser = struct {
         return self.current.kind == .ident and std.mem.eql(u8, self.current.text, text);
     }
 
-    fn matchIdent(self: *Parser, text: []const u8) bool {
-        if (self.checkIdent(text)) {
-            _ = self.bump();
-            return true;
-        }
-        return false;
-    }
-
-    fn match(self: *Parser, kind: TokenKind) bool {
-        if (self.current.kind == kind) {
-            _ = self.bump();
-            return true;
-        }
-        return false;
-    }
-
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
-    }
-
     // ---- Top-level ----
 
     fn parse(self: *Parser) ParseResult {
@@ -1508,11 +1483,6 @@ const Parser = struct {
         var spelled: []const u8 = "";
         const info = self.parseGoTypeNamed(&spelled);
         return .{ .type_info = info, .type_name = spelled };
-    }
-
-    fn parseGoType(self: *Parser) RunarType {
-        var discard: []const u8 = "";
-        return self.parseGoTypeNamed(&discard);
     }
 
     /// `parseGoType`, additionally reporting the type name as the author

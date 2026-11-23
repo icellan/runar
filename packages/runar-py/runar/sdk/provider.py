@@ -141,6 +141,13 @@ class MockProvider(Provider):
         # "txid:vout" -> {'script': hex, 'satoshis': int}
         self._known_outpoints: dict[str, dict] = {}
         self._last_report = dict(_EMPTY_VALIDATION_REPORT)
+        # "txid:vout" -> txid of the accepted broadcast that spent it. Checked
+        # on EVERY broadcast, whatever ``validate_broadcasts`` says: a node
+        # refuses a second transaction spending an outpoint already spent.
+        self._spent_outpoints: dict[str, str] = {}
+        # Real txid of every accepted broadcast -> the txid this provider
+        # returned for it: re-broadcasting the identical tx is idempotent.
+        self._accepted_txids: dict[str, str] = {}
 
     @classmethod
     def always_ack(cls, network: str = 'testnet') -> 'MockProvider':
@@ -238,6 +245,19 @@ class MockProvider(Provider):
         if self._validate_broadcasts:
             parsed = self._validate_broadcast(raw_tx)
 
+        spending_txid, input_outpoints, structural = self._check_double_spend(raw_tx)
+
+        # Re-broadcasting a tx already accepted is idempotent, as on a node:
+        # same txid, nothing registered twice. It is still validated above, so
+        # a tx an always-ack provider acked is not waved through once
+        # validation is on.
+        if spending_txid in self._accepted_txids:
+            return self._accepted_txids[spending_txid]
+
+        # Accepted: its inputs are now spent.
+        for key in input_outpoints:
+            self._spent_outpoints[key] = spending_txid
+
         self._broadcasted_txs.append(raw_tx)
         # Auto-store raw hex for subsequent get_raw_transaction lookups
         self._broadcast_count += 1
@@ -250,7 +270,60 @@ class MockProvider(Provider):
         if parsed is not None:
             for i, out in enumerate(parsed['outputs']):
                 self._remember_outpoint(fake_txid, i, out['script'].hex(), out['satoshis'] or 0)
+        if spending_txid:
+            self._accepted_txids[spending_txid] = fake_txid
+        # A P2PKH output paying an address this provider lists (e.g. the
+        # change of a deploy) is a new UTXO of that address, as a node's
+        # listing would show it, so a later call can be funded from it.
+        if structural is not None:
+            from runar.sdk.deployment import build_p2pkh_script
+            for address, listed in self._utxos.items():
+                try:
+                    p2pkh = build_p2pkh_script(address).lower()
+                except Exception:
+                    continue  # not a real address (a test label)
+                for i, out in enumerate(structural['outputs']):
+                    if out['script'].hex() == p2pkh:
+                        listed.append(Utxo(txid=fake_txid, output_index=i,
+                                           satoshis=out['satoshis'], script=p2pkh))
         return fake_txid
+
+    def _check_double_spend(self, raw_tx: str) -> tuple[str, list[str], dict | None]:
+        """Double-spend gate, independent of ``validate_broadcasts``.
+
+        Refuses a transaction that spends one outpoint twice, or an outpoint an
+        earlier accepted broadcast spent. Re-broadcasting the identical
+        transaction is not a conflict (a node treats it as already known).
+        Returns the transaction's real txid, its input outpoints and its
+        structural parse ('', [] and None for a payload that does not parse).
+        """
+        import hashlib
+
+        from runar.sdk.oppushtx import _parse_raw_tx
+
+        try:
+            raw_bytes = bytes.fromhex(raw_tx)
+            structural = _parse_raw_tx(raw_bytes)
+        except Exception:
+            # A payload that does not parse spends no outpoint, so there is
+            # nothing to check here; validation (when on) refuses it as not a
+            # transaction, and the always-ack opt-out keeps acking it.
+            return '', [], None
+        txid = hashlib.sha256(hashlib.sha256(raw_bytes).digest()).digest()[::-1].hex()
+        outpoints: list[str] = []
+        for inp in structural['inputs']:
+            key = f"{inp['prev_txid_bytes'][::-1].hex()}:{inp['prev_output_index']}"
+            if key in outpoints:
+                raise BroadcastRejected(
+                    f'MockProvider: refusing to broadcast a transaction that spends {key} more than once.'
+                )
+            outpoints.append(key)
+            spender = self._spent_outpoints.get(key)
+            if spender is not None and txid not in self._accepted_txids:
+                raise BroadcastRejected(
+                    f'MockProvider: refusing to broadcast a double spend: {key} is already spent by {spender}.'
+                )
+        return txid, outpoints, structural
 
     def _validate_broadcast(self, raw_tx: str):
         """Fail-closed broadcast validation. Returns the parsed transaction.
@@ -392,7 +465,12 @@ class MockProvider(Provider):
         return structural
 
     def get_utxos(self, address: str) -> list[Utxo]:
-        utxos = list(self._utxos.get(address, []))
+        # An outpoint an accepted broadcast spent is no longer a UTXO (a node's
+        # listing would not return it either).
+        utxos = [
+            u for u in self._utxos.get(address, [])
+            if f'{u.txid}:{u.output_index}' not in self._spent_outpoints
+        ]
         # DoS-bound: reject pathological scripts at the provider boundary.
         for u in utxos:
             if not u.script:

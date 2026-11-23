@@ -1028,14 +1028,11 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 	// it to a ReturnStmt so the AST has an explicit return node for ANF
 	// lowering and type checking to consume.
 	for i := range methods {
-		if methods[i].Visibility == "private" && len(methods[i].Body) > 0 {
-			last := methods[i].Body[len(methods[i].Body)-1]
-			if es, ok := last.(ExpressionStmt); ok {
-				methods[i].Body[len(methods[i].Body)-1] = ReturnStmt{
-					Value:          es.Expr,
-					SourceLocation: es.SourceLocation,
-				}
-			}
+		// N-511: through the arms of a trailing if/else too, but only in a
+		// helper that already returns a value explicitly somewhere, so a void
+		// helper ending in an if/else of asserts is left as it was.
+		if methods[i].Visibility == "private" {
+			promoteTailReturns(methods[i].Body, hasValueReturn(methods[i].Body))
 		}
 	}
 

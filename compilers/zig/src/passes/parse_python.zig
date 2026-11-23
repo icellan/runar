@@ -1013,12 +1013,6 @@ const Parser = struct {
         return false;
     }
 
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
-    }
-
     fn skipNewlines(self: *Parser) void {
         while (self.current.kind == .newline) _ = self.bump();
     }

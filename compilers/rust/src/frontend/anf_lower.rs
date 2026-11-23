@@ -1062,10 +1062,6 @@ impl<'a> LoweringContext<'a> {
         self.contract.properties.iter().any(|p| p.name == TWIN_BINDING_FIELD)
     }
 
-    fn new(contract: &'a ContractNode) -> Self {
-        Self::with_effects(contract, None)
-    }
-
     fn with_effects(contract: &'a ContractNode, side_effects: Option<SideEffectSummary>) -> Self {
         LoweringContext {
             bindings: Vec::new(),

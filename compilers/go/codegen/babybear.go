@@ -73,14 +73,6 @@ func (t *BBTracker) drop() {
 	}
 }
 
-func (t *BBTracker) nip() {
-	t.e(StackOp{Op: "nip"})
-	L := len(t.nm)
-	if L >= 2 {
-		t.nm = append(t.nm[:L-2], t.nm[L-1])
-	}
-}
-
 func (t *BBTracker) over(n string) {
 	t.e(StackOp{Op: "over"})
 	t.nm = append(t.nm, n)
@@ -102,10 +94,6 @@ func (t *BBTracker) rot() {
 		t.nm = append(t.nm[:L-3], t.nm[L-2:]...)
 		t.nm = append(t.nm, r)
 	}
-}
-
-func (t *BBTracker) op(code string) {
-	t.e(StackOp{Op: "opcode", Code: code})
 }
 
 func (t *BBTracker) roll(d int) {

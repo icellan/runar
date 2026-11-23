@@ -364,11 +364,6 @@ const NistTracker = struct {
         try self.names.append(self.allocator, name);
     }
 
-    fn pushStaticBytes(self: *NistTracker, name: ?[]const u8, value: []const u8) !void {
-        try self.emitRaw(.{ .push = .{ .bytes = value } });
-        try self.names.append(self.allocator, name);
-    }
-
     fn pushBigIntBE(self: *NistTracker, name: ?[]const u8, be: []const u8) !void {
         const encoded = try beToUnsignedScriptNumAlloc(self.allocator, be);
         try self.pushOwnedBytes(name, encoded);

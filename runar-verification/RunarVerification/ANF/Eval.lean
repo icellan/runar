@@ -1442,7 +1442,13 @@ private def evalSplit? : List Value → EvalResult (Option Value)
 private def evalReverseBytes? : List Value → EvalResult (Option Value)
   | [v] =>
       match v.asBytes? with
-      | some bs => return some (.vBytes (ByteArray.mk (bs.toList.reverse.toArray)))
+      | some bs =>
+          -- D12 BM-F3: the lowering ends in `OP_0 OP_EQUALVERIFY` after its
+          -- 520 unrolled iterations, so the script ABORTS past 520 bytes.
+          if bs.size > 520 then
+            .error (.typeError "reverseBytes input exceeds the 520-byte limit")
+          else
+            return some (.vBytes (ByteArray.mk (bs.toList.reverse.toArray)))
       | none => return none
   | _ => return none
 
@@ -2465,6 +2471,23 @@ theorem callBuiltin_split_returns_suffix_sample :
     (match callBuiltin? "split"
         [.vBytes (ByteArray.mk #[0x01, 0x02, 0x03, 0x04]), .vBigint 2] with
      | .ok (some (.vBytes out)) => out.toList == [0x03, 0x04]
+     | _ => false) = true := by
+  native_decide
+
+/-- `reverseBytes` reverses an input of exactly 520 bytes (the unroll bound). -/
+theorem callBuiltin_reverseBytes_520_sample :
+    (match callBuiltin? "reverseBytes"
+        [.vBytes (ByteArray.mk ((List.range 520).map (fun i => (i % 256).toUInt8)).toArray)] with
+     | .ok (some (.vBytes out)) =>
+         out.toList == ((List.range 520).map (fun i => (i % 256).toUInt8)).reverse
+     | _ => false) = true := by
+  native_decide
+
+/-- `reverseBytes` on 521 bytes is an error, as the compiled script ABORTS
+there (`OP_0 OP_EQUALVERIFY` after the 520 unrolled iterations, D12 BM-F3). -/
+theorem callBuiltin_reverseBytes_521_errors :
+    (match callBuiltin? "reverseBytes" [.vBytes (ByteArray.mk (Array.replicate 521 0))] with
+     | .error (.typeError _) => true
      | _ => false) = true := by
   native_decide
 

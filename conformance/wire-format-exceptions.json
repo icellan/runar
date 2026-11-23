@@ -1,4 +1,61 @@
 {
   "documentation": "Escape hatch for the must-move-a-golden gate (conformance/scripts/wire-format-pr-audit.ts). An entry suppresses ONE exact wire-format path for the PR that adds it, when that change genuinely cannot move any pinned bytes (e.g. a comment-only touch, or a private-helper rename proven byte-identical over the state value-class matrix). Every field is required: \"path\" (exact, no globs), \"reason\" (>= 20 chars), \"date\" (ISO, when it was granted), \"expires\" (ISO, at most 180 days after \"date\" — hard failure once passed), \"sha256\" (64 hex chars: the sha256 of that file's REVIEWED content, so the entry authorises one version of the file and self-invalidates on the next edit, exactly like conformance/golden-provenance-allowlist.json), and \"reviewer\" (sign-off marker, e.g. \"gh:handle\"). Entries are printed on EVERY run of the gate and are reviewed in the diff like any other code. The entry COUNT is asserted to be zero by scripts/__tests__/wire-format-pr-audit.test.ts, so adding one is a deliberate, reviewed edit to that assertion — never a quiet JSON append. Prefer moving a golden. See conformance/README.md -> 'Encoding-change checklist'.",
-  "entries": []
+  "entries": [
+    {
+      "path": "compilers/go/codegen/stack.go",
+      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "date": "2026-11-23",
+      "expires": "2027-05-22",
+      "sha256": "8699417daa9513e8867675e8f516b3e04f455c3f209af28c4eda7d50dcabf161",
+      "reviewer": "fix-session: N-511 dead-helper deletion"
+    },
+    {
+      "path": "compilers/go/frontend/anf_lower.go",
+      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "date": "2026-11-23",
+      "expires": "2027-05-22",
+      "sha256": "f9bf494c60d5fc330a201ab6af375091b77760ef9908c79ff17d4cf7b817b752",
+      "reviewer": "fix-session: N-511 dead-helper deletion"
+    },
+    {
+      "path": "compilers/java/src/main/java/runar/compiler/passes/StackLower.java",
+      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "date": "2026-11-23",
+      "expires": "2027-05-22",
+      "sha256": "f8765f130ca1ccdb06b264db0f7f7a81262d73f9e612902e78816f054da3d3f1",
+      "reviewer": "fix-session: N-511 dead-helper deletion"
+    },
+    {
+      "path": "compilers/rust/src/codegen/stack.rs",
+      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "date": "2026-11-23",
+      "expires": "2027-05-22",
+      "sha256": "312b22df33f127be2e8ab8836b3ce64b77139f860da0190fef89b9cd7bafd320",
+      "reviewer": "fix-session: N-511 dead-helper deletion"
+    },
+    {
+      "path": "compilers/rust/src/frontend/anf_lower.rs",
+      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "date": "2026-11-23",
+      "expires": "2027-05-22",
+      "sha256": "a007730c9c090222d947c96816d886c40f2f2a1ddaf5ff47a48cc1890fd9250a",
+      "reviewer": "fix-session: N-511 dead-helper deletion"
+    },
+    {
+      "path": "compilers/zig/src/codegen/emit.zig",
+      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "date": "2026-11-23",
+      "expires": "2027-05-22",
+      "sha256": "774c0091de98f66671a5bcef1f065b4defd99ddd3ab256a44331262aed5f383f",
+      "reviewer": "fix-session: N-511 dead-helper deletion"
+    },
+    {
+      "path": "compilers/zig/src/passes/stack_lower.zig",
+      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "date": "2026-11-23",
+      "expires": "2027-05-22",
+      "sha256": "b98fc57f22f9e983b25142a2eecc60b0deaae29634a38010b9e8f01699a0fdd4",
+      "reviewer": "fix-session: N-511 dead-helper deletion"
+    }
+  ]
 }

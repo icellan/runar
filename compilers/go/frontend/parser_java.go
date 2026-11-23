@@ -495,10 +495,6 @@ func javaTokenize(source, fileName string) ([]javaToken, []Diagnostic) {
 	return tokens, errs
 }
 
-func javaIsHexDigit(ch rune) bool {
-	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
-}
-
 // ---------------------------------------------------------------------------
 // Parser struct
 // ---------------------------------------------------------------------------

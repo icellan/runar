@@ -538,13 +538,6 @@ fn emitMethodBody(ctx: *EmitContext, method: types.StackMethod) !void {
     }
 }
 
-/// Emit a method body with a given source location applied to the first instruction.
-/// Used when per-instruction source locs are not available (e.g. after peephole).
-fn emitMethodBodyWithLoc(ctx: *EmitContext, method: types.StackMethod, loc: ?types.SourceLocation) !void {
-    if (loc) |l| ctx.pending_source_loc = l;
-    try emitMethodBody(ctx, method);
-}
-
 // ============================================================================
 // Multi-Method Dispatch Table
 // ============================================================================

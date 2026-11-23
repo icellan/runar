@@ -19,6 +19,7 @@ Ruby syntax conventions used in Runar contracts:
 
 from __future__ import annotations
 
+from runar_compiler.frontend.tail_return import has_value_return, promote_tail_returns
 from runar_compiler.frontend.ast_nodes import (
     ArrayLiteralExpr,
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
@@ -989,13 +990,11 @@ class _RbParser:
         # promote it to a ReturnStmt so the AST has an explicit return node
         # for ANF lowering and type checking to consume.
         for method in methods:
-            if method.visibility == "private" and method.body:
-                last = method.body[-1]
-                if isinstance(last, ExpressionStmt):
-                    method.body[-1] = ReturnStmt(
-                        value=last.expr,
-                        source_location=getattr(last, "source_location", None),
-                    )
+            # N-511: through the arms of a trailing if/else too, but only in a
+            # helper that already returns a value explicitly somewhere, so a
+            # void helper ending in an if/else of asserts is left as it was.
+            if method.visibility == "private":
+                promote_tail_returns(method.body, has_value_return(method.body))
 
         return ContractNode(
             name=contract_name,

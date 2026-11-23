@@ -9,6 +9,7 @@ import { txToTransactionData } from './provider.js';
 import type { TransactionData, UTXO } from '../types.js';
 import { InputLimits } from 'runar-ir-schema';
 import { assertScriptHexUnderLimit } from '../errors.js';
+import { buildP2PKHScript } from '../script-utils.js';
 
 /**
  * Deep-review finding C8 (part 2): offline validation of a transaction's
@@ -274,6 +275,12 @@ export class MockProvider implements Provider {
    * enabled. See `getValidationStats()` (P1-1). */
   private validatedInputCount = 0;
   private skippedInputCount = 0;
+  /** outpoint ("txid:vout") -> txid of the accepted broadcast that spent it.
+   * Checked on EVERY broadcast, whatever the validation toggles say: a node
+   * refuses a second transaction spending an outpoint already spent. */
+  private readonly spentOutpoints: Map<string, string> = new Map();
+  /** txids of every accepted broadcast (re-broadcast is idempotent). */
+  private readonly acceptedTxids: Set<string> = new Set();
 
   constructor(
     network: 'mainnet' | 'testnet' = 'testnet',
@@ -442,6 +449,30 @@ export class MockProvider implements Provider {
       }
     }
 
+    // Double-spend gate, independent of `validateBroadcasts`. Re-broadcasting
+    // the identical tx is not a conflict (a node treats it as already known).
+    const spendingTxid = tx.id('hex') as string;
+    const rebroadcast = this.acceptedTxids.has(spendingTxid);
+    const inputOutpoints: string[] = [];
+    for (const input of tx.inputs) {
+      const outpoint = inputOutpointKey(input);
+      if (inputOutpoints.includes(outpoint)) {
+        throw new Error(`MockProvider: refusing to broadcast a transaction that spends ${outpoint} more than once.`);
+      }
+      inputOutpoints.push(outpoint);
+      const spender = this.spentOutpoints.get(outpoint);
+      if (spender !== undefined && !rebroadcast) {
+        throw new Error(
+          `MockProvider: refusing to broadcast a double spend: ${outpoint} is already spent by ${spender}.`,
+        );
+      }
+    }
+
+    // Re-broadcasting a tx already accepted is idempotent, as on a node: same
+    // txid, nothing registered twice. It is still validated above, so a tx an
+    // always-ack provider acked is not waved through once validation is on.
+    if (rebroadcast) return spendingTxid;
+
     const rawTx = tx.toHex();
     this.broadcastedTxs.push(rawTx);
     this.broadcastedTxObjects.push(tx);
@@ -452,7 +483,11 @@ export class MockProvider implements Provider {
     // reverses `sourceTXID` when it builds `allPrevouts`. A fake txid here
     // made `hash256(parentTx) === companionTxid` unsatisfiable, which is
     // exactly the W8 companion-parent bind.
-    const txid = tx.id('hex') as string;
+    const txid = spendingTxid;
+
+    // Accepted: its inputs are now spent.
+    for (const outpoint of inputOutpoints) this.spentOutpoints.set(outpoint, txid);
+    this.acceptedTxids.add(txid);
 
     // Auto-store raw hex for subsequent getRawTransaction lookups
     this.rawTransactions.set(txid, rawTx);
@@ -477,11 +512,36 @@ export class MockProvider implements Provider {
       });
     }
 
+    // A P2PKH output paying an address this provider lists (e.g. the change
+    // of a deploy) is a new UTXO of that address, as a node's listing would
+    // show it, so a later call can be funded from it.
+    const addressScripts = new Map<string, string>();
+    for (const address of this.utxos.keys()) {
+      try {
+        addressScripts.set(address, buildP2PKHScript(address).toLowerCase());
+      } catch {
+        // Not a real address (a test label): nothing can pay it.
+      }
+    }
+    for (let i = 0; i < tx.outputs.length; i++) {
+      const out = tx.outputs[i]!;
+      const script = out.lockingScript.toHex();
+      for (const [address, p2pkh] of addressScripts) {
+        if (p2pkh === script.toLowerCase()) {
+          this.utxos.get(address)!.push({ txid, outputIndex: i, satoshis: out.satoshis ?? 0, script });
+        }
+      }
+    }
+
     return txid;
   }
 
   async getUtxos(address: string): Promise<UTXO[]> {
-    const utxos = this.utxos.get(address) ?? [];
+    // An outpoint an accepted broadcast spent is no longer a UTXO (a node's
+    // listing would not return it either).
+    const utxos = (this.utxos.get(address) ?? []).filter(
+      (u) => !this.spentOutpoints.has(`${u.txid}:${u.outputIndex}`),
+    );
     // DoS-bound: reject pathological scripts from the provider layer BEFORE
     // they propagate into signature / broadcast paths.
     for (const u of utxos) {

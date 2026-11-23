@@ -75,14 +75,6 @@ func (t *KBTracker) drop() {
 	}
 }
 
-func (t *KBTracker) nip() {
-	t.e(StackOp{Op: "nip"})
-	L := len(t.nm)
-	if L >= 2 {
-		t.nm = append(t.nm[:L-2], t.nm[L-1])
-	}
-}
-
 func (t *KBTracker) over(n string) {
 	t.e(StackOp{Op: "over"})
 	t.nm = append(t.nm, n)
@@ -104,10 +96,6 @@ func (t *KBTracker) rot() {
 		t.nm = append(t.nm[:L-3], t.nm[L-2:]...)
 		t.nm = append(t.nm, r)
 	}
-}
-
-func (t *KBTracker) op(code string) {
-	t.e(StackOp{Op: "opcode", Code: code})
 }
 
 func (t *KBTracker) roll(d int) {

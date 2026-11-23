@@ -36,6 +36,23 @@ pub fn change_address_mismatch_message(change_address: &str) -> String {
 /// - 66-char hex: compressed public key (auto-hashed via hash160)
 /// - 130-char hex: uncompressed public key (auto-hashed via hash160)
 /// - Other: decoded as Base58Check BSV address
+/// `build_p2pkh_script` for a label that may not be a real address (a test
+/// label): `None` instead of a panic.
+pub(crate) fn try_build_p2pkh_script(address_or_pub_key: &str) -> Option<String> {
+    let pkh = if is_hex(address_or_pub_key, 40) {
+        address_or_pub_key.to_string()
+    } else if is_hex(address_or_pub_key, 66) || is_hex(address_or_pub_key, 130) {
+        bytes_to_hex(&compute_hash160(&hex_to_bytes(address_or_pub_key)))
+    } else {
+        let decoded = bs58::decode(address_or_pub_key).with_check(None).into_vec().ok()?;
+        if decoded.len() != 21 || (decoded[0] != 0x00 && decoded[0] != 0x6f) {
+            return None;
+        }
+        bytes_to_hex(&decoded[1..])
+    };
+    Some(format!("76a914{}88ac", pkh))
+}
+
 pub fn build_p2pkh_script(address_or_pub_key: &str) -> String {
     let pub_key_hash = if is_hex(address_or_pub_key, 40) {
         // Already a raw 20-byte pubkey hash in hex
