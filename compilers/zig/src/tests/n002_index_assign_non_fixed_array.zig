@@ -143,12 +143,21 @@ fn expectRefused(src: []const u8, file: []const u8, want: usize) !void {
 }
 
 test "N-002: ByteString property, literal index" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectRefused(blob("this.blob[0n] = 7n;"), "Blob.runar.ts", 1);
 }
 test "N-002: ByteString property, runtime index" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectRefused(blob("this.blob[i] = 7n;"), "Blob.runar.ts", 1);
 }
 test "N-002: ByteString property, compound ops" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectRefused(blob("this.blob[0n] += 7n;"), "Blob.runar.ts", 1);
     try expectRefused(blob("this.blob[0n] -= 7n;"), "Blob.runar.ts", 1);
     try expectRefused(blob("this.blob[0n] *= 7n;"), "Blob.runar.ts", 1);
@@ -156,16 +165,28 @@ test "N-002: ByteString property, compound ops" {
     try expectRefused(blob("this.blob[0n] %= 7n;"), "Blob.runar.ts", 1);
 }
 test "N-002: ByteString property, nested index" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectRefused(blob("this.blob[0n][1n] = 7n;"), "Blob.runar.ts", 1);
 }
 test "N-002: member-chained root" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectRefused(blob("this.blob.x[0n] = 7n;"), "Blob.runar.ts", 1);
 }
 test "N-002: local and parameter (TS surface)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectRefused(TS_LOCAL, "Loc.runar.ts", 1);
     try expectRefused(TS_PARAM, "Par.runar.ts", 1);
 }
 test "N-002: Zig surface, ByteString property and local + parameter" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectRefused(ZIG_PROP, "Blob.runar.zig", 1);
     try expectRefused(ZIG_LOCAL_PARAM, "Loc.runar.zig", 2);
 }

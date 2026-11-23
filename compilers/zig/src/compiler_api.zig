@@ -701,6 +701,9 @@ test "artifact contains source map entries" {
 }
 
 test "compile returns error for invalid contract" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const source = "this is not valid zig";
     try std.testing.expectError(
         error.ParseFailed,

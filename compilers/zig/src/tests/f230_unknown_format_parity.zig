@@ -110,6 +110,9 @@ test "F-230: CLI `compile` refuses a valid .runar.zig contract saved as contract
 }
 
 test "F-230: library compileSource must refuse the same unknown extension the CLI refuses" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const allocator = std.testing.allocator;
 
     // Before the fix: this SUCCEEDS (the `.unknown` branch falls back to

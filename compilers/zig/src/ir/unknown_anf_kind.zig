@@ -37,11 +37,17 @@ pub fn unknownAnfKind(kind: []const u8, location: []const u8) UnknownAnfKindErro
 // ============================================================================
 
 test "unknownAnfKind returns UnknownAnfKind error" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const err = unknownAnfKind("totally_made_up_kind", "test.location");
     try std.testing.expectError(error.UnknownAnfKind, @as(UnknownAnfKindError!void, err));
 }
 
 test "unknownAnfKind error union round-trips" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const Wrapper = struct {
         fn call() UnknownAnfKindError!u32 {
             return unknownAnfKind("foo", "test.wrapper");

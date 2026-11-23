@@ -1282,13 +1282,22 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // dead-helper batch). No emitted code path changes (multi-format fold-OFF
     // 892/892 against the goldens). Each is spent, and must be deleted, on the
     // next edit to its file.
+    // 2026-11-23 (later) — the zig `stack_lower.zig` N-511 entry is SPENT and
+    // replaced: a test-only edit (two refusal tests lower
+    // std.testing.log_level so their expected diagnostic stays off stderr).
+    // No non-test line changes. Spent, and must be deleted, on the next edit
+    // to stack_lower.zig.
     const entries = loadExceptions(REPO_ROOT);
     expect(entries.map((e) => e.path).sort()).toEqual(["compilers/go/codegen/stack.go", "compilers/go/frontend/anf_lower.go", "compilers/java/src/main/java/runar/compiler/passes/StackLower.java", "compilers/rust/src/codegen/stack.rs", "compilers/rust/src/frontend/anf_lower.rs", "compilers/zig/src/codegen/emit.zig", "compilers/zig/src/passes/stack_lower.zig"]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {
       expect(e.expires).toBe('2027-05-22');
-      expect(e.reviewer).toBe('fix-session: N-511 dead-helper deletion');
+      expect(e.reviewer).toBe(
+        e.path === 'compilers/zig/src/passes/stack_lower.zig'
+          ? 'fix-session: zig test stderr quieting'
+          : 'fix-session: N-511 dead-helper deletion',
+      );
       expect(e.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
   });

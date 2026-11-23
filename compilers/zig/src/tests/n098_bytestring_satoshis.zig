@@ -164,6 +164,9 @@ fn compileHex(a: std.mem.Allocator, src: []const u8) ![]const u8 {
 // ---------------------------------------------------------------------------
 
 test "N-098: addOutput rejects a ByteString first argument" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const a = std.testing.allocator;
     try std.testing.expect(try typecheckHasError(
         a,

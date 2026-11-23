@@ -261,6 +261,9 @@ fn lowerIr(allocator: std.mem.Allocator, ir_json: []const u8) !void {
 }
 
 test "R-054: an empty signature array is refused (anyone-can-spend)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.DegenerateMultiSigThreshold,
         lowerIr(std.testing.allocator, IR_0_OF_1),
@@ -268,6 +271,9 @@ test "R-054: an empty signature array is refused (anyone-can-spend)" {
 }
 
 test "R-054: an empty public key array is refused" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.DegenerateMultiSigThreshold,
         lowerIr(std.testing.allocator, IR_1_OF_0),
@@ -275,6 +281,9 @@ test "R-054: an empty public key array is refused" {
 }
 
 test "R-054: more signatures than public keys is refused (unspendable)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.DegenerateMultiSigThreshold,
         lowerIr(std.testing.allocator, IR_2_OF_1),
@@ -282,6 +291,9 @@ test "R-054: more signatures than public keys is refused (unspendable)" {
 }
 
 test "R-054: an empty signature array is refused from source syntax too" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     // The source path reaches the same refusal — `compileSourceToHex` maps a
     // lowering refusal to StackLowerFailed, so this pins reachability rather
     // than the specific error (the `--ir` tests above pin that).
