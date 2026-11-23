@@ -733,6 +733,14 @@ func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptio
 	if err != nil {
 		return nil, nil, err
 	}
+	// Terminal-loop parity: the same terminal-assert rule CompileFromProgram
+	// applies before emitting hex, so --emit-ir refuses what --hex refuses
+	// (and what the other six tiers refuse right after ANF lowering).
+	for i := range program.Methods {
+		if err := checkIRTerminalAssert(&program.Methods[i]); err != nil {
+			return nil, nil, err
+		}
+	}
 	warnings = append(warnings, frontend.CollectEmbedAlwaysDCEWarnings(expandResult.Contract, program)...)
 
 	// o was merged (and checked for ParseOnly/ValidateOnly/TypecheckOnly) at

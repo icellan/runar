@@ -500,6 +500,7 @@ pub fn compile_from_source_str_with_options(
 
     // Pass 4: ANF Lower (catch panics)
     let mut anf_program = frontend::anf_lower::try_lower_to_anf(&contract)?;
+    ir::loader::check_terminal_asserts(&anf_program)?;
 
     // Bake constructor args into ANF properties (validated first).
     let arg_errors = apply_constructor_args(&mut anf_program, &opts.constructor_args);
@@ -643,6 +644,7 @@ pub fn compile_source_str_to_ir_collecting_warnings(
 
     // Pass 4: ANF Lower (catch panics)
     let mut anf_program = frontend::anf_lower::try_lower_to_anf(&expanded_contract)?;
+    ir::loader::check_terminal_asserts(&anf_program)?;
 
     // Bake constructor args into ANF properties (validated first).
     let arg_errors = apply_constructor_args(&mut anf_program, &opts.constructor_args);
@@ -1296,6 +1298,10 @@ pub fn compile_from_source_str_with_result(
             return result;
         }
     };
+    if let Err(msg) = ir::loader::check_terminal_asserts(&anf_program) {
+        result.diagnostics.push(Diagnostic::error(msg, None));
+        return result;
+    }
 
     // Bake constructor args into ANF properties (validated first).
     let arg_errors = apply_constructor_args(&mut anf_program, &opts.constructor_args);

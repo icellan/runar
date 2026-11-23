@@ -313,14 +313,7 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
     // the method's last binding as the script result, so `"body": []`
     // compiled to an EMPTY (anyone-can-spend) script. Same rule and words as
     // Go's F-004 check; see ends_with_terminal_assert.
-    for method in &program.methods {
-        if method.is_public && method.name != "constructor" && !ends_with_terminal_assert(&method.body) {
-            return Err(format!(
-                "IR validation: public method '{}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
-                method.name
-            ));
-        }
-    }
+    check_terminal_asserts(program)?;
 
     // N-113 / R-081: a contract with no public method has no spending entry
     // point and emits an EMPTY locking script — which is anyone-can-spend, not
@@ -363,6 +356,25 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
     // mutable key property (shared rule and diagnostics, 7 tiers).
     super::rabin_key_provenance::assert_rabin_key_provenance(program)?;
 
+    Ok(())
+}
+
+/// N-071: every public method must end with a terminal assert (see
+/// ends_with_terminal_assert). Also run on the source path right after ANF
+/// lowering: the source validator exempts StatefulSmartContract, whose
+/// injected continuation assert ends a state-writing method, but a TERMINAL
+/// stateful method (no state write) gets no continuation, so a body ending
+/// in a loop, an else-less `if` or a binding left the leftover stack value
+/// as the spend result. Go has run this check on both paths since F-004.
+pub fn check_terminal_asserts(program: &ANFProgram) -> Result<(), String> {
+    for method in &program.methods {
+        if method.is_public && method.name != "constructor" && !ends_with_terminal_assert(&method.body) {
+            return Err(format!(
+                "IR validation: public method '{}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+                method.name
+            ));
+        }
+    }
     Ok(())
 }
 

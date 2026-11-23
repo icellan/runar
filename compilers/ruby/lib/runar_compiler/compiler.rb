@@ -339,7 +339,14 @@ module RunarCompiler
   # Lower a ContractNode to ANF IR.
   def self._lower_to_anf(contract)
     require_relative "frontend/anf_lower"
-    Frontend.lower_to_anf(contract)
+    require_relative "ir/loader"
+    program = Frontend.lower_to_anf(contract)
+    # N-071 on the source path too (Go's F-004): a terminal stateful method
+    # gets no injected continuation assert, so nothing else enforces it.
+    terminal_err = IR.terminal_assert_error(program)
+    raise CompilationError, "IR validation: #{terminal_err}" if terminal_err
+
+    program
   end
   private_class_method :_lower_to_anf
 

@@ -211,15 +211,8 @@ module RunarCompiler
       # leaves the method's last binding as the script result, so
       # `"body": []` compiled to an EMPTY (anyone-can-spend) script. Same rule
       # and words as Go's F-004 check; see _ends_with_terminal_assert.
-      program.methods.each do |m|
-        next unless m.is_public && m.name != "constructor"
-        next if _ends_with_terminal_assert(m.body)
-
-        errors << "public method '#{m.name}' must end with an assert() call " \
-                  "(or an if/else whose arms both do, or a terminal raw_script " \
-                  "with out_arity 1); otherwise the value its last binding " \
-                  "leaves on the stack decides the spend"
-      end
+      terminal_err = terminal_assert_error(program)
+      errors << terminal_err if terminal_err
 
       # N-101: a StatefulSmartContract (declared or inferred) must carry
       # exactly the scaffolding the frontend injects into each public method.
@@ -490,6 +483,27 @@ module RunarCompiler
     # last binding is an `assert`, or an `if` whose then AND else arms both end
     # that way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
     # asm() terminal) is also accepted, because ANF carries no parentClass.
+    # N-071: the first public method that does not end with a terminal
+    # assert, as the diagnostic all seven tiers share, or nil. Also run on
+    # the source path right after ANF lowering (compiler.rb _lower_to_anf):
+    # the source validator exempts StatefulSmartContract, whose injected
+    # continuation assert ends a state-writing method, but a TERMINAL
+    # stateful method gets no continuation, so a body ending in a loop, an
+    # else-less `if` or a binding left the leftover stack value as the spend
+    # result.
+    def self.terminal_assert_error(program)
+      program.methods.each do |m|
+        next unless m.is_public && m.name != "constructor"
+        next if _ends_with_terminal_assert(m.body)
+
+        return "public method '#{m.name}' must end with an assert() call " \
+               "(or an if/else whose arms both do, or a terminal raw_script " \
+               "with out_arity 1); otherwise the value its last binding " \
+               "leaves on the stack decides the spend"
+      end
+      nil
+    end
+
     def self._ends_with_terminal_assert(bindings)
       last = (bindings || []).last
       return false if last.nil?

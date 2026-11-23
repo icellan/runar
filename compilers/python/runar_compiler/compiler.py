@@ -275,7 +275,14 @@ def _type_errors_ahead_of_loop_start(valid_result: Any, contract: Any) -> Any:
 def _lower_to_anf(contract: Any) -> ANFProgram:
     """Lower a ContractNode to ANF IR."""
     from runar_compiler.frontend.anf_lower import lower_to_anf
-    return lower_to_anf(contract)
+    from runar_compiler.ir.loader import terminal_assert_error
+    program = lower_to_anf(contract)
+    # N-071 on the source path too (Go's F-004): a terminal stateful method
+    # gets no injected continuation assert, so nothing else enforces it.
+    terminal_error = terminal_assert_error(program)
+    if terminal_error:
+        raise CompilationError(f"IR validation: {terminal_error}")
+    return program
 
 
 def _expand_fixed_arrays(contract: Any) -> Any:
