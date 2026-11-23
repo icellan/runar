@@ -69,14 +69,6 @@ fn isOp(inst: Inst, opcode: Opcode) bool {
     };
 }
 
-/// Extract the integer value from a push_int instruction, or null.
-fn getPushIntValue(inst: Inst) ?i64 {
-    return switch (inst) {
-        .push_int => |v| v,
-        else => null,
-    };
-}
-
 /// Read a constant push operand at full precision, in EITHER representation
 /// (issue #162). Caller owns the result and must `deinit` it.
 ///
@@ -152,15 +144,6 @@ fn instEql(a: Inst, b: Inst) bool {
         .raw_bytes => |ra| std.mem.eql(u8, ra.bytes, b.raw_bytes.bytes) and
             ra.in_arity == b.raw_bytes.in_arity and ra.out_arity == b.raw_bytes.out_arity,
     };
-}
-
-/// Compare two instruction slices for equality.
-fn sliceEql(a: []const Inst, b: []const Inst) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ia, ib| {
-        if (!instEql(ia, ib)) return false;
-    }
-    return true;
 }
 
 // ============================================================================

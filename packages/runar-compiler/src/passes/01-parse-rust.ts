@@ -32,6 +32,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { ParseResult } from './01-parse.js';
+import { promoteTailReturns } from './tail-return.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
@@ -894,16 +895,8 @@ class RustParser extends ParserCore<RustToken> {
     // Rust implicit returns: if the method has `-> Type` and the last statement
     // is an expression_statement (no semicolon in source), convert it to a
     // return_statement so the type checker can infer the return type.
-    if (hasReturnType && body.length > 0) {
-      const last = body[body.length - 1]!;
-      if (last.kind === 'expression_statement') {
-        body[body.length - 1] = {
-          kind: 'return_statement',
-          value: last.expression,
-          sourceLocation: last.sourceLocation,
-        };
-      }
-    }
+    // N-511: also through the arms of a trailing if/else.
+    if (hasReturnType) promoteTailReturns(body);
 
     const visibility: 'public' | 'private' = isPublic ? 'public' : 'private';
 

@@ -471,13 +471,6 @@ func (p *rustMacroParser) advance() rustToken {
 	return t
 }
 
-func (p *rustMacroParser) peek() rustToken {
-	if p.pos+1 < len(p.tokens) {
-		return p.tokens[p.pos+1]
-	}
-	return rustToken{kind: rustTokEOF}
-}
-
 func (p *rustMacroParser) expect(kind rustTokKind) {
 	if p.current().kind != kind {
 		t := p.current()

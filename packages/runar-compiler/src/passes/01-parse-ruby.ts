@@ -40,6 +40,7 @@ import {
   UNTERMINATED_STRING_LITERAL,
 } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
+import { hasValueReturn, promoteTailReturns } from './tail-return.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
@@ -916,16 +917,11 @@ class RbParser {
     // promote it to a ReturnStatement so the Runar AST has an explicit
     // return node for ANF lowering and type checking to consume.
     for (const method of methods) {
+      // N-511: through the arms of a trailing if/else too, but only in a
+      // helper that already returns a value explicitly somewhere, so a void
+      // helper ending in an if/else of asserts is left as it was.
       if (method.visibility === 'private' && method.body.length > 0) {
-        const last = method.body[method.body.length - 1]!;
-        if (last.kind === 'expression_statement') {
-          const exprStmt = last as { kind: string; expression: Expression; sourceLocation?: SourceLocation };
-          method.body[method.body.length - 1] = {
-            kind: 'return_statement',
-            value: exprStmt.expression,
-            sourceLocation: exprStmt.sourceLocation,
-          } as Statement;
-        }
+        promoteTailReturns(method.body, hasValueReturn(method.body));
       }
     }
 

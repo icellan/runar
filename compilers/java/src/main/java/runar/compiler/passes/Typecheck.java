@@ -654,6 +654,21 @@ public final class Typecheck {
                 }
             }
 
+            // N-511: a private method that declares a non-void return type, or
+            // that declares none but returns a non-void value on some path,
+            // must return a value on every path (rule: returnsOnEveryPath).
+            if (m.visibility() != Visibility.PUBLIC) {
+                boolean missing = hasBareReturn(m.body()) || !returnsOnEveryPath(m.body());
+                if (m.returnType() != null) {
+                    String declared = typeToString(m.returnType());
+                    if (!"void".equals(declared) && missing) {
+                        errors.add(format(missingReturnMessage(m.name(), declared), m.sourceLocation()));
+                    }
+                } else if (missing && currentReturnTypes.stream().anyMatch(t -> !"void".equals(t))) {
+                    errors.add(format(undeclaredMissingReturnMessage(m.name()), m.sourceLocation()));
+                }
+            }
+
             // A public method must not return a value.
             if (m.visibility() == Visibility.PUBLIC) {
                 walkReturns(m.body(), r -> {
@@ -1925,6 +1940,53 @@ public final class Typecheck {
     }
 
     /** D12 FE-F4: the one wording every tier emits. */
+    /** N-511: the one wording every tier emits. */
+    public static String missingReturnMessage(String method, String declared) {
+        return "Method '" + method + "' declares return type '" + declared
+            + "' but does not return a value on every path";
+    }
+
+    /** N-511: the one wording every tier emits for a helper with no declared type. */
+    public static String undeclaredMissingReturnMessage(String method) {
+        return "Method '" + method + "' returns a value on some paths but not on every path";
+    }
+
+    /**
+     * N-511: whether a statement list returns a value on every path. A list
+     * returns when one of its statements does; {@code return <value>} returns;
+     * an {@code if} returns only when it has an else and both arms return; a
+     * loop or an expression statement never counts. (Surfaces whose trailing
+     * expression is the value, .runar.rs / .runar.move / .runar.rb, turn it
+     * into a return in the parser.)
+     */
+    static boolean returnsOnEveryPath(List<Statement> stmts) {
+        for (Statement s : stmts) {
+            if (s instanceof ReturnStatement r) {
+                if (r.value() != null) return true;
+            } else if (s instanceof IfStatement f) {
+                if (f.elseBody() != null
+                    && returnsOnEveryPath(f.thenBody())
+                    && returnsOnEveryPath(f.elseBody())) return true;
+            }
+        }
+        return false;
+    }
+
+    /** N-511: whether a value-less {@code return} appears anywhere in the list. */
+    static boolean hasBareReturn(List<Statement> stmts) {
+        if (stmts == null) return false;
+        for (Statement s : stmts) {
+            if (s instanceof ReturnStatement r) {
+                if (r.value() == null) return true;
+            } else if (s instanceof IfStatement f) {
+                if (hasBareReturn(f.thenBody()) || hasBareReturn(f.elseBody())) return true;
+            } else if (s instanceof ForStatement f) {
+                if (hasBareReturn(f.body())) return true;
+            }
+        }
+        return false;
+    }
+
     public static String declaredReturnMismatchMessage(String method, String actual, String declared) {
         return "Method '" + method + "' returns '" + actual + "', which is not assignable to its declared return type '"
             + declared + "'";

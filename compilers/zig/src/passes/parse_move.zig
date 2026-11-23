@@ -23,6 +23,7 @@ const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const tail_return = @import("tail_return.zig");
 const operand_loc = @import("operand_loc.zig");
 const loop_condition = @import("loop_condition.zig");
 const identifier_collision = @import("identifier_collision.zig");
@@ -859,12 +860,6 @@ const Parser = struct {
         return false;
     }
 
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
-    }
-
     // ---- Top-level ----
 
     fn parse(self: *Parser) ParseResult {
@@ -1103,11 +1098,6 @@ const Parser = struct {
         return props.items;
     }
 
-    fn parseMoveTypeName(self: *Parser) RunarType {
-        var discard: []const u8 = "";
-        return self.parseMoveTypeNameNamed(&discard);
-    }
-
     /// `parseMoveTypeName`, additionally reporting the type name as the author
     /// spelled it (final path component), for diagnostics (N-323).
     fn parseMoveTypeNameNamed(self: *Parser, out_name: *[]const u8) RunarType {
@@ -1326,19 +1316,12 @@ const Parser = struct {
             }
         }
 
-        var body = self.parseMoveBlock();
+        const body = self.parseMoveBlock();
 
         // Move implicit return: if function has a return type and the last
         // statement is an expression statement, convert it to a return statement.
-        if (has_return_type and body.len > 0) {
-            const last = &body[body.len - 1];
-            switch (last.*) {
-                .expr_stmt => |e| {
-                    last.* = .{ .return_stmt = .{ .value = e.expr, .source_loc = e.source_loc } };
-                },
-                else => {},
-            }
-        }
+        // N-511: also through the arms of a trailing if/else.
+        if (has_return_type) tail_return.promoteTailReturns(body, true);
 
         // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
         // annotates nothing.

@@ -2629,9 +2629,4 @@ public final class Validate {
                 method.sourceLocation());
         }
     }
-
-    @SuppressWarnings("unused")
-    private static String primitiveName(PrimitiveTypeName p) {
-        return p == null ? "<unknown>" : p.canonical();
-    }
 }

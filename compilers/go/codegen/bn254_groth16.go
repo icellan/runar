@@ -332,30 +332,6 @@ func emitWitnessGradientVerifyFp2(t *BN254Tracker, lamPrefix, denomPrefix, numer
 	t.rename(resultPrefix + "_1")
 }
 
-// emitWitnessInverseVerifyFp12 generates script that verifies a witness-supplied
-// Fp12 inverse. The prover provides both f (12 Fp values) and f_inv (12 Fp values);
-// the locking script verifies f * f_inv == 1 in Fp12.
-//
-// This replaces the extremely expensive Fp12 inverse (~200 KB in script) with
-// one Fp12 mul + 12 equality checks (~2 KB).
-func emitWitnessInverseVerifyFp12(t *BN254Tracker, fPrefix, fInvPrefix, resultPrefix string) {
-	// Compute product = f * f_inv in Fp12
-	bn254Fp12CopyPrefix(t, fPrefix, "_wif12_f")
-	bn254Fp12CopyPrefix(t, fInvPrefix, "_wif12_finv")
-	bn254Fp12Mul(t, "_wif12_f", "_wif12_finv", "_wif12_prod")
-
-	// Check product == 1 in Fp12 (first component 1, rest 0)
-	bn254Fp12IsOne(t, "_wif12_prod", "_wif12_check")
-	t.toTop("_wif12_check")
-	t.rawBlock([]string{"_wif12_check"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	})
-
-	// Drop f, keep f_inv as result
-	bn254Fp12DropInputs(t, fPrefix)
-	bn254Fp12RenamePrefix(t, fInvPrefix, resultPrefix)
-}
-
 // =========================================================================
 // Witness-assisted G1 point addition in Fp
 // =========================================================================
@@ -843,53 +819,6 @@ func emitWAG2SubgroupCheck(t *BN254Tracker, x0, x1, y0, y1 string) {
 			e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
 		})
 	}
-}
-
-// emitWAG1AddFp performs witness-assisted G1 point addition in Fp.
-// The prover supplies the gradient lambda in the unlocking script; the script
-// verifies lambda * (x2 - x1) == (y2 - y1) mod p, then computes the sum point:
-//   x3 = lambda^2 - x1 - x2
-//   y3 = lambda * (x1 - x3) - y1
-//
-// Both input points are consumed; the result point is placed on the tracker.
-func emitWAG1AddFp(t *BN254Tracker, p1xName, p1yName, p2xName, p2yName, lamName, resultXName, resultYName string) {
-	pfx := "_wag1a_"
-
-	// --- Verify the witness gradient ---
-	// Numerator: y2 - y1
-	t.copyToTop(p2yName, pfx+"y2")
-	t.copyToTop(p1yName, pfx+"y1")
-	bn254FieldSub(t, pfx+"y2", pfx+"y1", pfx+"numer")
-
-	// Denominator: x2 - x1
-	t.copyToTop(p2xName, pfx+"x2")
-	t.copyToTop(p1xName, pfx+"x1")
-	bn254FieldSub(t, pfx+"x2", pfx+"x1", pfx+"denom")
-
-	// Verify: lambda * denom == numer in Fp
-	emitWitnessGradientVerifyFp(t, lamName, pfx+"denom", pfx+"numer", pfx+"lam")
-
-	// --- Use verified lambda to compute the sum point ---
-	// x3 = lambda^2 - x1 - x2
-	t.copyToTop(pfx+"lam", pfx+"lamc")
-	bn254FieldSqr(t, pfx+"lamc", pfx+"lamsq")
-	t.copyToTop(p1xName, pfx+"x1b")
-	bn254FieldSub(t, pfx+"lamsq", pfx+"x1b", pfx+"sub1")
-	t.copyToTop(p2xName, pfx+"x2b")
-	bn254FieldSub(t, pfx+"sub1", pfx+"x2b", resultXName)
-
-	// y3 = lambda * (x1 - x3) - y1
-	t.copyToTop(p1xName, pfx+"x1c")
-	t.copyToTop(resultXName, pfx+"x3c")
-	bn254FieldSub(t, pfx+"x1c", pfx+"x3c", pfx+"diff")
-	t.copyToTop(pfx+"lam", pfx+"lamd")
-	bn254FieldMul(t, pfx+"lamd", pfx+"diff", pfx+"lprod")
-	t.copyToTop(p1yName, pfx+"y1b")
-	bn254FieldSub(t, pfx+"lprod", pfx+"y1b", resultYName)
-
-	// Clean up lambda and input points
-	bn254DropNames(t, []string{pfx + "lam"})
-	bn254DropNames(t, []string{p1xName, p1yName, p2xName, p2yName})
 }
 
 // =========================================================================

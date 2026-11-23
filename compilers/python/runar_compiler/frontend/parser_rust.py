@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
 
+from runar_compiler.frontend.tail_return import has_value_return, promote_tail_returns
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -1025,9 +1026,9 @@ class _RustParser:
         self.expect(TOK_RBRACE)
 
         # Rust implicit return: convert last ExpressionStmt to ReturnStmt
-        if has_return_type and body and isinstance(body[-1], ExpressionStmt):
-            last = body[-1]
-            body[-1] = ReturnStmt(value=last.expr, source_location=last.source_location)
+        # (N-511: also through the arms of a trailing if/else.)
+        if has_return_type:
+            promote_tail_returns(body)
 
         return MethodNode(
             name=name,

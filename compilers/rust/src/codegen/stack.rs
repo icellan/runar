@@ -725,11 +725,7 @@ fn roll_sequence(depth: usize, rolls: &[usize]) -> Vec<usize> {
     depths
 }
 
-fn compute_last_uses(bindings: &[ANFBinding]) -> HashMap<String, usize> {
-    compute_last_uses_with_arrays(bindings, None)
-}
-
-/// `compute_last_uses` seeded with the array_literal metadata of an ENCLOSING
+/// Last-use indices of `bindings`, seeded with the array_literal metadata of an ENCLOSING
 /// scope (F-081): an if-arm or loop body can consume an array declared before
 /// it, and its own bindings do not contain that array_literal. Without the
 /// seed an element reached only through the outer array had no last-use here
@@ -809,7 +805,7 @@ fn collect_deep_binding_names(bindings: &[ANFBinding]) -> HashSet<String> {
 
 /// Locals a loop body REBINDS and then READS AGAIN in the same iteration.
 ///
-/// `compute_last_uses` maps a name to the MAXIMUM index that references it, so
+/// `compute_last_uses_with_arrays` maps a name to the MAXIMUM index that references it, so
 /// for a body like
 ///
 /// ```text
@@ -4867,7 +4863,7 @@ impl LoweringContext {
         // args[0] and args[1] are bindings produced by array_literal. Those
         // bindings are NOT physical stack slots — their element refs live on
         // the stack-map as individual named bindings. We pull each element to
-        // TOS via bring_to_top. compute_last_uses propagates each element's
+        // TOS via bring_to_top. compute_last_uses_with_arrays propagates each element's
         // last-use through the array indirection to THIS binding.
         let sigs_ref = &args[0];
         let pks_ref = &args[1];

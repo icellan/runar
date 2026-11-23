@@ -7,6 +7,7 @@
 
 require "set"
 require_relative "ast_nodes"
+require_relative "tail_return"
 require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "identifier_collision"
@@ -923,13 +924,8 @@ module RunarCompiler
         # function declares a return type. Convert the trailing expression
         # statement into an explicit return statement so the type checker
         # can infer the method's return type.
-        if has_return_type && !body.empty? && body.last.is_a?(ExpressionStmt)
-          last = body.last
-          body[-1] = ReturnStmt.new(
-            value: last.expr,
-            source_location: last.source_location
-          )
-        end
+        # N-511: also through the arms of a trailing if/else.
+        TailReturn.promote(body) if has_return_type
 
         # N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
         # annotates nothing.

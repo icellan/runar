@@ -1226,15 +1226,12 @@ impl<'a> RbParser<'a> {
         // and promote it to a ReturnStatement so the AST has an explicit
         // return node for ANF lowering and type checking to consume.
         for method in &mut methods {
-            if method.visibility == Visibility::Private && !method.body.is_empty() {
-                let last_idx = method.body.len() - 1;
-                if let Statement::ExpressionStatement { expression, source_location } = &method.body[last_idx] {
-                    let ret = Statement::ReturnStatement {
-                        value: Some(expression.clone()),
-                        source_location: source_location.clone(),
-                    };
-                    method.body[last_idx] = ret;
-                }
+            // N-511: through the arms of a trailing if/else too, but only in a
+            // helper that already returns a value explicitly somewhere, so a
+            // void helper ending in an if/else of asserts is left as it was.
+            if method.visibility == Visibility::Private {
+                let into_arms = has_value_return(&method.body);
+                promote_tail_returns(&mut method.body, into_arms);
             }
         }
 
@@ -3248,4 +3245,37 @@ end
         assert_eq!(contract.methods[1].name, "verify");
         assert_eq!(contract.methods[1].visibility, Visibility::Public);
     }
+}
+
+/// N-511: the trailing expression statement of a Ruby private helper becomes
+/// an explicit return, recursively through the arms of a trailing if/else
+/// when `into_arms`. The return keeps the expression statement's own source
+/// location, so the lowered ANF is unchanged.
+fn promote_tail_returns(stmts: &mut [Statement], into_arms: bool) {
+    let Some(last) = stmts.last_mut() else { return };
+    match last {
+        Statement::ExpressionStatement { expression, source_location } => {
+            *last = Statement::ReturnStatement {
+                value: Some(expression.clone()),
+                source_location: source_location.clone(),
+            };
+        }
+        Statement::IfStatement { then_branch, else_branch: Some(else_branch), .. } if into_arms => {
+            promote_tail_returns(then_branch, true);
+            promote_tail_returns(else_branch, true);
+        }
+        _ => {}
+    }
+}
+
+/// N-511: whether a `return <value>` appears anywhere in the list.
+fn has_value_return(stmts: &[Statement]) -> bool {
+    stmts.iter().any(|s| match s {
+        Statement::ReturnStatement { value, .. } => value.is_some(),
+        Statement::IfStatement { then_branch, else_branch, .. } => {
+            has_value_return(then_branch) || else_branch.as_deref().is_some_and(has_value_return)
+        }
+        Statement::ForStatement { body, .. } => has_value_return(body),
+        _ => false,
+    })
 }

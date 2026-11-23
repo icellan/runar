@@ -77,7 +77,6 @@ func (e *sha256Emitter) dup()  { e.emit(StackOp{Op: "dup"}); e.depth++ }
 func (e *sha256Emitter) drop() { e.emit(StackOp{Op: "drop"}); e.depth-- }
 func (e *sha256Emitter) swap() { e.emit(StackOp{Op: "swap"}) }
 func (e *sha256Emitter) over() { e.emit(StackOp{Op: "over"}); e.depth++ }
-func (e *sha256Emitter) nip()  { e.emit(StackOp{Op: "nip"}); e.depth-- }
 func (e *sha256Emitter) rot()  { e.emit(StackOp{Op: "rot"}) }
 
 func (e *sha256Emitter) pick(d int) {

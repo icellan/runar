@@ -284,22 +284,6 @@ func bn254Fp2Neg(t *BN254Tracker, a0, a1, r0, r1 string) {
 	bn254FieldNeg(t, a1, r1)
 }
 
-// bn254Fp2IsZero checks if Fp2 element is zero (both components zero).
-// Consumes a0,a1; produces result (boolean).
-func bn254Fp2IsZero(t *BN254Tracker, a0, a1, resultName string) {
-	t.toTop(a0)
-	t.toTop(a1)
-	t.rawBlock([]string{a0, a1}, resultName, func(e func(StackOp)) {
-		// a0 == 0
-		e(StackOp{Op: "opcode", Code: "OP_NOT"})
-		e(StackOp{Op: "swap"})
-		// a1 == 0
-		e(StackOp{Op: "opcode", Code: "OP_NOT"})
-		// both zero
-		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
-	})
-}
-
 // ===========================================================================
 // Helper: multiply Fp element by small constant
 // ===========================================================================
@@ -554,19 +538,6 @@ func bn254Fp2SqrCopy(t *BN254Tracker, aPrefix, rPrefix string) {
 //
 // w^2 = v, so the non-residue for Fp12 over Fp6 is "multiply by v" = Fp6MulByNonResidue.
 
-// bn254Fp12Add computes component-wise Fp12 addition.
-// Consumes 24 Fp slots; produces 12 Fp slots.
-func bn254Fp12Add(t *BN254Tracker, aPrefix, bPrefix, rPrefix string) {
-	bn254Fp6Add(t, aPrefix+"_a", bPrefix+"_a", rPrefix+"_a")
-	bn254Fp6Add(t, aPrefix+"_b", bPrefix+"_b", rPrefix+"_b")
-}
-
-// bn254Fp12Sub computes component-wise Fp12 subtraction.
-func bn254Fp12Sub(t *BN254Tracker, aPrefix, bPrefix, rPrefix string) {
-	bn254Fp6Sub(t, aPrefix+"_a", bPrefix+"_a", rPrefix+"_a")
-	bn254Fp6Sub(t, aPrefix+"_b", bPrefix+"_b", rPrefix+"_b")
-}
-
 // bn254Fp12Mul computes Fp12 multiplication using Karatsuba.
 // a = (a_a, a_b), b = (b_a, b_b) in Fp6[w]/(w^2 - v):
 //   t0 = a_a * b_a
@@ -702,86 +673,11 @@ func bn254Fp12MulSparse(t *BN254Tracker, densePrefix, sparsePrefix, rPrefix stri
 	})
 }
 
-// bn254Fp12MulSparseDropInputs drops the 6 Fp slots of a sparse Fp12 element.
-func bn254Fp12MulSparseDropInputs(t *BN254Tracker, prefix string) {
-	bn254DropNames(t, []string{
-		prefix + "_c0_0", prefix + "_c0_1",
-		prefix + "_c3_0", prefix + "_c3_1",
-		prefix + "_c4_0", prefix + "_c4_1",
-	})
-}
-
 // bn254Fp12MulSparseBySparse was removed along with the old (ell_0, ell_vv, ell_vw)
 // sparse line convention. It was unused in production code. The canonical
 // gnark-crypto form uses (c0, c3, c4) slots and the pairing codegen now
 // multiplies sparse lines into a dense accumulator via bn254Fp12MulSparse
 // directly; a sparse-by-sparse accumulator is not needed here.
-
-// bn254Fp6MulBothC2ZeroKaratsuba multiplies two sparse Fp6 elements where both
-// have c2=0: a = (a0, a1, 0) and b = (b0, b1, 0) in Fp2[v]/(v^3 - xi).
-//
-// Product: (a0 + a1*v)(b0 + b1*v) = a0*b0 + (a0*b1 + a1*b0)*v + a1*b1*v^2
-// Since v^2 does NOT reduce in Fp6 (only v^3 = xi), the result has all 3 components.
-//
-// With Karatsuba on two non-zero terms:
-//
-//	k0 = a0 * b0                    (1 Fp2 mul)
-//	k1 = a1 * b1                    (1 Fp2 mul)
-//	k2 = (a0 + a1) * (b0 + b1)     (1 Fp2 mul)
-//	r_c0 = k0
-//	r_c1 = k2 - k0 - k1
-//	r_c2 = k1
-//
-// Total: 3 Fp2 muls (vs 4 schoolbook).
-//
-// Inputs: a0, a1, b0, b1 as Fp2 prefixes (preserved via copy). Result: rPrefix (6 Fp slots).
-func bn254Fp6MulBothC2ZeroKaratsuba(t *BN254Tracker, a0Prefix, a1Prefix, b0Prefix, b1Prefix, rPrefix string) {
-	// k0 = a0 * b0
-	bn254Fp2MulCopy(t, a0Prefix, b0Prefix, "_f6kk_k0")
-
-	// k1 = a1 * b1
-	bn254Fp2MulCopy(t, a1Prefix, b1Prefix, "_f6kk_k1")
-
-	// k2 = (a0 + a1) * (b0 + b1)
-	t.copyToTop(a0Prefix+"_0", "_f6kk_a0c0")
-	t.copyToTop(a0Prefix+"_1", "_f6kk_a0c1")
-	t.copyToTop(a1Prefix+"_0", "_f6kk_a1c0")
-	t.copyToTop(a1Prefix+"_1", "_f6kk_a1c1")
-	bn254Fp2AddUnreduced(t, "_f6kk_a0c0", "_f6kk_a0c1", "_f6kk_a1c0", "_f6kk_a1c1",
-		"_f6kk_sa_0", "_f6kk_sa_1")
-
-	t.copyToTop(b0Prefix+"_0", "_f6kk_b0c0")
-	t.copyToTop(b0Prefix+"_1", "_f6kk_b0c1")
-	t.copyToTop(b1Prefix+"_0", "_f6kk_b1c0")
-	t.copyToTop(b1Prefix+"_1", "_f6kk_b1c1")
-	bn254Fp2AddUnreduced(t, "_f6kk_b0c0", "_f6kk_b0c1", "_f6kk_b1c0", "_f6kk_b1c1",
-		"_f6kk_sb_0", "_f6kk_sb_1")
-
-	bn254Fp2Mul(t, "_f6kk_sa_0", "_f6kk_sa_1", "_f6kk_sb_0", "_f6kk_sb_1",
-		"_f6kk_k2_0", "_f6kk_k2_1")
-
-	// r_c0 = k0
-	t.copyToTop("_f6kk_k0_0", "_f6kk_k0cp0")
-	t.copyToTop("_f6kk_k0_1", "_f6kk_k0cp1")
-	t.toTop("_f6kk_k0_0")
-	t.rename(rPrefix + "_0_0")
-	t.toTop("_f6kk_k0_1")
-	t.rename(rPrefix + "_0_1")
-
-	// r_c1 = k2 - k0 - k1
-	bn254Fp2Sub(t, "_f6kk_k2_0", "_f6kk_k2_1", "_f6kk_k0cp0", "_f6kk_k0cp1",
-		"_f6kk_sub1_0", "_f6kk_sub1_1")
-	t.copyToTop("_f6kk_k1_0", "_f6kk_k1cp0")
-	t.copyToTop("_f6kk_k1_1", "_f6kk_k1cp1")
-	bn254Fp2Sub(t, "_f6kk_sub1_0", "_f6kk_sub1_1", "_f6kk_k1cp0", "_f6kk_k1cp1",
-		rPrefix+"_1_0", rPrefix+"_1_1")
-
-	// r_c2 = k1
-	t.toTop("_f6kk_k1_0")
-	t.rename(rPrefix + "_2_0")
-	t.toTop("_f6kk_k1_1")
-	t.rename(rPrefix + "_2_1")
-}
 
 // bn254Fp6MulByC2Zero multiplies Fp6 element a by sparse Fp6 element (b0, b1, 0).
 // Given a = (a0, a1, a2) and b = (b0, b1, 0) in Fp2[v]/(v^3 - xi):

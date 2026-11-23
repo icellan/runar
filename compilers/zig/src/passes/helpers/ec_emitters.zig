@@ -175,10 +175,6 @@ const ECTracker = struct {
         };
     }
 
-    fn depth(self: *const ECTracker) usize {
-        return self.names.items.len;
-    }
-
     fn findDepth(self: *const ECTracker, name: []const u8) !usize {
         var i = self.names.items.len;
         while (i > 0) {
@@ -342,10 +338,6 @@ fn emitCatOpcode(t: *ECTracker) !void {
 
 fn emitEqualOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_EQUAL");
-}
-
-fn emitDivOpcode(t: *ECTracker) !void {
-    try t.emitOpcode("OP_DIV");
 }
 
 fn emit2DivOpcode(t: *ECTracker) !void {

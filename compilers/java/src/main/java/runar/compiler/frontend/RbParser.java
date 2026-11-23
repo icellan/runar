@@ -936,13 +936,12 @@ public final class RbParser {
                 // Implicit return for private methods: promote the trailing
                 // ExpressionStatement to a ReturnStatement so callers receive
                 // a value.
-                if (m.visibility() == Visibility.PRIVATE && !body.isEmpty()) {
-                    int last = body.size() - 1;
-                    Statement lastStmt = body.get(last);
-                    if (lastStmt instanceof ExpressionStatement es) {
-                        body = new ArrayList<>(body);
-                        body.set(last, new ReturnStatement(es.expression(), es.sourceLocation()));
-                    }
+                // N-511: through the arms of a trailing if/else too, but only
+                // in a helper that already returns a value explicitly
+                // somewhere, so a void helper ending in an if/else of asserts
+                // is left as it was.
+                if (m.visibility() == Visibility.PRIVATE) {
+                    body = TailReturn.promote(body, TailReturn.hasValueReturn(body));
                 }
                 rewritten.add(new MethodNode(
                     m.name(), m.params(), body, m.visibility(), m.sourceLocation(), m.sighashType(),

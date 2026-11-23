@@ -433,10 +433,6 @@ const Tokenizer = struct {
         return isIdentStart(c) or (c >= '0' and c <= '9');
     }
 
-    fn isHexDigit(c: u8) bool {
-        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-    }
-
     fn identToKind(text: []const u8) TokenKind {
         // TS keywords are identifiers in our tokenizer; we resolve them in the parser.
         // Only true/false need special handling at token level for literal parsing.
@@ -617,12 +613,6 @@ const Parser = struct {
             return true;
         }
         return false;
-    }
-
-    fn heapExpr(self: *Parser, expr: Expression) ?*Expression {
-        const ptr = self.allocator.create(Expression) catch return null;
-        ptr.* = expr;
-        return ptr;
     }
 
     // ---- Top-level ----

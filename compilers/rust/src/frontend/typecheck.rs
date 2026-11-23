@@ -95,22 +95,6 @@ pub fn builtin_allowed_arity(name: &str) -> Option<Vec<usize>> {
     builtin_functions().get(name).map(|sig| vec![sig.params.len()])
 }
 
-/// Does the builtin `name` return a ByteString-family value?
-///
-/// N-347: `anf_lower.rs` answers "is `f(x)` a byte string?" from this, i.e.
-/// from the `return_type` column of `builtin_functions()`, instead of keeping
-/// its own hand-written list. That list drifted twice (N-054, N-345) and was
-/// still missing merkleRootSha256 / merkleRootHash256 / bn254G1Add /
-/// bn254G1Negate / bn254G1ScalarMul, so `f(a) === f(b)` on them compiled to
-/// OP_NUMEQUAL. The table is built once: this runs for every call operand.
-pub(crate) fn builtin_returns_bytes(name: &str) -> bool {
-    static TABLE: std::sync::OnceLock<HashMap<&'static str, FuncSig>> = std::sync::OnceLock::new();
-    TABLE
-        .get_or_init(builtin_functions)
-        .get(name)
-        .is_some_and(|sig| is_bytestring_subtype(sig.return_type))
-}
-
 fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     let mut m = HashMap::new();
 
@@ -891,6 +875,8 @@ impl<'a> TypeChecker<'a> {
 
         self.current_return_types.clear();
         self.check_statements(&method.body, &mut env);
+        // N-511 reads the returned value types after the FE-F4 block takes them.
+        let seen_return_types = self.current_return_types.clone();
 
         // D12 FE-F4: an undeclared private return type is inferred by unifying
         // the returned values. Values that do not unify used to be typed by the
@@ -905,6 +891,28 @@ impl<'a> TypeChecker<'a> {
             {
                 let msg = incompatible_return_types_message(&method.name, &seen);
                 self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone())));
+            }
+        }
+
+        // N-511: a private method that declares a non-void return type, or
+        // that declares none but returns a non-void value on some path, must
+        // return a value on every path (rule: `returns_on_every_path`).
+        if method.visibility != Visibility::Public {
+            let missing = has_bare_return(&method.body) || !returns_on_every_path(&method.body);
+            match method.return_type.as_ref() {
+                Some(rt) => {
+                    let declared = type_node_to_ttype(rt);
+                    if declared != "void" && missing {
+                        let msg = missing_return_message(&method.name, &declared);
+                        self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone())));
+                    }
+                }
+                None => {
+                    if missing && seen_return_types.iter().any(|t| t != "void") {
+                        let msg = undeclared_missing_return_message(&method.name);
+                        self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone())));
+                    }
+                }
             }
         }
 
@@ -2545,6 +2553,47 @@ pub fn incompatible_return_types_message(method: &str, types: &[TType]) -> Strin
         method,
         quoted.join(", ")
     )
+}
+
+/// N-511: the one wording every tier emits.
+pub fn missing_return_message(method: &str, declared: &str) -> String {
+    format!(
+        "Method '{}' declares return type '{}' but does not return a value on every path",
+        method, declared
+    )
+}
+
+/// N-511: the one wording every tier emits for a helper with no declared type.
+pub fn undeclared_missing_return_message(method: &str) -> String {
+    format!("Method '{}' returns a value on some paths but not on every path", method)
+}
+
+/// N-511: whether a statement list returns a value on every path. A list
+/// returns when one of its statements does; `return <value>` returns; an `if`
+/// returns only when it has an else and both arms return; a loop or an
+/// expression statement never counts. (Surfaces whose trailing expression is
+/// the value, .runar.rs / .runar.move / .runar.rb, turn it into a return in
+/// the parser.)
+fn returns_on_every_path(stmts: &[Statement]) -> bool {
+    stmts.iter().any(|s| match s {
+        Statement::ReturnStatement { value, .. } => value.is_some(),
+        Statement::IfStatement { then_branch, else_branch: Some(else_branch), .. } => {
+            returns_on_every_path(then_branch) && returns_on_every_path(else_branch)
+        }
+        _ => false,
+    })
+}
+
+/// N-511: whether a value-less `return` appears anywhere in the list.
+fn has_bare_return(stmts: &[Statement]) -> bool {
+    stmts.iter().any(|s| match s {
+        Statement::ReturnStatement { value, .. } => value.is_none(),
+        Statement::IfStatement { then_branch, else_branch, .. } => {
+            has_bare_return(then_branch) || else_branch.as_deref().is_some_and(has_bare_return)
+        }
+        Statement::ForStatement { body, .. } => has_bare_return(body),
+        _ => false,
+    })
 }
 
 /// D12 FE-F4: the one wording every tier emits.

@@ -95,7 +95,6 @@ func (em *blake3Emitter) dup()  { em.emit(StackOp{Op: "dup"}); em.depth++ }
 func (em *blake3Emitter) drop() { em.emit(StackOp{Op: "drop"}); em.depth-- }
 func (em *blake3Emitter) swap() { em.emit(StackOp{Op: "swap"}) }
 func (em *blake3Emitter) over() { em.emit(StackOp{Op: "over"}); em.depth++ }
-func (em *blake3Emitter) nip()  { em.emit(StackOp{Op: "nip"}); em.depth-- }
 func (em *blake3Emitter) rot()  { em.emit(StackOp{Op: "rot"}) }
 
 func (em *blake3Emitter) pick(d int) {

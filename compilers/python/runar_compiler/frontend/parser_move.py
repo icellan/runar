@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from runar_compiler.frontend.diagnostic import declared_return_type  # D12 FE-F4
 
+from runar_compiler.frontend.tail_return import has_value_return, promote_tail_returns
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -899,13 +900,9 @@ class _MoveParser:
         # function declares a return type. Convert the trailing expression
         # statement into an explicit return statement so the type checker
         # can infer the method's return type.
-        if has_return_type and body:
-            last = body[-1]
-            if isinstance(last, ExpressionStmt):
-                body[-1] = ReturnStmt(
-                    value=last.expr,
-                    source_location=last.source_location,
-                )
+        # N-511: also through the arms of a trailing if/else.
+        if has_return_type:
+            promote_tail_returns(body)
 
         # N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
         # annotates nothing.

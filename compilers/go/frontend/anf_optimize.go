@@ -356,11 +356,6 @@ func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFVal
 	return applyECRules(b, lookup, used, rebound, scope)
 }
 
-func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) bool {
-	_, ok := optimizeBindingECWithInserts(b, lookup, used, rebound, nil)
-	return ok
-}
-
 // collectUsedNames returns every name the method already uses — binding names
 // at any depth (if/loop arms included), loop iteration variables, params, and
 // the contract's properties (F-086). A scalar-fusing rewrite mints a new
