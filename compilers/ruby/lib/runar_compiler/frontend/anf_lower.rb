@@ -2046,12 +2046,22 @@ module RunarCompiler
           return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_newAmount" })
         end
 
-        # currentBlockHeight() -> bigint. Pure source-level desugar to
-        # extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
-        # methods (typecheck enforces).
+        # currentBlockHeight() -> bigint. Desugars to extractLocktime(this.txPreimage)
+        # AND pins the locktime domain at the use site (an nLockTime >= 500000000
+        # is a Unix timestamp). One pin per call; emission order matches
+        # 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
+        # Only valid in StatefulSmartContract methods (typecheck enforces).
         if callee.is_a?(Identifier) && callee.name == "currentBlockHeight"
           preimage_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
-          return emit(Frontend._make_call("extractLocktime", [preimage_ref]))
+          height_ref = emit(Frontend._make_call("extractLocktime", [preimage_ref]))
+          threshold_ref = emit(Frontend._make_load_const_int(500_000_000))
+          in_domain_ref = emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+            v.op = "<"
+            v.left = height_ref
+            v.right = threshold_ref
+          end)
+          emit(Frontend._make_assert(in_domain_ref))
+          return height_ref
         end
 
         # this.addOutput(satoshis, val1, val2, ...) via PropertyAccessExpr

@@ -188,6 +188,7 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "slhdsa-naive-256f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256f);
     if (std.mem.eql(u8, probe_case, "slhdsa-naive-256s-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256s);
     if (std.mem.eql(u8, probe_case, "intent-current-block-height-past-deadline")) return probeIntentCurrentBlockHeightPastDeadline();
+    if (std.mem.eql(u8, probe_case, "intent-current-block-height-timestamp-locktime")) return probeIntentCurrentBlockHeightTimestampLocktime();
     if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-wrong-pkh")) return probeIntentOutputP2PKHWrongPkh();
     if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-wrong-amount")) return probeIntentOutputP2PKHWrongAmount();
     if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-no-outputs")) return probeIntentOutputP2PKHNoOutputs();
@@ -266,6 +267,14 @@ fn probeP384EncodeNegateNegateThenEncodeWrong() !void {
 fn probeIntentCurrentBlockHeightPastDeadline() !void {
     _ = runar.setMockBlockHeight(101);
     var c = IntentCurrentBlockHeight.init(100, 0);
+    c.spend();
+}
+
+// An nLockTime of 500000000 is a Unix timestamp: currentBlockHeight() refuses
+// it even though it is below the deadline.
+fn probeIntentCurrentBlockHeightTimestampLocktime() !void {
+    _ = runar.setMockBlockHeight(500000000);
+    var c = IntentCurrentBlockHeight.init(2000000000, 0);
     c.spend();
 }
 

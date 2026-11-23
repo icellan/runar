@@ -33,3 +33,9 @@ test "IntentCurrentBlockHeight spend passes at and below the deadline" {
 test "IntentCurrentBlockHeight spend aborts past the deadline" {
     try root.expectAssertFailure("intent-current-block-height-past-deadline");
 }
+
+// Proves: a timestamp-domain mock height (500000000, below the deadline) aborts
+// with the Runar assertion, as the compiled script's currentBlockHeight pin does.
+test "IntentCurrentBlockHeight spend aborts on a timestamp-domain locktime" {
+    try root.expectAssertFailure("intent-current-block-height-timestamp-locktime");
+}

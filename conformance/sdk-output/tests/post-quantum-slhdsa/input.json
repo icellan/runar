@@ -55,7 +55,15 @@
           "kind": "code"
         }
       ]
-    }
+    },
+    "pqPubKeyParams": [
+      {
+        "index": 0,
+        "name": "pubkey",
+        "scheme": "verifySLHDSA_SHA2_128s",
+        "length": 32
+      }
+    ]
   },
   "constructorArgs": [
     {

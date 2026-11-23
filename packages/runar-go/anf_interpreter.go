@@ -1820,14 +1820,23 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return nil
 
 	case "currentBlockHeight":
-		// Source-level sugar for extractLocktime(this.txPreimage). The TS
-		// reference returns _mockPreimage.locktime, defaulting to 0n.
+		// extractLocktime(this.txPreimage), pinned to the block-height domain
+		// as the compiled script asserts (an nLockTime >= 500000000 is a Unix
+		// timestamp). The TS reference reads _mockPreimage.locktime (default 0n).
+		lt := big.NewInt(0)
 		if fixture != nil && fixture.mockPreimage != nil {
 			if v, ok := fixture.mockPreimage["locktime"]; ok && v != nil {
-				return new(big.Int).Set(v)
+				lt = new(big.Int).Set(v)
 			}
 		}
-		return big.NewInt(0)
+		if lt.Cmp(big.NewInt(500000000)) >= 0 {
+			panic(&IntentIntrinsicError{
+				Intrinsic:  "currentBlockHeight",
+				MethodName: methodName,
+				Message:    fmt.Sprintf("currentBlockHeight(): nLockTime %s is a Unix timestamp (>= 500000000), not a block height", lt.String()),
+			})
+		}
+		return lt
 	}
 
 	return nil

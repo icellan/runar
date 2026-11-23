@@ -3138,18 +3138,31 @@ fn lower_call_expr(
         }
     }
 
-    // currentBlockHeight() -> bigint. Pure source-level desugar to
-    // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
-    // methods (typecheck enforces). No new ANF kind or stack codegen needed.
+    // currentBlockHeight() -> bigint. Desugars to extractLocktime(this.txPreimage)
+    // AND pins the locktime domain at the use site (an nLockTime >= 500000000
+    // is a Unix timestamp). One pin per call; emission order matches
+    // 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
+    // Only valid in StatefulSmartContract methods (typecheck enforces).
     if let Expression::Identifier { name, .. } = callee {
         if name == "currentBlockHeight" {
             let preimage_ref = ctx.emit(ANFValue::LoadParam {
                 name: "txPreimage".to_string(),
             });
-            return ctx.emit(ANFValue::Call {
+            let height_ref = ctx.emit(ANFValue::Call {
                 func: "extractLocktime".to_string(),
                 args: vec![preimage_ref],
             });
+            let threshold_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::Number(serde_json::Number::from(500_000_000i64)),
+            });
+            let in_domain_ref = ctx.emit(ANFValue::BinOp {
+                op: "<".to_string(),
+                left: height_ref.clone(),
+                right: threshold_ref,
+                result_type: None,
+            });
+            ctx.emit(ANFValue::Assert { value: in_domain_ref, is_auto_injected_state_check: false });
+            return height_ref;
         }
     }
 

@@ -38,6 +38,7 @@ fn make_artifact(script: &str, contract_name: &str, methods: Vec<AbiMethod>) -> 
         code_separator_indices: None,
         anf: None,
         unsound_primitives: None,
+        pq_pub_key_params: None,
     }
 }
 

@@ -2675,55 +2675,68 @@ _PQ_PUBKEY_BYTES = {
 }
 
 
-def _pq_pubkey_props(anf: dict) -> dict:
-    """Map property name -> (verifier, required pk bytes) for every property
-    that is loaded straight into a PQ verifier's pk operand (3rd arg)."""
-    found: dict = {}
-
-    def walk(bindings: list, defs: dict) -> None:
-        for b in bindings or []:
-            v = b.get('value') or {}
-            defs[b.get('name')] = v
-            kind = v.get('kind')
-            if kind == 'if':
-                walk(v.get('then'), defs)
-                walk(v.get('else'), defs)
-            elif kind == 'loop':
-                walk(v.get('body'), defs)
-            elif kind == 'call' and v.get('func') in _PQ_PUBKEY_BYTES:
-                args = v.get('args') or []
-                src = defs.get(args[2]) if len(args) > 2 else None
-                if src and src.get('kind') == 'load_prop':
-                    found[src['name']] = (v['func'], _PQ_PUBKEY_BYTES[v['func']])
-
+def _pq_pub_key_params_from_anf(anf: dict, ctor_names: list[str]) -> list[dict]:
+    """``pqPubKeyParams`` derived from an artifact's ANF exactly as the
+    compilers do (packages/runar-ir-schema/src/pq-pubkey.ts): every method,
+    nested if / loop bodies, ``@ref:`` aliases, pk = the verifier call's third
+    arg, kept to constructor params, deduplicated, sorted by (index, scheme)."""
+    out: list[dict] = []
+    seen: set = set()
     for m in (anf or {}).get('methods', []):
-        walk(m.get('body'), {})
-    return found
+        prop_of: dict = {}
+
+        def walk(bindings: list) -> None:
+            for b in bindings or []:
+                v = b.get('value') or {}
+                kind = v.get('kind')
+                if kind == 'load_prop' and isinstance(v.get('name'), str):
+                    prop_of[b.get('name')] = v['name']
+                elif kind == 'load_const':
+                    c = v.get('value')
+                    if isinstance(c, str) and c.startswith('@ref:') and c[5:] in prop_of:
+                        prop_of[b.get('name')] = prop_of[c[5:]]
+                elif kind == 'call' and v.get('func') in _PQ_PUBKEY_BYTES:
+                    args = v.get('args') or []
+                    prop = prop_of.get(args[2]) if len(args) > 2 else None
+                    if prop is not None and prop in ctor_names and (prop, v['func']) not in seen:
+                        seen.add((prop, v['func']))
+                        out.append({'index': ctor_names.index(prop), 'name': prop,
+                                    'scheme': v['func'], 'length': _PQ_PUBKEY_BYTES[v['func']]})
+                for nested in ('then', 'else', 'body'):
+                    if isinstance(v.get(nested), list):
+                        walk(v[nested])
+
+        walk(m.get('body'))
+    out.sort(key=lambda e: (e['index'], e['scheme']))
+    return out
 
 
 def _check_pq_pubkey_ctor_args(artifact: RunarArtifact, args: list) -> None:
-    """D12 PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA
-    verifier's public key directly when it has the wrong length. The compiled
-    verifier splits the key at fixed offsets, so a wrong-length key deploys an
-    output that refuses the owner's valid signature forever. Only artifacts
-    that carry ANF (stateful contracts) expose the data flow; a hash-committed
-    key cannot be checked at all."""
-    if not artifact.anf:
-        return
-    props = _pq_pubkey_props(artifact.anf)
-    if not props:
-        return
-    for param, arg in zip(artifact.abi.constructor_params, args):
-        hit = props.get(param.name)
-        if hit is None or not isinstance(arg, str):
+    """PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA verifier's
+    public key directly when it has the wrong length. The compiled verifier
+    splits the key at fixed offsets, so a wrong-length key deploys an output
+    that refuses the owner's valid signature forever. The params come from the
+    artifact's ``pqPubKeyParams`` (stateless artifacts included); an artifact
+    that predates the field falls back to the same walk over its ANF (stateful
+    only). A hash-committed key cannot be checked. Same message in all seven
+    SDKs."""
+    params = artifact.pq_pub_key_params
+    if params is None:
+        if not artifact.anf:
+            return
+        params = _pq_pub_key_params_from_anf(
+            artifact.anf, [p.name for p in artifact.abi.constructor_params])
+    for p in params:
+        idx = p['index']
+        arg = args[idx] if 0 <= idx < len(args) else None
+        if not isinstance(arg, str) or len(arg) % 2 != 0:
             continue
-        func, want = hit
         got = len(arg) // 2
-        if got != want:
+        if got != p['length']:
             raise InvalidConstructorArgError(
-                f"RunarContract: constructor arg '{param.name}' of {artifact.contract_name} is the "
-                f"{func} public key and must be {want} bytes, got {got}: the compiled verifier "
-                "would refuse every valid signature"
+                f"RunarContract: constructor arg '{p['name']}' is the {p['scheme']} public key and must be "
+                f"exactly {p['length']} bytes, got {got}. A locking script built from it would refuse every "
+                "valid signature, so the output could never be spent (PQ-F1)"
             )
 
 

@@ -1,9 +1,9 @@
 {
   "fixture": "intent-current-block-height",
   "kind": "stateful",
-  "note": "spend(): currentBlockHeight() (nLockTime read as a block height) must be <= deadline, then count++. The call nLockTime is threaded via CallOptions.locktime. Real checkPreimage continuation.",
+  "note": "spend(): currentBlockHeight() (nLockTime read as a block height, pinned < 500000000 by the compiler at every call) must be <= deadline, then count++. The call nLockTime is threaded via CallOptions.locktime. Real checkPreimage continuation. The deadline is far in the future so the timestamp-domain spend is refused by the currentBlockHeight pin alone.",
   "constructorArgs": [
-    "1000000n",
+    "2000000000n",
     "1n"
   ],
   "signerKey": "alice",
@@ -13,10 +13,17 @@
       "args": [],
       "lockTime": 500000,
       "expect": "accept",
-      "note": "height 500000 <= deadline 1000000, count 1->2",
+      "note": "height 500000 <= deadline 2000000000, count 1->2",
       "expectedState": {
         "count": "2n"
       }
+    },
+    {
+      "method": "spend",
+      "args": [],
+      "lockTime": 500000000,
+      "expect": "reject",
+      "note": "nLockTime 500000000 is a Unix timestamp: refused by the currentBlockHeight() height-domain pin although it is below the deadline"
     },
     {
       "method": "spend",
@@ -29,7 +36,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "3e8595e97b1955f09d049956af7e26a07b76b0f61e1de7237b53ba3760e833ca",
-    "expected-ir.json": "bfd7e083e466cd33ef47dbd504e3a18b2b6e2b48861f8ac5f23af0ebdd1278b6"
+    "expected-script.hex": "1d5456f6552ae198f3aabdcd52d69f82929be35a02135bc0d9a3dbb5565ccf63",
+    "expected-ir.json": "5a4f1d88d885acbf8a3354b7f365b9432d816204f360b7b95c3b008acd2b050e"
   }
 }

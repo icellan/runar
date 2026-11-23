@@ -791,9 +791,9 @@ Pass the new value to `addOutput(...)` instead. A write between two
 Consensus reads an `nLockTime` below 500000000 as a block height and one at or
 above it as a Unix timestamp. A height gate `extractLocktime(p) >= deadline` is
 therefore passed at once by any locktime of 500000000 or more. Every path
-through a public method that compares a locktime read (`extractLocktime`,
-`currentBlockHeight()`, a local or helper parameter bound to one, or a value
-computed from one) against a lower bound must also assert its domain:
+through a public method that compares a locktime read (`extractLocktime`, a
+local or helper parameter bound to it, or a value computed from it) against a
+lower bound must also assert its domain:
 `assert(extractLocktime(p) < 500000000n)` for a height gate, or
 `assert(extractLocktime(p) >= 500000000n)` for a timestamp gate. The pin
 counts only as an asserted condition or a top-level `&&` conjunct of one, on
@@ -804,6 +804,17 @@ is no gate. Every compiler refuses an unpinned path (on the `--ir` path too):
 
 ```
 method 'm' compares extractLocktime against a lower bound without pinning the locktime domain: consensus reads an nLockTime of 500000000 or more as a Unix timestamp, so on that path any such locktime passes a block-height gate at once. On every path that compares, assert(extractLocktime(preimage) < 500000000n) for a block-height gate, or assert(extractLocktime(preimage) >= 500000000n) for a timestamp gate
+```
+
+`currentBlockHeight()` needs no pin: every call asserts its own value is below
+500000000, so a comparison on it is a height gate by construction. A lower
+bound on it in the timestamp domain could therefore never pass, and every
+compiler refuses one written against a literal (directly, or through a local
+bound only to `currentBlockHeight()`); use `extractLocktime` for a timestamp
+gate:
+
+```
+method 'm' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts its value is below 500000000 (a block height), so this compare can never pass and an output gated on it could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate
 ```
 
 ### Oracle

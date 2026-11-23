@@ -88,7 +88,13 @@ def main():
         return
     args = [convert_arg(a) for a in data['constructorArgs']]
 
-    contract = RunarContract(artifact, args)
+    # PQ-F1 (and every other construction-time refusal): a refused constructor
+    # arg is a RESULT, not a crash — print the reason, exit non-zero.
+    try:
+        contract = RunarContract(artifact, args)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
     if data.get('inscription'):
         insc = data['inscription']
         # N-043: a refused attach is a RESULT, not a crash — exit non-zero with

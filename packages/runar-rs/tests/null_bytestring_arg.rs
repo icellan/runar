@@ -62,6 +62,7 @@ fn make_artifact(byte_string_param_name: &str) -> RunarArtifact {
         code_separator_indices: None,
         anf: None,
         unsound_primitives: None,
+        pq_pub_key_params: None,
     }
 }
 

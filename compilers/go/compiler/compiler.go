@@ -150,6 +150,7 @@ type Artifact struct {
 	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
 	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
 	RawScriptSpans       []RawScriptSpan    `json:"rawScriptSpans,omitempty"`
+	PqPubKeyParams       []PqPubKeyParam    `json:"pqPubKeyParams,omitempty"` // PQ-F1
 	BuildTimestamp       string             `json:"buildTimestamp"`
 	ANF                  *ir.ANFProgram     `json:"anf,omitempty"`
 	SourceMapData        *SourceMap         `json:"sourceMap,omitempty"`
@@ -467,6 +468,13 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		RawScriptSpans:       rawScriptSpans, // N-151: omitempty, matching the TS assembler
 		BuildTimestamp:       buildTimestamp(),
 	}
+
+	// PQ-F1: constructor params that are a post-quantum verifier's public key.
+	ctorNames := make([]string, len(constructorParams))
+	for i, p := range constructorParams {
+		ctorNames[i] = p.Name
+	}
+	artifact.PqPubKeyParams = pqPubKeyParams(program, ctorNames)
 
 	// Always include ANF IR for stateful contracts — the SDK uses it
 	// to auto-compute state transitions without requiring manual newState.

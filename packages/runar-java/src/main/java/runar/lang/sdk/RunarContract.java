@@ -153,62 +153,83 @@ public final class RunarContract {
     );
 
     /**
-     * D12 PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA
-     * verifier's public key directly (a property load as the verifier's 3rd
-     * arg) when it has the wrong length. The compiled verifier splits the key
-     * at fixed offsets, so the deployed output would refuse the owner's valid
-     * signature forever. Only artifacts that carry ANF (stateful) expose the
-     * data flow; a hash-committed key cannot be checked at all.
+     * PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA verifier's
+     * public key directly when it has the wrong length. The compiled verifier
+     * splits the key at fixed offsets, so the deployed output would refuse the
+     * owner's valid signature forever. The params come from the artifact's
+     * {@code pqPubKeyParams} (stateless artifacts included); an artifact that
+     * predates the field falls back to the same walk over its ANF (stateful
+     * only). A hash-committed key cannot be checked. Same message in all seven
+     * SDKs.
      */
-    @SuppressWarnings("unchecked")
     private static void checkPqPubkeyCtorArgs(RunarArtifact artifact, List<Object> args) {
-        Map<String, Object> anf = artifact.anf();
-        if (anf == null || !(anf.get("methods") instanceof List<?> methods)) return;
-        Map<String, String> propToFunc = new HashMap<>();
-        for (Object m : methods) {
-            if (m instanceof Map<?, ?> mm) {
-                collectPqPubkeyProps((List<Object>) mm.get("body"), new HashMap<>(), propToFunc);
-            }
+        List<RunarArtifact.PqPubKeyParam> params = artifact.pqPubKeyParams();
+        if (params == null) {
+            if (artifact.anf() == null) return;
+            List<String> names = new java.util.ArrayList<>();
+            for (RunarArtifact.ABIParam p : artifact.abi().constructor().params()) names.add(p.name());
+            params = pqPubKeyParamsFromAnf(artifact.anf(), names);
         }
-        if (propToFunc.isEmpty()) return;
-        List<RunarArtifact.ABIParam> params = artifact.abi().constructor().params();
-        for (int i = 0; i < params.size() && i < args.size(); i++) {
-            String func = propToFunc.get(params.get(i).name());
-            if (func == null || !(args.get(i) instanceof String hex)) continue;
-            int want = PQ_PUBKEY_BYTES.get(func);
+        for (RunarArtifact.PqPubKeyParam p : params) {
+            if (p.index() < 0 || p.index() >= args.size()) continue;
+            if (!(args.get(p.index()) instanceof String hex) || hex.length() % 2 != 0) continue;
             int got = hex.length() / 2;
-            if (got != want) {
+            if (got != p.length()) {
                 throw new InvalidConstructorArgException(
-                    "RunarContract: constructor arg '" + params.get(i).name() + "' of " + artifact.contractName()
-                        + " is the " + func + " public key and must be " + want + " bytes, got " + got
-                        + ": the compiled verifier would refuse every valid signature");
+                    "RunarContract: constructor arg '" + p.name() + "' is the " + p.scheme()
+                        + " public key and must be exactly " + p.length() + " bytes, got " + got
+                        + ". A locking script built from it would refuse every valid signature, so the output"
+                        + " could never be spent (PQ-F1)");
             }
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static void collectPqPubkeyProps(List<Object> bindings, Map<String, Map<String, Object>> defs,
-                                             Map<String, String> out) {
-        if (bindings == null) return;
-        for (Object o : bindings) {
-            if (!(o instanceof Map<?, ?> b)) continue;
-            Object vo = b.get("value");
-            if (!(vo instanceof Map<?, ?>)) continue;
-            Map<String, Object> v = (Map<String, Object>) vo;
-            defs.put(String.valueOf(b.get("name")), v);
-            Object kind = v.get("kind");
-            if ("if".equals(kind)) {
-                collectPqPubkeyProps((List<Object>) v.get("then"), defs, out);
-                collectPqPubkeyProps((List<Object>) v.get("else"), defs, out);
-            } else if ("loop".equals(kind)) {
-                collectPqPubkeyProps((List<Object>) v.get("body"), defs, out);
-            } else if ("call".equals(kind) && PQ_PUBKEY_BYTES.containsKey(String.valueOf(v.get("func")))) {
-                if (v.get("args") instanceof List<?> a && a.size() > 2) {
-                    Map<String, Object> src = defs.get(String.valueOf(a.get(2)));
-                    if (src != null && "load_prop".equals(src.get("kind"))) {
-                        out.put(String.valueOf(src.get("name")), String.valueOf(v.get("func")));
-                    }
+    /**
+     * {@code pqPubKeyParams} derived from an artifact's ANF exactly as the
+     * compilers do ({@code packages/runar-ir-schema/src/pq-pubkey.ts}): every
+     * method, nested if / loop bodies, {@code @ref:} aliases, pk = the verifier
+     * call's third arg, kept to constructor params, deduplicated, sorted by
+     * (index, scheme).
+     */
+    static List<RunarArtifact.PqPubKeyParam> pqPubKeyParamsFromAnf(Map<String, Object> anf, List<String> ctorNames) {
+        List<RunarArtifact.PqPubKeyParam> out = new java.util.ArrayList<>();
+        if (anf.get("methods") instanceof List<?> methods) {
+            for (Object m : methods) {
+                if (m instanceof Map<?, ?> mm && mm.get("body") instanceof List<?> body) {
+                    collectPqPubkeyParams(body, new HashMap<>(), ctorNames, out);
                 }
+            }
+        }
+        out.sort(java.util.Comparator.comparingInt(RunarArtifact.PqPubKeyParam::index)
+            .thenComparing(RunarArtifact.PqPubKeyParam::scheme));
+        return out;
+    }
+
+    private static void collectPqPubkeyParams(List<?> bindings, Map<String, String> propOf,
+                                              List<String> ctorNames, List<RunarArtifact.PqPubKeyParam> out) {
+        for (Object o : bindings) {
+            if (!(o instanceof Map<?, ?> b) || !(b.get("value") instanceof Map<?, ?> v)) continue;
+            String name = String.valueOf(b.get("name"));
+            Object kind = v.get("kind");
+            if ("load_prop".equals(kind) && v.get("name") instanceof String pn) {
+                propOf.put(name, pn);
+            } else if ("load_const".equals(kind) && v.get("value") instanceof String c
+                && c.startsWith("@ref:") && propOf.containsKey(c.substring(5))) {
+                propOf.put(name, propOf.get(c.substring(5)));
+            } else if ("call".equals(kind) && v.get("func") instanceof String func
+                && PQ_PUBKEY_BYTES.containsKey(func) && v.get("args") instanceof List<?> a && a.size() > 2) {
+                String prop = propOf.get(String.valueOf(a.get(2)));
+                int index = prop == null ? -1 : ctorNames.indexOf(prop);
+                boolean dup = false;
+                for (RunarArtifact.PqPubKeyParam e : out) {
+                    if (e.name().equals(prop) && e.scheme().equals(func)) dup = true;
+                }
+                if (index >= 0 && !dup) {
+                    out.add(new RunarArtifact.PqPubKeyParam(index, prop, func, PQ_PUBKEY_BYTES.get(func)));
+                }
+            }
+            for (String nested : new String[] {"then", "else", "body"}) {
+                if (v.get(nested) instanceof List<?> l) collectPqPubkeyParams(l, propOf, ctorNames, out);
             }
         }
     }

@@ -224,9 +224,14 @@ Compiler-enforced constraints:
 
 ### `runar.CurrentBlockHeight() -> Bigint`
 
-Returns the spending tx's `nLockTime`. Pure source-level sugar for
-`runar.ExtractLocktime(this.TxPreimage)`; emits identical Stack-IR. Only
-callable inside stateful contracts (needs the auto-injected `txPreimage`).
+Returns the spending tx's `nLockTime`, read as a block height: it lowers to
+`runar.ExtractLocktime(this.TxPreimage)` plus an asserted
+`< 500000000` height-domain pin at every call, so a spend whose `nLockTime`
+is a Unix timestamp fails the script. Only callable inside stateful contracts
+(needs the auto-injected `txPreimage`). It therefore cannot be used for a
+timestamp window: spell that with `runar.ExtractLocktime(c.TxPreimage)` (the
+compiler refuses a `CurrentBlockHeight()` compare against a timestamp literal,
+because it could never pass).
 
 **The name is misleading and kept only for source compatibility: this is not
 the chain height.** `nLockTime` is written by the spender and enforced by
@@ -242,8 +247,8 @@ locktime (below 500000000) is not comparable with them, and the compiler
 refuses the compare without the pin (D26).
 
 ```go
-runar.Assert(runar.CurrentBlockHeight() >= 500000000) // timestamp domain
-if runar.CurrentBlockHeight() > c.TOpen + windowSecs {
+runar.Assert(runar.ExtractLocktime(c.TxPreimage) >= 500000000) // timestamp domain
+if runar.ExtractLocktime(c.TxPreimage) > c.TOpen + windowSecs {
     // expired branch — sound only alongside the ExtractSequence finality guard
 }
 ```

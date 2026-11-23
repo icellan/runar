@@ -540,10 +540,27 @@ const TEST_SPECS: TestSpec[] = [
     ],
   },
   {
+    // PQ-F1: verifyWOTS splits its key as pubSeed(32) || pkRoot(32), so the
+    // deployed key must be 64 bytes. This spec used a 32-byte key, which every
+    // SDK now refuses (see post-quantum-wots-short-key-refused below).
     name: 'post-quantum-wots',
+    constructorArgs: [
+      { type: 'ByteString', value: HASH32 + HASH32 },
+    ],
+  },
+  {
+    name: 'post-quantum-wots-short-key-refused',
+    source: 'examples/ts/post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure.runar.ts',
     constructorArgs: [
       { type: 'ByteString', value: HASH32 },
     ],
+    expectRefusal: {
+      pattern: "constructor arg 'pubkey' is the verifyWOTS public key and must be exactly 64 bytes, got 32",
+      reason:
+        'PQ-F1. The artifact lists the param in pqPubKeyParams (64 bytes for verifyWOTS); a 32-byte key ' +
+        'deploys a locking script that refuses every valid WOTS+ signature, so the funds could never be ' +
+        'spent. All seven SDKs must refuse it before deploying, with the shared message.',
+    },
   },
   {
     name: 'stateful',

@@ -478,9 +478,12 @@ pub fn setMockBlockHeight(height: base.Bigint) base.Bigint {
 }
 
 /// currentBlockHeight is the native form of the locktime-as-height shorthand.
-/// On-chain the compiler desugars to extractLocktime(txPreimage); natively it
-/// returns the value set with `setMockBlockHeight` (0 by default).
+/// On-chain the compiler desugars to extractLocktime(txPreimage) and asserts
+/// the value is < 500000000 (an nLockTime at or above that is a Unix
+/// timestamp, not a height); natively it returns the value set with
+/// `setMockBlockHeight` (0 by default) under the same assertion.
 pub fn currentBlockHeight() base.Bigint {
+    assert(mock_block_height < 500000000);
     return mock_block_height;
 }
 

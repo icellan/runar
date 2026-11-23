@@ -8,8 +8,9 @@ above it as a Unix timestamp, so ``extractLocktime(p) >= H`` for a height H is
 passed at once by any timestamp-domain locktime.
 
 A GATE is a lower-bound compare on a locktime read (``extractLocktime(...)``,
-``currentBlockHeight()``, a local bound to one, or a private helper's parameter
-a call passes one: a DIRECT read), unless the other side is a timestamp-domain
+a local bound to it, or a private helper's parameter a call passes it: a
+DIRECT read; ``currentBlockHeight()`` is not one, it asserts its own value
+``< 500000000`` at the call, so it is a height by construction), unless the other side is a timestamp-domain
 literal (it pins the domain itself) or the vacuous ``>= 0``. A value DERIVED
 from a read (arithmetic, bitwise, shift,
 unary ``-``/``~``, a ternary arm, a builtin taking a read, or a local some of
@@ -176,11 +177,12 @@ def _is_call_to(e, name: str) -> bool:
 
 
 def _is_read(e) -> bool:
-    return _is_call_to(e, "extractLocktime") or _is_call_to(e, "currentBlockHeight")
+    # currentBlockHeight() pins itself (anf_lower.py); mirrors locktime-domain.ts.
+    return _is_call_to(e, "extractLocktime")
 
 
 def contract_reads_locktime(contract) -> bool:
-    """Prefilter: does any method call extractLocktime or currentBlockHeight?
+    """Prefilter: does any method call extractLocktime?
     Without a read there is no gate, so the path walk is skipped."""
 
     def seen(node) -> bool:
@@ -195,6 +197,77 @@ def contract_reads_locktime(contract) -> bool:
         return False
 
     return any(seen(st) for m in contract.methods for st in m.body or [])
+
+
+def current_block_height_timestamp_message(method: str) -> str:
+    """The shared error text for a currentBlockHeight() compare against a
+    timestamp-domain bound."""
+    return (
+        f"method '{method}' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts "
+        "its value is below 500000000 (a block height), so this compare can never pass and an output gated on it "
+        "could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate"
+    )
+
+
+def compares_current_block_height_to_timestamp(method) -> bool:
+    """True iff ``method`` contains, anywhere, a lower-bound compare of a
+    direct currentBlockHeight() call (or a local every binding of which is
+    one) against a timestamp-domain bigint literal
+    (``>= N``, N >= 500000000; ``> N``, N >= 499999999; or reversed).
+    currentBlockHeight() asserts its value is below 500000000, so such a
+    compare can never pass. Mirrors comparesCurrentBlockHeightToTimestamp in
+    locktime-domain.ts."""
+
+    def lit(x):
+        return x.value if isinstance(x, BigIntLiteral) else None
+
+    # Locals bound only to currentBlockHeight() (every declaration/assignment).
+    cbh_only: dict[str, bool] = {}
+
+    def bind(name, value) -> None:
+        cbh_only[name] = cbh_only.get(name, True) and _is_call_to(value, "currentBlockHeight")
+
+    def collect(stmts) -> None:
+        for st in stmts or []:
+            if isinstance(st, VariableDeclStmt):
+                bind(st.name, st.init)
+            elif isinstance(st, AssignmentStmt) and isinstance(st.target, Identifier):
+                bind(st.target.name, st.value)
+            elif isinstance(st, IfStmt):
+                collect(st.then)
+                if st.else_:
+                    collect(st.else_)
+            elif isinstance(st, ForStmt):
+                if st.init is not None:
+                    collect([st.init])
+                collect(st.body)
+
+    collect(method.body)
+
+    def is_cbh(e) -> bool:
+        return _is_call_to(e, "currentBlockHeight") or (isinstance(e, Identifier) and cbh_only.get(e.name, False))
+
+    def hit(e) -> bool:
+        if isinstance(e, BinaryExpr) and e.op in _FLIP:
+            if is_cbh(e.left) and e.op in (">=", ">") and classify(e.op, lit(e.right)) == "pin":
+                return True
+            f = _FLIP[e.op]
+            if is_cbh(e.right) and f in (">=", ">") and classify(f, lit(e.left)) == "pin":
+                return True
+        return False
+
+    def seen(node) -> bool:
+        if hit(node):
+            return True
+        for v in vars(node).values():
+            if isinstance(v, list):
+                if any(hasattr(x, "__dict__") and seen(x) for x in v):
+                    return True
+            elif hasattr(v, "__dict__") and not isinstance(v, type) and seen(v):
+                return True
+        return False
+
+    return any(seen(st) for st in method.body or [])
 
 
 def has_unpinned_locktime_gate(contract, method) -> bool:

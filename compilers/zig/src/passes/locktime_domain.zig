@@ -183,8 +183,11 @@ fn isCallTo(e: Expression, name: []const u8) bool {
     return e == .call and std.mem.eql(u8, e.call.callee, name);
 }
 
+/// A D26 locktime read. currentBlockHeight() is not one: it asserts its own
+/// value < 500000000 at the call (anf_lower.zig), so it is a height by
+/// construction. Mirrors locktime-domain.ts.
 fn isLocktimeRead(e: Expression) bool {
-    return isCallTo(e, "extractLocktime") or isCallTo(e, "currentBlockHeight");
+    return isCallTo(e, "extractLocktime");
 }
 
 fn exprReads(e: Expression) bool {
@@ -228,8 +231,113 @@ fn stmtsRead(list: []const Statement) bool {
     return false;
 }
 
-/// D26 prefilter: some method reads the locktime (extractLocktime or
-/// currentBlockHeight) anywhere. Without one there is no gate to walk for.
+/// The shared error text for a currentBlockHeight() compare against a
+/// timestamp-domain bound (method name).
+pub const CBH_TIMESTAMP_FMT =
+    "method '{s}' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts " ++
+    "its value is below 500000000 (a block height), so this compare can never pass and an output gated on it " ++
+    "could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate";
+
+/// Locals every binding of which is a direct currentBlockHeight() call.
+const CbhSet = std.StringHashMapUnmanaged(bool);
+
+fn isCbh(e: Expression, cbh: *const CbhSet) bool {
+    if (isCallTo(e, "currentBlockHeight")) return true;
+    return e == .identifier and (cbh.get(e.identifier) orelse false);
+}
+
+fn cbhTimestampHit(e: Expression, cbh: *const CbhSet) bool {
+    if (e != .binary_op) return false;
+    const b = e.binary_op;
+    const op: Cmp = switch (b.op) {
+        .lt => .lt,
+        .lte => .lte,
+        .gt => .gt,
+        .gte => .gte,
+        else => return false,
+    };
+    if (isCbh(b.left, cbh) and (op == .gte or op == .gt) and classify(op, literalOf(b.right)) == .pin) return true;
+    const f = flip(op);
+    return isCbh(b.right, cbh) and (f == .gte or f == .gt) and classify(f, literalOf(b.left)) == .pin;
+}
+
+fn exprHasCbhTimestamp(e: Expression, cbh: *const CbhSet) bool {
+    if (cbhTimestampHit(e, cbh)) return true;
+    return switch (e) {
+        .call => |c| for (c.args) |x| {
+            if (exprHasCbhTimestamp(x, cbh)) break true;
+        } else false,
+        .method_call => |mc| for (mc.args) |x| {
+            if (exprHasCbhTimestamp(x, cbh)) break true;
+        } else false,
+        .binary_op => |b| exprHasCbhTimestamp(b.left, cbh) or exprHasCbhTimestamp(b.right, cbh),
+        .unary_op => |u| exprHasCbhTimestamp(u.operand, cbh),
+        .ternary => |t| exprHasCbhTimestamp(t.condition, cbh) or exprHasCbhTimestamp(t.then_expr, cbh) or exprHasCbhTimestamp(t.else_expr, cbh),
+        .index_access => |ia| exprHasCbhTimestamp(ia.object, cbh) or exprHasCbhTimestamp(ia.index, cbh),
+        .increment => |inc| exprHasCbhTimestamp(inc.operand, cbh),
+        .decrement => |dec| exprHasCbhTimestamp(dec.operand, cbh),
+        .array_literal => |els| for (els) |x| {
+            if (exprHasCbhTimestamp(x, cbh)) break true;
+        } else false,
+        else => false,
+    };
+}
+
+fn stmtsHaveCbhTimestamp(list: []const Statement, cbh: *const CbhSet) bool {
+    for (list) |st| {
+        const hit = switch (st) {
+            .expr_stmt => |e| exprHasCbhTimestamp(e.expr, cbh),
+            .const_decl => |cd| exprHasCbhTimestamp(cd.value, cbh),
+            .let_decl => |ld| if (ld.value) |v| exprHasCbhTimestamp(v, cbh) else false,
+            .assign => |as_| exprHasCbhTimestamp(as_.value, cbh) or
+                (if (as_.index_target) |it| exprHasCbhTimestamp(it.object, cbh) or exprHasCbhTimestamp(it.index, cbh) else false),
+            .assert_stmt => |as_s| exprHasCbhTimestamp(as_s.condition, cbh),
+            .return_stmt => |r| if (r.value) |v| exprHasCbhTimestamp(v, cbh) else false,
+            .if_stmt => |if_s| exprHasCbhTimestamp(if_s.condition, cbh) or stmtsHaveCbhTimestamp(if_s.then_body, cbh) or
+                (if (if_s.else_body) |eb| stmtsHaveCbhTimestamp(eb, cbh) else false),
+            .for_stmt => |fs| stmtsHaveCbhTimestamp(fs.body, cbh) or
+                (if (fs.update) |u| stmtsHaveCbhTimestamp(u[0..1], cbh) else false),
+        };
+        if (hit) return true;
+    }
+    return false;
+}
+
+fn cbhBind(a: Allocator, cbh: *CbhSet, name: []const u8, v: ?Expression) Allocator.Error!void {
+    const ok = if (v) |e| isCallTo(e, "currentBlockHeight") else false;
+    const prev = cbh.get(name) orelse true;
+    try cbh.put(a, name, prev and ok);
+}
+
+fn cbhCollect(a: Allocator, list: []const Statement, cbh: *CbhSet) Allocator.Error!void {
+    for (list) |st| switch (st) {
+        .const_decl => |cd| try cbhBind(a, cbh, cd.name, cd.value),
+        .let_decl => |ld| try cbhBind(a, cbh, ld.name, ld.value),
+        .assign => |as_| if (!as_.target_is_property and as_.index_target == null) try cbhBind(a, cbh, as_.target, as_.value),
+        .if_stmt => |if_s| {
+            try cbhCollect(a, if_s.then_body, cbh);
+            if (if_s.else_body) |eb| try cbhCollect(a, eb, cbh);
+        },
+        .for_stmt => |fs| try cbhCollect(a, fs.body, cbh),
+        else => {},
+    };
+}
+
+/// True iff `method` contains, anywhere, a lower-bound compare of a direct
+/// currentBlockHeight() call (or a local every binding of which is one)
+/// against a timestamp-domain bigint literal (`>= N`, N >= 500000000;
+/// `> N`, N >= 499999999; or reversed). currentBlockHeight() asserts its
+/// value is below 500000000, so such a compare can never pass. Mirrors
+/// comparesCurrentBlockHeightToTimestamp in locktime-domain.ts.
+pub fn comparesCurrentBlockHeightToTimestamp(method: MethodNode) bool {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var cbh: CbhSet = .empty;
+    cbhCollect(arena.allocator(), method.body, &cbh) catch @panic("out of memory");
+    return stmtsHaveCbhTimestamp(method.body, &cbh);
+}
+
+/// D26 prefilter: some method reads the locktime (extractLocktime) anywhere. Without one there is no gate to walk for.
 pub fn contractReadsLocktime(contract: ContractNode) bool {
     for (contract.methods) |m| if (stmtsRead(m.body)) return true;
     return false;

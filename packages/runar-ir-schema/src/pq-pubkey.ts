@@ -10,6 +10,7 @@
  * only committed by hash cannot be checked before the spend.
  */
 import type { ANFBinding, ANFProgram } from './anf-ir.js';
+import type { PqPubKeyParam } from './artifact.js';
 
 export const PQ_PUBKEY_BYTES: Readonly<Record<string, number>> = {
   verifyWOTS: 64,
@@ -68,6 +69,50 @@ export function pqPubKeyRequirements(anf: ANFProgram): PqPubKeyRequirement[] {
     walk(method.body);
   }
   return out;
+}
+
+/**
+ * PQ-F1: the artifact's `pqPubKeyParams`, computed from the final ANF.
+ *
+ * Same walk as {@link pqPubKeyRequirements} (every method, nested if / loop
+ * bodies, `@ref:` aliases, pk = the verifier call's third arg), kept to the
+ * properties that are constructor params, deduplicated on (name, scheme) and
+ * sorted by (index, scheme). Identical in all seven compilers.
+ *
+ * Not seen: a key passed to a private helper as an argument, a key supplied
+ * at spend time (e.g. hash-committed), a FixedArray element, and an
+ * initialized property (none of these is a constructor value).
+ */
+export function pqPubKeyParams(anf: ANFProgram, ctorParamNames: readonly string[]): PqPubKeyParam[] {
+  const out: PqPubKeyParam[] = [];
+  for (const req of pqPubKeyRequirements(anf)) {
+    const index = ctorParamNames.indexOf(req.property);
+    if (index < 0) continue;
+    out.push({ index, name: req.property, scheme: req.verifier, length: req.bytes });
+  }
+  out.sort((x, y) => x.index - y.index || (x.scheme < y.scheme ? -1 : x.scheme > y.scheme ? 1 : 0));
+  return out;
+}
+
+/**
+ * PQ-F1: the SDK refusal for a constructor value of the wrong length, or null
+ * when it is fine (or not a hex string — other checks own that case). The
+ * text is identical in all seven SDKs.
+ */
+export function pqPubKeyParamError(p: PqPubKeyParam, value: unknown): string | null {
+  if (typeof value !== 'string' || value.length % 2 !== 0) return null;
+  const got = value.length / 2;
+  if (got === p.length) return null;
+  return pqPubKeyParamMessage(p, got);
+}
+
+/** The shared SDK refusal text (PQ-F1). */
+export function pqPubKeyParamMessage(p: PqPubKeyParam, got: number): string {
+  return (
+    `RunarContract: constructor arg '${p.name}' is the ${p.scheme} public key and must be exactly ` +
+    `${p.length} bytes, got ${got}. A locking script built from it would refuse every valid ` +
+    `signature, so the output could never be spent (PQ-F1)`
+  );
 }
 
 /**

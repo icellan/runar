@@ -1282,8 +1282,10 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // dead-helper batch). No emitted code path changes (multi-format fold-OFF
     // 892/892 against the goldens). Each is spent, and must be deleted, on the
     // next edit to its file.
+    // 2026-11-23 — SPENT and deleted by the PQ-F1 / currentBlockHeight pin PR
+    // (it edits these files and moves its own pins): compilers/go/frontend/anf_lower.go, compilers/rust/src/frontend/anf_lower.rs, compilers/zig/src/codegen/emit.zig.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual(["compilers/go/codegen/stack.go", "compilers/go/frontend/anf_lower.go", "compilers/java/src/main/java/runar/compiler/passes/StackLower.java", "compilers/rust/src/codegen/stack.rs", "compilers/rust/src/frontend/anf_lower.rs", "compilers/zig/src/codegen/emit.zig", "compilers/zig/src/passes/stack_lower.zig"]);
+    expect(entries.map((e) => e.path).sort()).toEqual(["compilers/go/codegen/stack.go", "compilers/java/src/main/java/runar/compiler/passes/StackLower.java", "compilers/rust/src/codegen/stack.rs", "compilers/zig/src/passes/stack_lower.zig"]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {

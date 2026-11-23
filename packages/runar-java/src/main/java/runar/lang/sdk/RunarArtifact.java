@@ -48,10 +48,47 @@ public record RunarArtifact(
      * with the deployed code-part length, little-endian. Empty when every pin is
      * exact at compile time.
      */
-    List<CodePartLenSlot> codePartLenSlots
+    List<CodePartLenSlot> codePartLenSlots,
+    /**
+     * PQ-F1: constructor params passed directly as a post-quantum verifier's
+     * public key, with the exact byte length each needs. {@code null} when the
+     * artifact predates the field ({@link RunarContract} then walks
+     * {@code anf}); never empty otherwise.
+     */
+    List<PqPubKeyParam> pqPubKeyParams
 ) {
 
+    /** One {@code pqPubKeyParams} entry: {@code index} is the param's position in abi.constructor.params. */
+    public record PqPubKeyParam(int index, String name, String scheme, int length) {}
+
+    /** Backwards-compatible constructor without {@code pqPubKeyParams} (PQ-F1); defaults to absent. */
+    public RunarArtifact(
+        String version,
+        String compilerVersion,
+        String contractName,
+        String parentClass,
+        ABI abi,
+        String scriptHex,
+        String asm,
+        String buildTimestamp,
+        List<StateField> stateFields,
+        List<ConstructorSlot> constructorSlots,
+        List<CodeSepIndexSlot> codeSepIndexSlots,
+        Integer codeSeparatorIndex,
+        List<Integer> codeSeparatorIndices,
+        Map<String, Object> anf,
+        List<String> unsoundPrimitives,
+        List<CodePartLenSlot> codePartLenSlots
+    ) {
+        this(
+            version, compilerVersion, contractName, parentClass, abi, scriptHex, asm,
+            buildTimestamp, stateFields, constructorSlots, codeSepIndexSlots,
+            codeSeparatorIndex, codeSeparatorIndices, anf, unsoundPrimitives, codePartLenSlots, null
+        );
+    }
+
     public RunarArtifact {
+        pqPubKeyParams = pqPubKeyParams == null ? null : Collections.unmodifiableList(pqPubKeyParams);
         unsoundPrimitives = unsoundPrimitives == null
             ? List.of() : Collections.unmodifiableList(unsoundPrimitives);
         codePartLenSlots = codePartLenSlots == null
@@ -252,6 +289,17 @@ public record RunarArtifact(
             for (Object o : upl) unsound.add(Json.asString(o));
         }
 
+        // PQ-F1: post-quantum public-key constructor params. Absent when none.
+        List<PqPubKeyParam> pq = null;
+        if (m.get("pqPubKeyParams") instanceof List<?> pql) {
+            pq = new ArrayList<>();
+            for (Object o : pql) {
+                Map<String, Object> e = Json.asObject(o);
+                pq.add(new PqPubKeyParam(Json.asInt(e.get("index")), Json.asString(e.get("name")),
+                    Json.asString(e.get("scheme")), Json.asInt(e.get("length"))));
+            }
+        }
+
         return new RunarArtifact(
             version,
             compilerVersion,
@@ -268,7 +316,8 @@ public record RunarArtifact(
             codeSepIndices,
             anfMap,
             unsound,
-            cpls
+            cpls,
+            pq
         );
     }
 

@@ -44,7 +44,7 @@
     "if-without-else": 27,
     "if-without-else-multi-temp": 226,
     "integer-boundary": 60,
-    "intent-current-block-height": 671,
+    "intent-current-block-height": 680,
     "intent-output-p2pkh": 508,
     "intent-prev-output-script": 666,
     "loop-if-merged-locals": 1507,
