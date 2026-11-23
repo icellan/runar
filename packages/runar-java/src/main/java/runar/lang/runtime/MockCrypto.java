@@ -718,6 +718,12 @@ public final class MockCrypto {
 
     public static ByteString reverseBytes(ByteString bs) {
         byte[] all = bs.toByteArray();
+        // D12 BM-F3: the compiled reverseBytes ends in OP_0 OP_EQUALVERIFY, so
+        // the script ABORTS on more than 520 bytes. Refuse instead of reversing.
+        if (all.length > 520) {
+            throw new IllegalArgumentException("reverseBytes: input of " + all.length
+                + " bytes exceeds the 520-byte limit; the script aborts");
+        }
         byte[] out = new byte[all.length];
         for (int i = 0; i < all.length; i++) out[i] = all[all.length - 1 - i];
         return new ByteString(out);

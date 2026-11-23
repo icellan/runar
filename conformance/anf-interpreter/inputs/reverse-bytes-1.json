@@ -1,0 +1,22 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/reverse-bytes-probe.anf.json",
+  "methodName": "reverse",
+  "currentState": {
+    "out": "00"
+  },
+  "args": {
+    "data": "5a"
+  },
+  "constructorArgs": [
+    "00"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/ReverseBytesProbe.runar.ts",
+    "constructorArgs": [
+      "00"
+    ],
+    "methodArgs": [
+      "5a"
+    ]
+  }
+}

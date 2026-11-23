@@ -31,7 +31,12 @@ public final class MockProvider implements Provider {
          */
         NOTHING_CHECKED,
         /** Every input is known and the outputs exceed them. */
-        UNDERFUNDED
+        UNDERFUNDED,
+        /**
+         * An input spends an outpoint an earlier accepted broadcast already
+         * spent, or the transaction spends one outpoint twice.
+         */
+        DOUBLE_SPEND
     }
 
     /**
@@ -58,6 +63,14 @@ public final class MockProvider implements Provider {
     private final Map<String, List<UTXO>> utxosByAddress = new HashMap<>();
     private final Map<String, UTXO> utxosByOutpoint = new HashMap<>();
     private final Map<String, KnownOutpoint> knownOutpoints = new HashMap<>();
+    /**
+     * "txid:vout" -> real txid of the accepted broadcast that spent it.
+     * Checked on EVERY broadcast, whatever {@code validateBroadcasts} says: a
+     * node refuses a second transaction spending an outpoint already spent.
+     */
+    private final Map<String, String> spentOutpoints = new HashMap<>();
+    /** Real txid of every accepted broadcast -> the txid returned for it. */
+    private final Map<String, String> acceptedTxids = new HashMap<>();
     private final List<String> broadcasted = new ArrayList<>();
     private final String network;
     private int broadcastCount = 0;
@@ -175,7 +188,12 @@ public final class MockProvider implements Provider {
 
     @Override
     public List<UTXO> listUtxos(String address) {
-        List<UTXO> utxos = new ArrayList<>(utxosByAddress.getOrDefault(address, Collections.emptyList()));
+        // An outpoint an accepted broadcast spent is no longer a UTXO (a node's
+        // listing would not return it either).
+        List<UTXO> utxos = new ArrayList<>();
+        for (UTXO u : utxosByAddress.getOrDefault(address, Collections.emptyList())) {
+            if (!spentOutpoints.containsKey(outpointKey(u.txid(), u.outputIndex()))) utxos.add(u);
+        }
         // DoS-bound: reject pathological scripts at the provider boundary.
         for (UTXO u : utxos) {
             if (u.scriptHex() == null || u.scriptHex().isEmpty()) continue;
@@ -205,6 +223,17 @@ public final class MockProvider implements Provider {
         if (validateBroadcasts) {
             parsed = validateBroadcast(txHex);
         }
+        List<String> inputOutpoints = new ArrayList<>();
+        String spendingTxid = checkDoubleSpend(txHex, inputOutpoints);
+        // Re-broadcasting a tx already accepted is idempotent, as on a node:
+        // same txid, nothing registered twice. It is still validated above, so
+        // a tx an always-ack provider acked is not waved through once
+        // validation is on.
+        if (spendingTxid != null && acceptedTxids.containsKey(spendingTxid)) {
+            return acceptedTxids.get(spendingTxid);
+        }
+        // Accepted: its inputs are now spent.
+        for (String key : inputOutpoints) spentOutpoints.put(key, spendingTxid);
         broadcasted.add(txHex);
         broadcastCount++;
         String prefix = txHex.length() >= 16 ? txHex.substring(0, 16) : txHex;
@@ -216,6 +245,10 @@ public final class MockProvider implements Provider {
                 RawTx.Output out = parsed.outputs.get(i);
                 addKnownOutpoint(fakeTxid, i, out.scriptPubKeyHex, out.satoshis);
             }
+        }
+        if (spendingTxid != null) {
+            acceptedTxids.put(spendingTxid, fakeTxid);
+            listNewP2pkhOutputs(fakeTxid, RawTxParser.parse(txHex));
         }
         return fakeTxid;
     }
@@ -247,6 +280,72 @@ public final class MockProvider implements Provider {
      * {@code ContractSimulator}, and the on-chain integration spends in
      * {@code integration/java}.
      */
+    /**
+     * A P2PKH output paying an address this provider lists (e.g. the change
+     * of a deploy) is a new UTXO of that address, as a node's listing would
+     * show it, so a later call can be funded from it.
+     */
+    private void listNewP2pkhOutputs(String txid, RawTx tx) {
+        for (Map.Entry<String, List<UTXO>> e : utxosByAddress.entrySet()) {
+            String p2pkh;
+            try {
+                p2pkh = ScriptUtils.buildP2PKHScript(e.getKey());
+            } catch (RuntimeException notAnAddress) {
+                continue; // a test label, not a real address
+            }
+            for (int i = 0; i < tx.outputs.size(); i++) {
+                RawTx.Output out = tx.outputs.get(i);
+                if (p2pkh.equalsIgnoreCase(out.scriptPubKeyHex)) {
+                    UTXO u = new UTXO(txid, i, out.satoshis, out.scriptPubKeyHex);
+                    e.getValue().add(u);
+                    utxosByOutpoint.put(outpointKey(txid, i), u);
+                }
+            }
+        }
+    }
+
+    /**
+     * Double-spend gate, independent of {@code validateBroadcasts}. Refuses a
+     * transaction that spends one outpoint twice, or an outpoint an earlier
+     * accepted broadcast spent. Re-broadcasting the identical transaction is
+     * not a conflict (a node treats it as already known). Fills
+     * {@code outpoints} and returns the transaction's real txid ({@code null},
+     * with no outpoints, for a payload that does not parse).
+     */
+    private String checkDoubleSpend(String txHex, List<String> outpoints) {
+        RawTx tx;
+        String txid;
+        try {
+            tx = RawTxParser.parse(txHex);
+            java.security.MessageDigest sha = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] h = sha.digest(sha.digest(ScriptUtils.hexToBytes(txHex)));
+            txid = ScriptUtils.reverseHex(java.util.HexFormat.of().formatHex(h));
+        } catch (RuntimeException e) {
+            // A payload that does not parse spends no outpoint, so there is
+            // nothing to check here; validation (when on) refuses it as not a
+            // transaction, and the always-ack opt-out keeps acking it.
+            return null;
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
+        for (RawTx.Input in : tx.inputs) {
+            String key = outpointKey(in.prevTxid, in.prevVout);
+            if (outpoints.contains(key)) {
+                lastRejection = RejectionReason.DOUBLE_SPEND;
+                throw new BroadcastRejectedException(
+                    "MockProvider: refusing to broadcast a transaction that spends " + key + " more than once");
+            }
+            outpoints.add(key);
+            String spender = spentOutpoints.get(key);
+            if (spender != null && !acceptedTxids.containsKey(txid)) {
+                lastRejection = RejectionReason.DOUBLE_SPEND;
+                throw new BroadcastRejectedException(
+                    "MockProvider: refusing to broadcast a double spend: " + key + " is already spent by " + spender);
+            }
+        }
+        return txid;
+    }
+
     private RawTx validateBroadcast(String txHex) {
         lastRejection = RejectionReason.NONE;
         lastReport = ValidationReport.EMPTY;
