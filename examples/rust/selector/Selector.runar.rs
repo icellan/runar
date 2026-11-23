@@ -14,12 +14,10 @@ impl Selector {
     pub fn set(&mut self, i: Bigint, v: Bigint) {
         if i == 0 {
             self.a = v;
+        } else if i == 1 {
+            self.b = v;
         } else {
-            if i == 1 {
-                self.b = v;
-            } else {
-                assert!(false);
-            }
+            assert!(false);
         }
     }
 }

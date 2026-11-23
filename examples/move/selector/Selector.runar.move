@@ -12,12 +12,10 @@ module Selector {
     public fun set(contract: &mut Selector, i: bigint, v: bigint) {
         if (i == 0) {
             contract.a = v;
+        } else if (i == 1) {
+            contract.b = v;
         } else {
-            if (i == 1) {
-                contract.b = v;
-            } else {
-                assert!(false, 0);
-            }
+            assert!(false, 0);
         };
     }
 }

@@ -730,12 +730,18 @@ class SolParser {
     let elseBranch: Statement[] | undefined;
     if (this.current().type === 'else') {
       this.advance();
-      this.expect('{');
-      elseBranch = [];
-      while (this.current().type !== '}' && this.current().type !== 'eof') {
-        elseBranch.push(this.parseStatement());
+      if (this.current().type === 'if') {
+        // `else if (...)` is sugar for `else { if (...) }` -- same AST as the
+        // nested form, which every other tier already produces.
+        elseBranch = [this.parseIfStatement()];
+      } else {
+        this.expect('{');
+        elseBranch = [];
+        while (this.current().type !== '}' && this.current().type !== 'eof') {
+          elseBranch.push(this.parseStatement());
+        }
+        this.expect('}');
       }
-      this.expect('}');
     }
 
     return { kind: 'if_statement', condition, then: thenBranch, else: elseBranch, sourceLocation: location };
