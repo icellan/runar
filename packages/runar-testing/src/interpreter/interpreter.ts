@@ -1497,9 +1497,18 @@ export class RunarInterpreter {
         return { kind: 'void' };
       }
 
-      case 'currentBlockHeight':
-        // Source-level sugar for extractLocktime(this.txPreimage).
-        return { kind: 'bigint', value: this._mockPreimage.locktime ?? 0n };
+      case 'currentBlockHeight': {
+        // extractLocktime(this.txPreimage), pinned to the block-height domain
+        // exactly as the compiled script asserts it (04-anf-lower.ts): an
+        // nLockTime >= 500000000 is a Unix timestamp, not a height.
+        const lt = this._mockPreimage.locktime ?? 0n;
+        if (lt >= 500000000n) {
+          throw new AssertionError(
+            `currentBlockHeight(): nLockTime ${lt} is a Unix timestamp (>= 500000000), not a block height`,
+          );
+        }
+        return { kind: 'bigint', value: lt };
+      }
 
       case 'extractAmount':
         return { kind: 'bigint', value: this._mockPreimage.amount ?? 10000n };

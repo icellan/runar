@@ -204,18 +204,80 @@ public final class LocktimeDomain {
         return e instanceof CallExpr c && c.callee() instanceof Identifier id && id.name().equals(name);
     }
 
+    /**
+     * A D26 locktime read. currentBlockHeight() is not one: it asserts its own
+     * value < 500000000 at the call (AnfLower), so it is a height by
+     * construction. Mirrors locktime-domain.ts.
+     */
     private static boolean isLocktimeRead(Expression e) {
-        return isCallTo(e, "extractLocktime") || isCallTo(e, "currentBlockHeight");
+        return isCallTo(e, "extractLocktime");
     }
 
-    /** D26 prefilter: some method reads the locktime (extractLocktime or currentBlockHeight). */
+    /** D26 prefilter: some method reads the locktime (extractLocktime). */
     static boolean contractReadsLocktime(ContractNode contract) {
+        List<Object> roots = new ArrayList<>();
+        for (MethodNode m : contract.methods()) roots.addAll(m.body());
+        return containsExpr(roots, LocktimeDomain::isLocktimeRead);
+    }
+
+    /** The shared error text for a currentBlockHeight() compare against a timestamp-domain bound. */
+    static String currentBlockHeightTimestampMessage(String method) {
+        return "method '" + method + "' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts "
+            + "its value is below 500000000 (a block height), so this compare can never pass and an output gated on it "
+            + "could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate";
+    }
+
+    /**
+     * True iff {@code method} contains, anywhere, a lower-bound compare of a
+     * direct currentBlockHeight() call (or a local every binding of which is
+     * one) against a timestamp-domain bigint
+     * literal ({@code >= N}, N >= 500000000; {@code > N}, N >= 499999999; or
+     * reversed). currentBlockHeight() asserts its value is below 500000000,
+     * so such a compare can never pass. Mirrors
+     * comparesCurrentBlockHeightToTimestamp in locktime-domain.ts.
+     */
+    static boolean comparesCurrentBlockHeightToTimestamp(MethodNode method) {
+        // Locals bound only to currentBlockHeight() (every declaration/assignment).
+        Map<String, Boolean> cbhOnly = new HashMap<>();
+        ArrayDeque<List<Statement>> work = new ArrayDeque<>();
+        work.add(method.body());
+        while (!work.isEmpty()) {
+            for (Statement st : work.poll()) {
+                if (st instanceof VariableDeclStatement vd) {
+                    cbhOnly.merge(vd.name(), isCallTo(vd.init(), "currentBlockHeight"), Boolean::logicalAnd);
+                } else if (st instanceof AssignmentStatement a && a.target() instanceof Identifier id) {
+                    cbhOnly.merge(id.name(), isCallTo(a.value(), "currentBlockHeight"), Boolean::logicalAnd);
+                } else if (st instanceof IfStatement i) {
+                    work.add(i.thenBody());
+                    if (i.elseBody() != null) work.add(i.elseBody());
+                } else if (st instanceof ForStatement f) {
+                    if (f.init() != null) work.add(List.of(f.init()));
+                    work.add(f.body());
+                }
+            }
+        }
+        java.util.function.Predicate<Expression> isCbh = x -> isCallTo(x, "currentBlockHeight")
+            || (x instanceof Identifier id && cbhOnly.getOrDefault(id.name(), false));
+        return containsExpr(new ArrayList<>(method.body()), e -> {
+            if (!(e instanceof BinaryExpr b)) return false;
+            String op = b.op().canonical();
+            if (!isCmp(op)) return false;
+            if (isCbh.test(b.left()) && (op.equals(">=") || op.equals(">"))
+                && classify(op, literalOf(b.right())) == Cls.PIN) return true;
+            String f = flip(op);
+            return isCbh.test(b.right()) && (f.equals(">=") || f.equals(">"))
+                && classify(f, literalOf(b.left())) == Cls.PIN;
+        });
+    }
+
+    /** True iff some expression reachable from {@code roots} (statements / expressions) satisfies {@code pred}. */
+    private static boolean containsExpr(List<Object> roots, java.util.function.Predicate<Expression> pred) {
         ArrayDeque<Object> work = new ArrayDeque<>();
-        for (MethodNode m : contract.methods()) work.addAll(m.body());
+        for (Object r : roots) if (r != null) work.push(r);
         while (!work.isEmpty()) {
             Object o = work.pop();
             if (o instanceof Expression e) {
-                if (isLocktimeRead(e)) return true;
+                if (pred.test(e)) return true;
                 if (e instanceof CallExpr c) {
                     if (c.callee() != null) work.push(c.callee());
                     work.addAll(c.args());

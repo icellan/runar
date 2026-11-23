@@ -81,6 +81,7 @@ fn or_checksig_artifact(pk_a_hex: &str, pk_b_hex: &str) -> RunarArtifact {
         code_separator_indices: None,
         anf: None,
         unsound_primitives: None,
+        pq_pub_key_params: None,
     }
 }
 

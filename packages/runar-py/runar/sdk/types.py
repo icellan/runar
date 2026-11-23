@@ -151,6 +151,10 @@ class RunarArtifact:
     # Builtins this script reaches that the compiler does not claim are sound
     # (R-062). Empty for every ordinary contract; see unsound_primitives.py.
     unsound_primitives: list[str] = field(default_factory=list)
+    # PQ-F1: constructor params passed directly as a post-quantum verifier's
+    # public key ({index, name, scheme, length} dicts). None when the artifact
+    # predates the field (the SDK then falls back to walking ``anf``).
+    pq_pub_key_params: list[dict] | None = None
 
     @staticmethod
     def from_dict(d: dict) -> RunarArtifact:
@@ -220,6 +224,9 @@ class RunarArtifact:
             code_separator_indices=d.get('codeSeparatorIndices'),
             anf=d.get('anf'),
             unsound_primitives=list(d.get('unsoundPrimitives') or []),
+            pq_pub_key_params=(
+                [dict(e) for e in d['pqPubKeyParams']] if d.get('pqPubKeyParams') is not None else None
+            ),
         )
 
 

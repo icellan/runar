@@ -691,8 +691,9 @@ For each method:
   so the write never reaches the chain (docs/language-reference.md, "A state
   write after the last addOutput"). D18 is reported instead when both apply.
 - D26: in every public method (stateless or stateful), refuse a path that
-  compares a locktime read (`extractLocktime`, `currentBlockHeight()`, through
-  locals, helper parameters and arithmetic) against a lower bound without an
+  compares a locktime read (`extractLocktime` through locals, helper
+  parameters and arithmetic; not `currentBlockHeight()`, which asserts its own
+  `< 500000000` pin at every call) against a lower bound without an
   asserted domain pin (`< 500000000n` for heights, `>= 500000000n` for
   timestamps) on the same path (docs/language-reference.md, "A locktime gate
   without a domain pin"). The `--ir` path re-derives it from the ANF.

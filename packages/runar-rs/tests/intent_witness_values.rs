@@ -78,6 +78,7 @@ fn make_intent_artifact(prev_out_inputs: &[usize], serialised: bool) -> RunarArt
         code_separator_indices: None,
         anf: None,
         unsound_primitives: None,
+        pq_pub_key_params: None,
     }
 }
 

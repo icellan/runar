@@ -232,47 +232,87 @@ var pqPubKeyLen = map[string]int{
 	"verifySLHDSA_SHA2_256f": 64,
 }
 
-// checkPQPubKeyCtorArgs (D12 PQ-F1) refuses a constructor arg that flows
-// straight (as a property load) into a post-quantum verifier's public-key
-// operand with the wrong length for the parameter set. Such a key deploys
-// fine, and then the owner's valid signature is refused forever. Keys that
-// reach the verifier any other way (e.g. hash-committed and supplied at
-// spend time) cannot be checked here. Needs the artifact's ANF.
+// checkPQPubKeyCtorArgs (PQ-F1) refuses a constructor arg that flows straight
+// (as a property load) into a post-quantum verifier's public-key operand with
+// the wrong length for the parameter set. Such a key deploys fine, and then
+// the owner's valid signature is refused forever. The params come from the
+// artifact's PqPubKeyParams (stateless artifacts included); an artifact that
+// predates the field falls back to the same walk over its ANF (stateful
+// artifacts only). Keys supplied at spend time (e.g. hash-committed) cannot be
+// checked here. Same message in all seven SDKs.
 func checkPQPubKeyCtorArgs(artifact *RunarArtifact, args []interface{}) {
-	if artifact.ANF == nil {
-		return
+	params := artifact.PqPubKeyParams
+	if params == nil {
+		if artifact.ANF == nil {
+			return
+		}
+		names := make([]string, len(artifact.ABI.Constructor.Params))
+		for i, p := range artifact.ABI.Constructor.Params {
+			names[i] = p.Name
+		}
+		params = pqPubKeyParamsFromANF(artifact.ANF, names)
 	}
-	paramIdx := make(map[string]int, len(artifact.ABI.Constructor.Params))
-	for i, p := range artifact.ABI.Constructor.Params {
-		paramIdx[p.Name] = i
-	}
-	for _, m := range artifact.ANF.Methods {
-		if m.Name == "constructor" {
+	for _, p := range params {
+		if p.Index < 0 || p.Index >= len(args) {
 			continue
 		}
+		h, ok := args[p.Index].(string)
+		if !ok || len(h)%2 != 0 || len(h)/2 == p.Length {
+			continue
+		}
+		panic(fmt.Sprintf(
+			"RunarContract: constructor arg '%s' is the %s public key and must be exactly %d bytes, got %d. "+
+				"A locking script built from it would refuse every valid signature, so the output could never be spent (PQ-F1)",
+			p.Name, p.Scheme, p.Length, len(h)/2))
+	}
+}
+
+// pqPubKeyParamsFromANF derives PqPubKeyParams from an artifact's ANF exactly
+// as the compilers do (packages/runar-ir-schema/src/pq-pubkey.ts): every
+// method, nested if / loop bodies, `@ref:` aliases, pk = the verifier call's
+// third arg, kept to constructor params, deduplicated, sorted by (index, scheme).
+func pqPubKeyParamsFromANF(anf *ANFProgram, ctorNames []string) []PqPubKeyParam {
+	ctorIdx := map[string]int{}
+	for i, n := range ctorNames {
+		if _, dup := ctorIdx[n]; !dup {
+			ctorIdx[n] = i
+		}
+	}
+	var out []PqPubKeyParam
+	seen := map[string]bool{}
+	for _, m := range anf.Methods {
 		props := map[string]string{} // binding name -> loaded property
-		var walk func(bindings []interface{})
-		visit := func(name string, v map[string]interface{}) {
-			kind, _ := v["kind"].(string)
-			if kind == "load_prop" {
+		var visit func(name string, v map[string]interface{})
+		walk := func(arr []interface{}) {
+			for _, b := range arr {
+				bm, _ := b.(map[string]interface{})
+				name, _ := bm["name"].(string)
+				if v, ok := bm["value"].(map[string]interface{}); ok {
+					visit(name, v)
+				}
+			}
+		}
+		visit = func(name string, v map[string]interface{}) {
+			switch kind, _ := v["kind"].(string); kind {
+			case "load_prop":
 				if pn, ok := v["name"].(string); ok {
 					props[name] = pn
 				}
-			}
-			if kind == "call" {
+			case "load_const":
+				if s, ok := v["value"].(string); ok && strings.HasPrefix(s, "@ref:") {
+					if target, ok := props[strings.TrimPrefix(s, "@ref:")]; ok {
+						props[name] = target
+					}
+				}
+			case "call":
 				fn, _ := v["func"].(string)
-				want, isPQ := pqPubKeyLen[fn]
 				callArgs, _ := v["args"].([]interface{})
-				if isPQ && len(callArgs) == 3 {
+				if want, isPQ := pqPubKeyLen[fn]; isPQ && len(callArgs) > 2 {
 					ref, _ := callArgs[2].(string)
 					if prop, ok := props[ref]; ok {
-						if idx, ok := paramIdx[prop]; ok && idx < len(args) {
-							if h, ok := args[idx].(string); ok && len(h) != want*2 {
-								panic(fmt.Sprintf(
-									"RunarContract: constructor arg '%s' is the %s public key and must be %d bytes, got %d. "+
-										"A key of the wrong length deploys an output the owner's valid signature can never spend (D12 PQ-F1)",
-									prop, fn, want, len(h)/2))
-							}
+						if idx, isCtor := ctorIdx[prop]; isCtor && !seen[prop+"\x00"+fn] {
+							seen[prop+"\x00"+fn] = true
+							out = append(out, PqPubKeyParam{Index: idx, Name: prop, Scheme: fn, Length: want})
 						}
 					}
 				}
@@ -283,19 +323,17 @@ func checkPQPubKeyCtorArgs(artifact *RunarArtifact, args []interface{}) {
 				}
 			}
 		}
-		walk = func(bindings []interface{}) {
-			for _, b := range bindings {
-				bm, _ := b.(map[string]interface{})
-				name, _ := bm["name"].(string)
-				if v, ok := bm["value"].(map[string]interface{}); ok {
-					visit(name, v)
-				}
-			}
-		}
 		for _, b := range m.Body {
 			visit(b.Name, b.Value)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Index != out[j].Index {
+			return out[i].Index < out[j].Index
+		}
+		return out[i].Scheme < out[j].Scheme
+	})
+	return out
 }
 
 // checkByteStringCtorArgs (N-329) panics with *InvalidConstructorArgError when

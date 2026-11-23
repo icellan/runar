@@ -194,12 +194,14 @@ fn is_call_to(e: &Expression, name: &str) -> bool {
         if matches!(callee.as_ref(), Expression::Identifier { name: n, .. } if n == name))
 }
 
+/// A D26 locktime read. currentBlockHeight() is not one: it asserts its own
+/// value < 500000000 at the call (anf_lower.rs), so it is a height by
+/// construction. Mirrors locktime-domain.ts.
 fn is_read(e: &Expression) -> bool {
-    is_call_to(e, "extractLocktime") || is_call_to(e, "currentBlockHeight")
+    is_call_to(e, "extractLocktime")
 }
 
-/// D26 prefilter: some method body calls extractLocktime or currentBlockHeight
-/// anywhere. Mirrors `contractReadsLocktime`.
+/// D26 prefilter: some method body calls extractLocktime anywhere. Mirrors `contractReadsLocktime`.
 pub fn contract_reads_locktime(contract: &ContractNode) -> bool {
     fn expr(e: &Expression) -> bool {
         if is_read(e) {
@@ -237,6 +239,106 @@ pub fn contract_reads_locktime(contract: &ContractNode) -> bool {
         }
     }
     contract.methods.iter().any(|m| m.body.iter().any(stmt))
+}
+
+/// The shared error text for a currentBlockHeight() compare against a
+/// timestamp-domain bound.
+pub fn current_block_height_timestamp_message(method: &str) -> String {
+    format!(
+        "method '{method}' compares currentBlockHeight() against a Unix-timestamp bound: currentBlockHeight() asserts \
+its value is below 500000000 (a block height), so this compare can never pass and an output gated on it \
+could never be spent. Use extractLocktime(this.txPreimage) for a timestamp gate"
+    )
+}
+
+/// True iff `method` contains, anywhere, a lower-bound compare of a direct
+/// currentBlockHeight() call (or a local every binding of which is one)
+/// against a timestamp-domain bigint literal (`>= N`,
+/// N >= 500000000; `> N`, N >= 499999999; or reversed). currentBlockHeight()
+/// asserts its value is below 500000000, so such a compare can never pass.
+/// Mirrors comparesCurrentBlockHeightToTimestamp in locktime-domain.ts.
+pub fn compares_current_block_height_to_timestamp(method: &MethodNode) -> bool {
+    fn lit(e: &Expression) -> Option<BigInt> {
+        match e {
+            Expression::BigIntLiteral { value } => Some(value.clone()),
+            _ => None,
+        }
+    }
+    // Locals bound only to currentBlockHeight() (every declaration/assignment).
+    fn collect(stmts: &[Statement], binds: &mut HashMap<String, bool>) {
+        let mut bind = |name: &str, v: &Expression, binds: &mut HashMap<String, bool>| {
+            let ok = is_call_to(v, "currentBlockHeight");
+            let e = binds.entry(name.to_string()).or_insert(true);
+            *e = *e && ok;
+        };
+        for st in stmts {
+            match st {
+                Statement::VariableDecl { name, init, .. } => bind(name, init, binds),
+                Statement::Assignment { target: Expression::Identifier { name, .. }, value, .. } => bind(name, value, binds),
+                Statement::IfStatement { then_branch, else_branch, .. } => {
+                    collect(then_branch, binds);
+                    if let Some(e) = else_branch {
+                        collect(e, binds);
+                    }
+                }
+                Statement::ForStatement { init, body, .. } => {
+                    collect(std::slice::from_ref(init.as_ref()), binds);
+                    collect(body, binds);
+                }
+                _ => {}
+            }
+        }
+    }
+    fn is_cbh(e: &Expression, cbh: &HashMap<String, bool>) -> bool {
+        is_call_to(e, "currentBlockHeight")
+            || matches!(e, Expression::Identifier { name, .. } if cbh.get(name).copied().unwrap_or(false))
+    }
+    fn hit(e: &Expression, cbh: &HashMap<String, bool>) -> bool {
+        if let Expression::BinaryExpr { op, left, right, .. } = e {
+            if let Some(c) = Cmp::from_str(op.as_str()) {
+                if is_cbh(left, cbh) && c.lower() && classify(c, lit(right).as_ref()) == Kind::Pin {
+                    return true;
+                }
+                let f = c.flip();
+                if is_cbh(right, cbh) && f.lower() && classify(f, lit(left).as_ref()) == Kind::Pin {
+                    return true;
+                }
+            }
+        }
+        let h = |x: &Expression| hit(x, cbh);
+        match e {
+            Expression::BinaryExpr { left, right, .. } => h(left) || h(right),
+            Expression::UnaryExpr { operand, .. }
+            | Expression::IncrementExpr { operand, .. }
+            | Expression::DecrementExpr { operand, .. } => h(operand),
+            Expression::CallExpr { callee, args, .. } => h(callee) || args.iter().any(h),
+            Expression::MemberExpr { object, .. } => h(object),
+            Expression::TernaryExpr { condition, consequent, alternate } => h(condition) || h(consequent) || h(alternate),
+            Expression::IndexAccess { object, index } => h(object) || h(index),
+            Expression::ArrayLiteral { elements } => elements.iter().any(h),
+            _ => false,
+        }
+    }
+    fn stmt(st: &Statement, cbh: &HashMap<String, bool>) -> bool {
+        let h = |x: &Expression| hit(x, cbh);
+        match st {
+            Statement::VariableDecl { init, .. } => h(init),
+            Statement::Assignment { target, value, .. } => h(target) || h(value),
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                h(condition)
+                    || then_branch.iter().any(|s| stmt(s, cbh))
+                    || else_branch.as_ref().is_some_and(|e| e.iter().any(|s| stmt(s, cbh)))
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                stmt(init, cbh) || h(condition) || stmt(update, cbh) || body.iter().any(|s| stmt(s, cbh))
+            }
+            Statement::ReturnStatement { value, .. } => value.as_ref().is_some_and(h),
+            Statement::ExpressionStatement { expression, .. } => h(expression),
+        }
+    }
+    let mut cbh = HashMap::new();
+    collect(&method.body, &mut cbh);
+    method.body.iter().any(|s| stmt(s, &cbh))
 }
 
 /// D26 (source path): true iff some path through public `method` carries an unpinned gate.

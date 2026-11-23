@@ -94,6 +94,11 @@
       "items": { "$ref": "#/$defs/RawScriptSpan" },
       "description": "Byte ranges produced by raw_script ANF nodes (opaque to the static analyzer)"
     },
+    "pqPubKeyParams": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/PqPubKeyParam" },
+      "description": "PQ-F1: constructor params passed directly as a post-quantum verifier's public key, with the exact byte length it needs; sorted by (index, scheme); absent when empty"
+    },
     "buildTimestamp": {
       "type": "string",
       "description": "ISO-8601 date-time string",
@@ -101,6 +106,28 @@
     }
   },
   "$defs": {
+    "PqPubKeyParam": {
+      "type": "object",
+      "required": ["index", "name", "scheme", "length"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string", "minLength": 1 },
+        "scheme": {
+          "type": "string",
+          "enum": [
+            "verifyWOTS",
+            "verifySLHDSA_SHA2_128s",
+            "verifySLHDSA_SHA2_128f",
+            "verifySLHDSA_SHA2_192s",
+            "verifySLHDSA_SHA2_192f",
+            "verifySLHDSA_SHA2_256s",
+            "verifySLHDSA_SHA2_256f"
+          ]
+        },
+        "length": { "type": "integer", "minimum": 1 }
+      }
+    },
     "ABI": {
       "type": "object",
       "required": ["constructor", "methods"],

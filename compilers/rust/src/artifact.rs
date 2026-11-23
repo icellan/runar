@@ -97,6 +97,91 @@ pub struct IRDebug {
     pub anf: Option<ANFProgram>,
 }
 
+/// One entry of the artifact's `pqPubKeyParams` (PQ-F1): constructor param
+/// `index` (position in abi.constructor.params) named `name` is passed directly
+/// as the public key of the `scheme` verifier, which needs exactly `length`
+/// bytes. Field order is part of the cross-tier wire format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PqPubKeyParam {
+    pub index: usize,
+    pub name: String,
+    pub scheme: String,
+    pub length: usize,
+}
+
+/// Public-key length each post-quantum verifier's compiled script splits its
+/// pk operand into: WOTS+ pubSeed(32)||pkRoot(32), SLH-DSA PK.seed(n)||PK.root(n).
+fn pq_pub_key_bytes(func: &str) -> Option<usize> {
+    match func {
+        "verifyWOTS" => Some(64),
+        "verifySLHDSA_SHA2_128s" | "verifySLHDSA_SHA2_128f" => Some(32),
+        "verifySLHDSA_SHA2_192s" | "verifySLHDSA_SHA2_192f" => Some(48),
+        "verifySLHDSA_SHA2_256s" | "verifySLHDSA_SHA2_256f" => Some(64),
+        _ => None,
+    }
+}
+
+/// PQ-F1: `pqPubKeyParams` from the final ANF, exactly as the TS reference
+/// (packages/runar-ir-schema/src/pq-pubkey.ts): every method, nested if / loop
+/// bodies, `@ref:` aliases, pk = the verifier call's third arg; kept to
+/// constructor params, deduplicated on (name, scheme), sorted by (index, scheme).
+pub fn pq_pub_key_params(program: &ANFProgram, ctor_names: &[String]) -> Vec<PqPubKeyParam> {
+    use crate::ir::{ANFBinding, ANFValue};
+    use std::collections::{HashMap, HashSet};
+    fn walk(
+        bindings: &[ANFBinding],
+        prop_of: &mut HashMap<String, String>,
+        ctor_names: &[String],
+        seen: &mut HashSet<(String, String)>,
+        out: &mut Vec<PqPubKeyParam>,
+    ) {
+        for b in bindings {
+            match &b.value {
+                ANFValue::LoadProp { name, .. } => {
+                    prop_of.insert(b.name.clone(), name.clone());
+                }
+                ANFValue::LoadConst { value } => {
+                    if let Some(target) = value.as_str().and_then(|s| s.strip_prefix("@ref:")) {
+                        if let Some(p) = prop_of.get(target).cloned() {
+                            prop_of.insert(b.name.clone(), p);
+                        }
+                    }
+                }
+                ANFValue::Call { func, args } => {
+                    if let (Some(len), Some(pk)) = (pq_pub_key_bytes(func), args.get(2)) {
+                        if let Some(prop) = prop_of.get(pk) {
+                            if let Some(index) = ctor_names.iter().position(|n| n == prop) {
+                                if seen.insert((prop.clone(), func.clone())) {
+                                    out.push(PqPubKeyParam {
+                                        index,
+                                        name: prop.clone(),
+                                        scheme: func.clone(),
+                                        length: len,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                ANFValue::If { then, else_branch, .. } => {
+                    walk(then, prop_of, ctor_names, seen, out);
+                    walk(else_branch, prop_of, ctor_names, seen, out);
+                }
+                ANFValue::Loop { body, .. } => walk(body, prop_of, ctor_names, seen, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for m in &program.methods {
+        let mut prop_of = HashMap::new();
+        walk(&m.body, &mut prop_of, ctor_names, &mut seen, &mut out);
+    }
+    out.sort_by(|a, b| a.index.cmp(&b.index).then_with(|| a.scheme.cmp(&b.scheme)));
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Top-level artifact
 // ---------------------------------------------------------------------------
@@ -136,6 +221,10 @@ pub struct RunarArtifact {
     pub code_separator_indices: Option<Vec<usize>>,
     #[serde(rename = "rawScriptSpans", skip_serializing_if = "Vec::is_empty", default)]
     pub raw_script_spans: Vec<RawScriptSpan>,
+    /// PQ-F1: constructor params passed directly as a post-quantum verifier's
+    /// public key, with the exact byte length each needs. Omitted when empty.
+    #[serde(rename = "pqPubKeyParams", skip_serializing_if = "Vec::is_empty", default)]
+    pub pq_pub_key_params: Vec<PqPubKeyParam>,
     #[serde(rename = "buildTimestamp")]
     pub build_timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,6 +412,10 @@ pub fn assemble_artifact(
     // already carry it at top level as `anf`). Nothing reads it.
     let ir = None;
 
+    // PQ-F1: constructor params that are a post-quantum verifier's public key.
+    let ctor_names: Vec<String> = constructor_params.iter().map(|p| p.name.clone()).collect();
+    let pq_pub_key_params = pq_pub_key_params(program, &ctor_names);
+
     Ok(RunarArtifact {
         version: SCHEMA_VERSION.to_string(),
         compiler_version: COMPILER_VERSION.to_string(),
@@ -345,6 +438,7 @@ pub fn assemble_artifact(
         code_separator_index: cs_index,
         code_separator_indices: cs_indices,
         raw_script_spans,
+        pq_pub_key_params,
         build_timestamp: now,
         anf,
     })

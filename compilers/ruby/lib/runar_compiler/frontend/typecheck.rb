@@ -1083,6 +1083,11 @@ module RunarCompiler
            LocktimeDomain.unpinned_gate?(@contract, method)
           add_error(LocktimeDomain.locktime_domain_message(method.name))
         end
+        # currentBlockHeight() pins itself below 500000000, so a timestamp-
+        # domain lower bound on it can never pass (locktime_domain.rb).
+        if LocktimeDomain.compares_current_block_height_to_timestamp?(method)
+          add_error(LocktimeDomain.current_block_height_timestamp_message(method.name))
+        end
       end
 
       # -------------------------------------------------------------------

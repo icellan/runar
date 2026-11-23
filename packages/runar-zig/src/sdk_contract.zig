@@ -361,13 +361,16 @@ fn pqPubkeyLen(func: []const u8) ?usize {
     return null;
 }
 
-/// D12 PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA verifier's
-/// public key directly (a property load as the verifier's 3rd arg) when it has
-/// the wrong length -- the compiled verifier splits the key at fixed offsets,
-/// so the deployed output would refuse the owner's valid signature forever.
-/// Only artifacts carrying ANF (stateful) expose the data flow; without ANF
-/// nothing is checked (same scope as the TS/Go/Rust/Java tiers).
+/// PQ-F1: refuse a constructor arg that feeds a WOTS+ / SLH-DSA verifier's
+/// public key directly when it has the wrong length -- the compiled verifier
+/// splits the key at fixed offsets, so the deployed output would refuse the
+/// owner's valid signature forever. The params come from the artifact's
+/// `pqPubKeyParams` (stateless artifacts included); an artifact that predates
+/// the field falls back to the same walk over its ANF (stateful only). Returns
+/// `InvalidConstructorArg` and records the message shared by all seven SDKs
+/// (`sdk_errors.lastPqPubKeyMessage`).
 fn checkPqPubkeyCtorArgs(allocator: std.mem.Allocator, artifact: *const types.RunarArtifact, args: []const types.StateValue) ContractError!void {
+    if (artifact.pq_pub_key_params) |params| return checkPqParams(params, args);
     const anf_json = artifact.anf_json orelse return;
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, anf_json, .{}) catch return;
     defer parsed.deinit();
@@ -376,20 +379,45 @@ fn checkPqPubkeyCtorArgs(allocator: std.mem.Allocator, artifact: *const types.Ru
         else => return,
     };
     if (methods != .array) return;
+    var found: std.ArrayListUnmanaged(types.PqPubKeyParam) = .empty;
+    defer found.deinit(allocator);
     for (methods.array.items) |m| {
         if (m != .object) continue;
         const body = m.object.get("body") orelse continue;
-        var defs = std.StringHashMap(std.json.ObjectMap).init(allocator);
-        defer defs.deinit();
-        try checkPqBindings(&defs, body, artifact.abi.constructor.params, args);
+        var prop_of = std.StringHashMap([]const u8).init(allocator);
+        defer prop_of.deinit();
+        try collectPqBindings(allocator, &prop_of, body, artifact.abi.constructor.params, &found);
+    }
+    std.mem.sort(types.PqPubKeyParam, found.items, {}, pqParamLess);
+    return checkPqParams(found.items, args);
+}
+
+fn pqParamLess(_: void, a: types.PqPubKeyParam, b: types.PqPubKeyParam) bool {
+    if (a.index != b.index) return a.index < b.index;
+    return std.mem.order(u8, a.scheme, b.scheme) == .lt;
+}
+
+fn checkPqParams(params: []const types.PqPubKeyParam, args: []const types.StateValue) ContractError!void {
+    for (params) |p| {
+        if (p.index >= args.len) continue;
+        const a = args[p.index];
+        if (a != .bytes or a.bytes.len % 2 != 0) continue;
+        if (a.bytes.len / 2 == p.length) continue;
+        errors_mod.recordPqPubKeyRefusal(p.name, p.scheme, p.length, a.bytes.len / 2);
+        return ContractError.InvalidConstructorArg;
     }
 }
 
-fn checkPqBindings(
-    defs: *std.StringHashMap(std.json.ObjectMap),
+/// `pqPubKeyParams` derived from ANF JSON exactly as the compilers do
+/// (packages/runar-ir-schema/src/pq-pubkey.ts): nested if / loop bodies,
+/// `@ref:` aliases, pk = the verifier call's third arg, kept to constructor
+/// params, deduplicated. Names borrow from the parsed JSON / ABI.
+fn collectPqBindings(
+    allocator: std.mem.Allocator,
+    prop_of: *std.StringHashMap([]const u8),
     bindings: std.json.Value,
     params: []const types.ABIParam,
-    args: []const types.StateValue,
+    out: *std.ArrayListUnmanaged(types.PqPubKeyParam),
 ) ContractError!void {
     if (bindings != .array) return;
     for (bindings.array.items) |b| {
@@ -397,14 +425,18 @@ fn checkPqBindings(
         const name = b.object.get("name") orelse continue;
         const val = b.object.get("value") orelse continue;
         if (name != .string or val != .object) continue;
-        defs.put(name.string, val.object) catch return ContractError.OutOfMemory;
         const kind = val.object.get("kind") orelse continue;
         if (kind != .string) continue;
-        if (std.mem.eql(u8, kind.string, "if")) {
-            if (val.object.get("then")) |t| try checkPqBindings(defs, t, params, args);
-            if (val.object.get("else")) |e| try checkPqBindings(defs, e, params, args);
-        } else if (std.mem.eql(u8, kind.string, "loop")) {
-            if (val.object.get("body")) |lb| try checkPqBindings(defs, lb, params, args);
+        if (std.mem.eql(u8, kind.string, "load_prop")) {
+            if (val.object.get("name")) |pn| if (pn == .string) {
+                prop_of.put(name.string, pn.string) catch return ContractError.OutOfMemory;
+            };
+        } else if (std.mem.eql(u8, kind.string, "load_const")) {
+            if (val.object.get("value")) |cv| if (cv == .string and std.mem.startsWith(u8, cv.string, "@ref:")) {
+                if (prop_of.get(cv.string["@ref:".len..])) |target| {
+                    prop_of.put(name.string, target) catch return ContractError.OutOfMemory;
+                }
+            };
         } else if (std.mem.eql(u8, kind.string, "call")) {
             const func = val.object.get("func") orelse continue;
             if (func != .string) continue;
@@ -413,15 +445,18 @@ fn checkPqBindings(
             if (call_args != .array or call_args.array.items.len < 3) continue;
             const pk_ref = call_args.array.items[2];
             if (pk_ref != .string) continue;
-            const src = defs.get(pk_ref.string) orelse continue;
-            const src_kind = src.get("kind") orelse continue;
-            const prop = src.get("name") orelse continue;
-            if (src_kind != .string or prop != .string or !std.mem.eql(u8, src_kind.string, "load_prop")) continue;
-            for (params, args) |p, a| {
-                if (!std.mem.eql(u8, p.name, prop.string)) continue;
-                if (a != .bytes) continue;
-                if (a.bytes.len / 2 != want) return ContractError.InvalidConstructorArg;
+            const prop = prop_of.get(pk_ref.string) orelse continue;
+            for (params, 0..) |p, i| {
+                if (!std.mem.eql(u8, p.name, prop)) continue;
+                const dup = for (out.items) |e| {
+                    if (std.mem.eql(u8, e.name, prop) and std.mem.eql(u8, e.scheme, func.string)) break true;
+                } else false;
+                if (!dup) out.append(allocator, .{ .index = i, .name = p.name, .scheme = func.string, .length = want }) catch return ContractError.OutOfMemory;
+                break;
             }
+        }
+        inline for (.{ "then", "else", "body" }) |nested| {
+            if (val.object.get(nested)) |n| try collectPqBindings(allocator, prop_of, n, params, out);
         }
     }
 }

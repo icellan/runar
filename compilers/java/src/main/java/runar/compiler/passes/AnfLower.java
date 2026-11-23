@@ -2417,13 +2417,20 @@ public final class AnfLower {
                 return emit(new LoadParam("_newAmount"));
             }
 
-            // currentBlockHeight() -> bigint. Pure source-level desugar to
-            // extractLocktime(txPreimage). Only valid in StatefulSmartContract
-            // methods (typecheck enforces). No new ANF kind needed.
+            // currentBlockHeight() -> bigint. Desugars to extractLocktime(txPreimage)
+            // AND pins the locktime domain at the use site (an nLockTime >=
+            // 500000000 is a Unix timestamp). One pin per call; emission order
+            // matches 04-anf-lower.ts byte for byte. The value is the
+            // extractLocktime binding. Only valid in StatefulSmartContract
+            // methods (typecheck enforces).
             if (callee instanceof Identifier cbhId
                 && "currentBlockHeight".equals(cbhId.name())) {
                 String preimageRef = emit(new LoadParam("txPreimage"));
-                return emit(new Call("extractLocktime", List.of(preimageRef)));
+                String heightRef = emit(new Call("extractLocktime", List.of(preimageRef)));
+                String thresholdRef = emit(makeLoadConstInt(BigInteger.valueOf(500_000_000L)));
+                String inDomainRef = emit(new BinOp("<", heightRef, thresholdRef, null));
+                emit(new Assert(inDomainRef));
+                return heightRef;
             }
 
             // this.addOutput(satoshis, val1, val2, ...)

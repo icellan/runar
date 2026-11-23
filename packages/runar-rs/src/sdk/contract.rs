@@ -3288,12 +3288,6 @@ const BYTE_STRING_CTOR_TYPES: &[&str] = &[
     "Point", "P256Point", "P384Point", "SigHashPreimage",
 ];
 
-/// N-329: refuse a ByteString-family constructor arg that is not an
-/// even-length hex string. `encode_arg` treats every `SdkValue::Bytes` as hex,
-/// so raw bytes (e.g. 20 raw Addr bytes) were emitted as a push header
-/// followed by non-hex text: a corrupt locking script with no error. Panics
-/// (the constructor's existing refusal style) with the diagnostic shared by
-/// the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
 /// D12 PQ-F1: the public-key length each post-quantum verifier's compiled
 /// script splits its pk operand into: WOTS+ pubSeed(32)||pkRoot(32), SLH-DSA
 /// PK.seed(n)||PK.root(n) (FIPS 205; n = 16 / 24 / 32).
@@ -3307,69 +3301,102 @@ fn pq_pub_key_len(func: &str) -> Option<usize> {
     }
 }
 
-/// D12 PQ-F1: refuse a constructor arg that flows straight (as a property
-/// load) into a post-quantum verifier's public-key operand with the wrong
-/// length for the parameter set. Such a key deploys fine, and then the
-/// owner's valid signature is refused forever. Keys reaching the verifier any
-/// other way (e.g. hash-committed, supplied at spend time) cannot be checked.
-/// Needs the artifact's ANF (the compilers emit it for stateful contracts).
+/// PQ-F1: refuse a constructor arg that flows straight (as a property load)
+/// into a post-quantum verifier's public-key operand with the wrong length for
+/// the parameter set. Such a key deploys fine, and then the owner's valid
+/// signature is refused forever. The params come from the artifact's
+/// `pqPubKeyParams` (stateless artifacts included); an artifact that predates
+/// the field falls back to the same walk over its ANF (stateful only). Keys
+/// supplied at spend time (e.g. hash-committed) cannot be checked. Same
+/// message in all seven SDKs.
 fn check_pq_pub_key_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
-    let Some(anf) = artifact.anf.as_ref() else { return };
-    let params = &artifact.abi.constructor.params;
-    fn walk(
-        bindings: &[(String, &serde_json::Value)],
-        props: &mut HashMap<String, String>,
-        found: &mut Vec<(String, String, usize)>,
-    ) {
-        for (name, v) in bindings {
-            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-            if kind == "load_prop" {
-                if let Some(p) = v.get("name").and_then(|n| n.as_str()) {
-                    props.insert(name.clone(), p.to_string());
-                }
-            }
-            if kind == "call" {
-                let func = v.get("func").and_then(|f| f.as_str()).unwrap_or("");
-                let call_args = v.get("args").and_then(|a| a.as_array());
-                if let (Some(want), Some(a)) = (pq_pub_key_len(func), call_args) {
-                    if a.len() == 3 {
-                        if let Some(prop) = a[2].as_str().and_then(|r| props.get(r)) {
-                            found.push((prop.clone(), func.to_string(), want));
-                        }
-                    }
-                }
-            }
-            for nested in ["then", "else", "body"] {
-                if let Some(arr) = v.get(nested).and_then(|x| x.as_array()) {
-                    let inner: Vec<(String, &serde_json::Value)> = arr
-                        .iter()
-                        .filter_map(|b| Some((b.get("name")?.as_str()?.to_string(), b.get("value")?)))
-                        .collect();
-                    walk(&inner, props, found);
-                }
-            }
+    let derived;
+    let params: &[PqPubKeyParam] = match artifact.pq_pub_key_params.as_ref() {
+        Some(p) => p,
+        None => {
+            let Some(anf) = artifact.anf.as_ref() else { return };
+            let names: Vec<String> = artifact.abi.constructor.params.iter().map(|p| p.name.clone()).collect();
+            derived = pq_pub_key_params_from_anf(anf, &names);
+            &derived
         }
-    }
-    for m in anf.methods.iter().filter(|m| m.name != "constructor") {
-        let bindings: Vec<(String, &serde_json::Value)> = m.body.iter().map(|b| (b.name.clone(), &b.value)).collect();
-        let mut props = HashMap::new();
-        let mut found = Vec::new();
-        walk(&bindings, &mut props, &mut found);
-        for (prop, func, want) in found {
-            let Some(idx) = params.iter().position(|p| p.name == prop) else { continue };
-            if let Some(SdkValue::Bytes(h)) = args.get(idx) {
-                if h.len() != want * 2 {
-                    panic!(
-                        "RunarContract: constructor arg '{}' is the {} public key and must be {} bytes, got {}. \
-                         A key of the wrong length deploys an output the owner's valid signature can never spend (D12 PQ-F1)",
-                        prop, func, want, h.len() / 2
-                    );
-                }
+    };
+    for p in params {
+        if let Some(SdkValue::Bytes(h)) = args.get(p.index) {
+            if h.len() % 2 == 0 && h.len() / 2 != p.length {
+                panic!(
+                    "RunarContract: constructor arg '{}' is the {} public key and must be exactly {} bytes, got {}. \
+                     A locking script built from it would refuse every valid signature, so the output could never be spent (PQ-F1)",
+                    p.name, p.scheme, p.length, h.len() / 2
+                );
             }
         }
     }
 }
 
+/// `pqPubKeyParams` derived from an artifact's ANF exactly as the compilers do
+/// (packages/runar-ir-schema/src/pq-pubkey.ts): every method, nested if / loop
+/// bodies, `@ref:` aliases, pk = the verifier call's third arg, kept to
+/// constructor params, deduplicated, sorted by (index, scheme).
+fn pq_pub_key_params_from_anf(anf: &super::anf_interpreter::ANFProgram, ctor_names: &[String]) -> Vec<PqPubKeyParam> {
+    fn walk<'a>(
+        bindings: &mut dyn Iterator<Item = (&'a str, &'a serde_json::Value)>,
+        props: &mut HashMap<String, String>,
+        ctor_names: &[String],
+        out: &mut Vec<PqPubKeyParam>,
+    ) {
+        for (name, v) in bindings {
+            match v.get("kind").and_then(|k| k.as_str()).unwrap_or("") {
+                "load_prop" => {
+                    if let Some(p) = v.get("name").and_then(|n| n.as_str()) {
+                        props.insert(name.to_string(), p.to_string());
+                    }
+                }
+                "load_const" => {
+                    if let Some(t) = v.get("value").and_then(|x| x.as_str()).and_then(|s| s.strip_prefix("@ref:")) {
+                        if let Some(p) = props.get(t).cloned() {
+                            props.insert(name.to_string(), p);
+                        }
+                    }
+                }
+                "call" => {
+                    let func = v.get("func").and_then(|f| f.as_str()).unwrap_or("");
+                    let pk = v.get("args").and_then(|a| a.as_array()).and_then(|a| a.get(2)).and_then(|r| r.as_str());
+                    if let (Some(length), Some(prop)) = (pq_pub_key_len(func), pk.and_then(|r| props.get(r))) {
+                        if let Some(index) = ctor_names.iter().position(|n| n == prop) {
+                            if !out.iter().any(|e| &e.name == prop && e.scheme == func) {
+                                out.push(PqPubKeyParam { index, name: prop.clone(), scheme: func.to_string(), length });
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for nested in ["then", "else", "body"] {
+                if let Some(arr) = v.get(nested).and_then(|x| x.as_array()) {
+                    let mut inner = arr
+                        .iter()
+                        .filter_map(|b| Some((b.get("name")?.as_str()?, b.get("value")?)));
+                    walk(&mut inner, props, ctor_names, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for m in &anf.methods {
+        let mut props = HashMap::new();
+        let mut it = m.body.iter().map(|b| (b.name.as_str(), &b.value));
+        walk(&mut it, &mut props, ctor_names, &mut out);
+    }
+    out.sort_by(|a, b| a.index.cmp(&b.index).then_with(|| a.scheme.cmp(&b.scheme)));
+    out
+}
+
+/// N-329: refuse a ByteString-family constructor arg that is not an
+/// even-length hex string. `encode_arg` treats every `SdkValue::Bytes` as hex,
+/// so raw bytes (e.g. 20 raw Addr bytes) were emitted as a push header
+/// followed by non-hex text: a corrupt locking script with no error. Panics
+/// (the constructor's existing refusal style) with the diagnostic shared by
+/// the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
 fn check_byte_string_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
     fn leaf_type(t: &str) -> &str {
         let mut cur = t.trim();
@@ -3682,6 +3709,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         }
     }
 
@@ -3776,6 +3804,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         RunarContract::new(artifact, vec![]);
     }
@@ -3819,6 +3848,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(
@@ -3861,6 +3891,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(
@@ -3912,6 +3943,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let pub_key_hash = "ab".repeat(20);
@@ -3951,6 +3983,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
@@ -3982,6 +4015,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(42)]);
@@ -4540,6 +4574,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::from_txid(artifact, &fake_txid, 0, &provider).unwrap();
@@ -4621,6 +4656,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
@@ -4667,6 +4703,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(
@@ -4900,6 +4937,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -4931,6 +4969,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -4962,6 +5001,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -4993,6 +5033,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -5049,6 +5090,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         }
     }
 
@@ -5187,6 +5229,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
         // Deployed script bakes tag = 42 at the slot (push 1 byte 0x2a).
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -5416,6 +5459,7 @@ mod tests {
             code_separator_indices: Some(vec![1, 3]),
             anf: None,
             unsound_primitives: None,
+            pq_pub_key_params: None,
         };
 
         let mut real = RunarContract::new(artifact.clone(), vec![SdkValue::Int(500)]);

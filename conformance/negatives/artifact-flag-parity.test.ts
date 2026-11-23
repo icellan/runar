@@ -111,10 +111,11 @@ function compileArtifact(
   tier: Tier,
   src: string,
   env?: Record<string, string>,
+  extra: string[] = [],
 ): Record<string, any> {
   if (tier.cmd === null) throw new BrokenTier(`${tier.id}: no toolchain`);
   const { args, file } = artifactArgs(tier, src);
-  const argv = [...tier.prefix, ...args];
+  const argv = [...tier.prefix, ...args, ...extra];
   const res = spawnSync(tier.cmd, argv, {
     cwd: tier.cwd,
     encoding: 'utf-8',
@@ -428,7 +429,7 @@ describe('N-151: rawScriptSpans values match TS (7 tiers)', () => {
  *
  * Proves: for the three CASES, every available tier (a) emits an `asm` string
  * equal to TS's (spec section 3.6, Required: Yes; Java used to omit it),
- * (b) emits a parseable `buildTimestamp` (section 3.19, Required: Yes; Zig used
+ * (b) emits a parseable `buildTimestamp` (section 3.20, Required: Yes; Zig used
  * to omit it) and Zig stamps the SOURCE_DATE_EPOCH instant when it is set,
  * (c) emits a non-empty `sourceMap.mappings` (Go and Java used to omit the key
  * unless `--emit-source-map` was passed), and (d) carries no top-level `ir`
@@ -539,5 +540,159 @@ describe('N-445: --no-source-map omits the artifact sourceMap (6 native tiers)',
       expect(report.failures).toEqual([]);
       expect(report.results.map((r) => r.status)).toEqual(['ok']);
     }, 600_000);
+  }
+});
+
+/**
+ * PQ-F1 - `pqPubKeyParams` VALUE parity against TS, all 7 tiers.
+ *
+ * The SDKs refuse, before deploying, a constructor value of the wrong length
+ * for a param this field lists as a WOTS+ / SLH-DSA public key. Each compiler
+ * carries its own length table and its own ANF walk, so the field is compared
+ * byte for byte (JSON text, key order included), not just deep-equal.
+ *
+ * Proves: for a stateless WOTS contract, a contract with a key behind a local
+ * alias plus a key read in a private helper, a stateful WOTS contract, a key
+ * declared after initialized (scalar + FixedArray) properties, and one
+ * contract calling all seven PQ verifiers, every available tier's
+ * `pqPubKeyParams` JSON text equals TS's, TS's is the expected non-empty value,
+ * and the scripts match; and basic-p2pkh carries no such key in any tier.
+ * Does not prove: the SDKs' refusal (each SDK's own tests), the `--ir` path.
+ */
+const PQ_SLH_SETS = ['128s', '128f', '192s', '192f', '256s', '256f'];
+const PQ_SHAPES: Array<{ name: string; src: string; expected: unknown[] }> = [
+  {
+    name: 'stateless-wots',
+    src: `import { SmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';
+class PqA extends SmartContract {
+  readonly pk: ByteString;
+  constructor(pk: ByteString) { super(pk); this.pk = pk; }
+  public spend(msg: ByteString, sig: ByteString) { assert(verifyWOTS(msg, sig, this.pk)); }
+}
+`,
+    expected: [{ index: 0, name: 'pk', scheme: 'verifyWOTS', length: 64 }],
+  },
+  {
+    name: 'alias-and-helper',
+    src: `import { SmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';
+class PqB extends SmartContract {
+  readonly tag: bigint;
+  readonly a: ByteString;
+  readonly b: ByteString;
+  constructor(tag: bigint, a: ByteString, b: ByteString) { super(tag, a, b); this.tag = tag; this.a = a; this.b = b; }
+  private checkB(msg: ByteString, sig: ByteString): boolean { return verifyWOTS(msg, sig, this.b); }
+  public spend(msg: ByteString, sig: ByteString, sig2: ByteString) {
+    assert(this.checkB(msg, sig2));
+    const k = this.a;
+    assert(verifyWOTS(msg, sig, k));
+    assert(this.tag > 0n);
+  }
+}
+`,
+    expected: [
+      { index: 1, name: 'a', scheme: 'verifyWOTS', length: 64 },
+      { index: 2, name: 'b', scheme: 'verifyWOTS', length: 64 },
+    ],
+  },
+  {
+    name: 'stateful-wots',
+    src: `import { StatefulSmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';
+class PqC extends StatefulSmartContract {
+  readonly pk: ByteString;
+  n: bigint;
+  constructor(pk: ByteString, n: bigint) { super(pk, n); this.pk = pk; this.n = n; }
+  public spend(msg: ByteString, sig: ByteString) { assert(verifyWOTS(msg, sig, this.pk)); this.n = this.n + 1n; }
+}
+`,
+    expected: [{ index: 0, name: 'pk', scheme: 'verifyWOTS', length: 64 }],
+  },
+  {
+    // index is the position in abi.constructor.params, which skips initialized
+    // properties (a scalar and a FixedArray here, both declared before the key).
+    name: 'initialized-props-before-key',
+    src: `import { SmartContract, ByteString, FixedArray, assert, verifyWOTS } from 'runar-lang';
+class PqE extends SmartContract {
+  readonly fee: bigint = 5n;
+  readonly limits: FixedArray<bigint, 2> = [1n, 2n];
+  readonly tag: bigint;
+  readonly pk: ByteString;
+  constructor(tag: bigint, pk: ByteString) { super(tag, pk); this.tag = tag; this.pk = pk; }
+  public spend(msg: ByteString, sig: ByteString) {
+    assert(this.limits[0] + this.tag > this.fee);
+    assert(verifyWOTS(msg, sig, this.pk));
+  }
+}
+`,
+    expected: [{ index: 1, name: 'pk', scheme: 'verifyWOTS', length: 64 }],
+  },
+  {
+    name: 'all-schemes',
+    src: `import { SmartContract, ByteString, assert, verifyWOTS, ${PQ_SLH_SETS.map((s) => `verifySLHDSA_SHA2_${s}`).join(', ')} } from 'runar-lang';
+class PqD extends SmartContract {
+  readonly w: ByteString;
+${PQ_SLH_SETS.map((s) => `  readonly k${s}: ByteString;`).join('\n')}
+  constructor(w: ByteString, ${PQ_SLH_SETS.map((s) => `k${s}: ByteString`).join(', ')}) {
+    super(w, ${PQ_SLH_SETS.map((s) => `k${s}`).join(', ')});
+    this.w = w;
+${PQ_SLH_SETS.map((s) => `    this.k${s} = k${s};`).join('\n')}
+  }
+  public spend(msg: ByteString, sig: ByteString) {
+    assert(verifyWOTS(msg, sig, this.w));
+  }
+${PQ_SLH_SETS.map((s) => `  public spend${s}(msg: ByteString, sig: ByteString) { assert(verifySLHDSA_SHA2_${s}(msg, sig, this.k${s})); }`).join('\n')}
+}
+`,
+    expected: [
+      { index: 0, name: 'w', scheme: 'verifyWOTS', length: 64 },
+      ...PQ_SLH_SETS.map((s, i) => ({
+        index: i + 1,
+        name: `k${s}`,
+        scheme: `verifySLHDSA_SHA2_${s}`,
+        length: s.startsWith('128') ? 32 : s.startsWith('192') ? 48 : 64,
+      })),
+    ],
+  },
+];
+
+const PQ_SRC_DIR = mkdtempSync(join(OUT, 'pq-shapes-'));
+const PQ_CASES = PQ_SHAPES.map((s) => {
+  const cls = /class (\w+)/.exec(s.src)![1]!;
+  mkdirSync(join(PQ_SRC_DIR, s.name));
+  const src = join(PQ_SRC_DIR, s.name, `${cls}.runar.ts`);
+  writeFileSync(src, s.src);
+  return { ...s, path: src };
+});
+
+const tsPqCache = new Map<string, Record<string, any>>();
+function tsPqArtifact(src: string): Record<string, any> {
+  let art = tsPqCache.get(src);
+  if (!art) {
+    art = compileArtifact(TS_TIER, src);
+    tsPqCache.set(src, art);
+  }
+  return art;
+}
+
+describe('PQ-F1: pqPubKeyParams values match TS (7 tiers)', () => {
+  for (const c of PQ_CASES) {
+    it(`ts: ${c.name} emits the expected pqPubKeyParams`, () => {
+      expect(tsPqArtifact(c.path).pqPubKeyParams).toEqual(c.expected);
+    });
+  }
+
+  for (const tier of available.filter((t) => t.id !== 'ts')) {
+    for (const c of PQ_CASES) {
+      it(`${tier.id}: ${c.name} pqPubKeyParams`, () => {
+        const tsArtifact = tsPqArtifact(c.path);
+        // The all-schemes artifact is MBs of script; its source map would
+        // overflow the capture buffer (N-445 flag, native tiers only).
+        const tierArtifact = compileArtifact(tier, c.path, undefined, ['--no-source-map']);
+        expect(tierArtifact.script === tsArtifact.script, `${tier.id}: script differs from TS`).toBe(true);
+        expect(JSON.stringify(tierArtifact.pqPubKeyParams)).toBe(JSON.stringify(tsArtifact.pqPubKeyParams));
+      }, 300_000);
+    }
+    it(`${tier.id}: basic-p2pkh has no pqPubKeyParams key`, () => {
+      expect('pqPubKeyParams' in compileArtifact(tier, tsSource('basic-p2pkh'))).toBe(false);
+    });
   }
 });

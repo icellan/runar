@@ -2891,15 +2891,25 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
         return try ctx.emit(.{ .load_param = .{ .name = "_newAmount" } });
     }
 
-    // currentBlockHeight() -> bigint. Pure source-level desugar to
-    // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
-    // methods (typecheck enforces). No new ANF kind or stack codegen needed.
+    // currentBlockHeight() -> bigint. Desugars to extractLocktime(this.txPreimage)
+    // AND pins the locktime domain at the use site (an nLockTime >= 500000000
+    // is a Unix timestamp). One pin per call; emission order matches
+    // 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
+    // Only valid in StatefulSmartContract methods (typecheck enforces).
     if (std.mem.eql(u8, c.callee, "currentBlockHeight")) {
         const preimage_ref = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
-        return try ctx.emit(.{ .call = .{
+        const height_ref = try ctx.emit(.{ .call = .{
             .func = "extractLocktime",
             .args = try ctx.allocSlice(&.{preimage_ref}),
         } });
+        const threshold_ref = try ctx.emit(makeLoadConstInt(500000000));
+        const in_domain_ref = try ctx.emit(.{ .bin_op = .{
+            .op = "<",
+            .left = height_ref,
+            .right = threshold_ref,
+        } });
+        _ = try ctx.emit(.{ .assert = .{ .value = in_domain_ref } });
+        return height_ref;
     }
 
     // Check if callee is a contract method (private helper) — emit method_call with @this

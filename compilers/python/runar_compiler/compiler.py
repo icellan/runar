@@ -115,7 +115,72 @@ class Artifact:
     anf: ANFProgram | None = None
     # Byte ranges produced by raw_script ANF nodes (asm({...}) calls).
     raw_script_spans: list | None = None
+    # PQ-F1: constructor params passed directly as a post-quantum verifier's
+    # public key: [{"index", "name", "scheme", "length"}]. None when empty.
+    pq_pub_key_params: list | None = None
 
+
+
+# PQ-F1: the public-key length each post-quantum verifier's compiled script
+# splits its pk operand into: WOTS+ pubSeed(32)||pkRoot(32), SLH-DSA
+# PK.seed(n)||PK.root(n) with n = 16 / 24 / 32.
+_PQ_PUBKEY_BYTES = {
+    "verifyWOTS": 64,
+    "verifySLHDSA_SHA2_128s": 32,
+    "verifySLHDSA_SHA2_128f": 32,
+    "verifySLHDSA_SHA2_192s": 48,
+    "verifySLHDSA_SHA2_192f": 48,
+    "verifySLHDSA_SHA2_256s": 64,
+    "verifySLHDSA_SHA2_256f": 64,
+}
+
+
+def _pq_pub_key_params(program: ANFProgram, ctor_names: list[str]) -> list[dict]:
+    """PQ-F1: ``pqPubKeyParams`` from the final ANF, exactly as the TS
+    reference (packages/runar-ir-schema/src/pq-pubkey.ts): every method,
+    nested if / loop bodies, ``@ref:`` aliases, pk = the verifier call's third
+    arg; kept to constructor params, deduplicated on (name, scheme), sorted by
+    (index, scheme)."""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def const_str(v) -> str | None:
+        if v.const_string is not None:
+            return v.const_string
+        return v.raw_value if isinstance(v.raw_value, str) else None
+
+    for m in program.methods:
+        prop_of: dict[str, str] = {}
+
+        def walk(bindings) -> None:
+            for b in bindings or []:
+                v = b.value
+                if v.kind == "load_prop" and v.name is not None:
+                    prop_of[b.name] = v.name
+                elif v.kind == "load_const":
+                    sv = const_str(v)
+                    if sv is not None and sv.startswith("@ref:"):
+                        target = prop_of.get(sv[len("@ref:"):])
+                        if target is not None:
+                            prop_of[b.name] = target
+                elif v.kind == "call" and v.func in _PQ_PUBKEY_BYTES:
+                    args = v.args or []
+                    prop = prop_of.get(args[2]) if len(args) > 2 else None
+                    if prop is not None and prop in ctor_names and (prop, v.func) not in seen:
+                        seen.add((prop, v.func))
+                        out.append({
+                            "index": ctor_names.index(prop),
+                            "name": prop,
+                            "scheme": v.func,
+                            "length": _PQ_PUBKEY_BYTES[v.func],
+                        })
+                walk(v.then)
+                walk(v.else_)
+                walk(v.body)
+
+        walk(m.body)
+    out.sort(key=lambda e: (e["index"], e["scheme"]))
+    return out
 
 
 def _build_timestamp() -> str:
@@ -1089,6 +1154,7 @@ def _assemble_artifact(
         code_separator_indices=cs_indices,
         build_timestamp=_build_timestamp(),
         raw_script_spans=raw_script_spans if raw_script_spans else None,
+        pq_pub_key_params=_pq_pub_key_params(program, [p.name for p in constructor_params]) or None,
     )
 
     # Always include ANF IR for stateful contracts — the SDK uses it
@@ -1209,6 +1275,8 @@ def artifact_to_json(artifact: Artifact) -> str:
             }
             for s in artifact.raw_script_spans
         ]
+    if artifact.pq_pub_key_params:
+        d["pqPubKeyParams"] = [dict(e) for e in artifact.pq_pub_key_params]
     d["buildTimestamp"] = artifact.build_timestamp
     if artifact.anf is not None:
         d["anf"] = _serialize_anf_program(artifact.anf)

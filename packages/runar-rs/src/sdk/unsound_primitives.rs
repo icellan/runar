@@ -81,6 +81,7 @@ mod tests {
             code_separator_indices: None,
             anf: None,
             unsound_primitives: unsound,
+            pq_pub_key_params: None,
         }
     }
 

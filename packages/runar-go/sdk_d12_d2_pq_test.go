@@ -126,3 +126,53 @@ class S extends StatefulSmartContract {
 	}
 	NewRunarContract(slh, []interface{}{strings.Repeat("01", 32), int64(0)})
 }
+
+// PQ-F1 (artifact field): the check reads the artifact's `pqPubKeyParams`, so
+// a STATELESS artifact (no ANF) is refused too, with the message shared by all
+// seven SDKs; an older stateful artifact without the field falls back to the
+// ANF walk.
+func TestPQF1_StatelessPQPubKeyLengthRefused(t *testing.T) {
+	art := d12Compile(t, "SW", `import { SmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';
+class SW extends SmartContract {
+  readonly pk: ByteString;
+  constructor(pk: ByteString) { super(pk); this.pk = pk; }
+  public spend(msg: ByteString, sig: ByteString) { assert(verifyWOTS(msg, sig, this.pk)); }
+}`)
+	if art.ANF != nil {
+		t.Fatal("expected a stateless artifact without ANF")
+	}
+	if len(art.PqPubKeyParams) != 1 {
+		t.Fatalf("pqPubKeyParams = %+v", art.PqPubKeyParams)
+	}
+	want := "RunarContract: constructor arg 'pk' is the verifyWOTS public key and must be exactly 64 bytes, got 32. " +
+		"A locking script built from it would refuse every valid signature, so the output could never be spent (PQ-F1)"
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil || fmt.Sprint(r) != want {
+				t.Fatalf("got %v, want %q", r, want)
+			}
+		}()
+		NewRunarContract(art, []interface{}{strings.Repeat("ab", 32)})
+	}()
+	for _, n := range []int{0, 63, 65} {
+		n := n
+		d12MustPanic(t, fmt.Sprintf("stateless WOTS pk %d B", n), func() {
+			NewRunarContract(art, []interface{}{strings.Repeat("ab", n)})
+		})
+	}
+	NewRunarContract(art, []interface{}{strings.Repeat("ab", 64)})
+
+	legacy := d12Compile(t, "LW", `import { StatefulSmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';
+class LW extends StatefulSmartContract {
+  readonly pk: ByteString;
+  n: bigint;
+  constructor(pk: ByteString, n: bigint) { super(pk, n); this.pk = pk; this.n = n; }
+  public spend(msg: ByteString, sig: ByteString) { const k = this.pk; assert(verifyWOTS(msg, sig, k)); this.n = this.n + 1n; }
+}`)
+	legacy.PqPubKeyParams = nil
+	d12MustPanic(t, "legacy stateful artifact, 32 B pk via local alias", func() {
+		NewRunarContract(legacy, []interface{}{strings.Repeat("ab", 32), int64(0)})
+	})
+	NewRunarContract(legacy, []interface{}{strings.Repeat("ab", 64), int64(0)})
+}

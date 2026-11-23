@@ -110,3 +110,59 @@ class S extends StatefulSmartContract {
     }
     RunarContract::new(slh, vec![SdkValue::Bytes("01".repeat(48)), SdkValue::Int(0)]);
 }
+
+/// PQ-F1 (artifact field): the check reads `pqPubKeyParams`, so a STATELESS
+/// artifact (no ANF) is refused too, with the message shared by all seven
+/// SDKs; an older stateful artifact without the field falls back to the ANF.
+#[test]
+fn pq_f1_stateless_pq_pub_key_length_refused() {
+    let art = compile(
+        r#"import { SmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';
+class SW extends SmartContract {
+  readonly pk: ByteString;
+  constructor(pk: ByteString) { super(pk); this.pk = pk; }
+  public spend(msg: ByteString, sig: ByteString) { assert(verifyWOTS(msg, sig, this.pk)); }
+}"#,
+        "SW.runar.ts",
+    );
+    assert!(art.anf.is_none());
+    assert_eq!(art.pq_pub_key_params.as_ref().map(|v| v.len()), Some(1));
+    let want = "RunarContract: constructor arg 'pk' is the verifyWOTS public key and must be exactly 64 bytes, got 32. \
+                A locking script built from it would refuse every valid signature, so the output could never be spent (PQ-F1)";
+    let a2 = art.clone();
+    let err = std::panic::catch_unwind(move || {
+        RunarContract::new(a2, vec![SdkValue::Bytes("ab".repeat(32))]);
+    })
+    .expect_err("32-byte key accepted");
+    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert_eq!(msg, want);
+    for n in [0usize, 63, 65] {
+        let a2 = art.clone();
+        assert!(
+            std::panic::catch_unwind(move || {
+                RunarContract::new(a2, vec![SdkValue::Bytes("ab".repeat(n))]);
+            })
+            .is_err(),
+            "{n}-byte key accepted"
+        );
+    }
+    RunarContract::new(art, vec![SdkValue::Bytes("ab".repeat(64))]);
+
+    let mut legacy = compile(
+        r#"import { StatefulSmartContract, ByteString, assert, verifyWOTS } from 'runar-lang';
+class LW extends StatefulSmartContract {
+  readonly pk: ByteString;
+  n: bigint;
+  constructor(pk: ByteString, n: bigint) { super(pk, n); this.pk = pk; this.n = n; }
+  public spend(msg: ByteString, sig: ByteString) { const k = this.pk; assert(verifyWOTS(msg, sig, k)); this.n = this.n + 1n; }
+}"#,
+        "LW.runar.ts",
+    );
+    legacy.pq_pub_key_params = None;
+    let l2 = legacy.clone();
+    assert!(std::panic::catch_unwind(move || {
+        RunarContract::new(l2, vec![SdkValue::Bytes("ab".repeat(32)), SdkValue::Int(0)]);
+    })
+    .is_err());
+    RunarContract::new(legacy, vec![SdkValue::Bytes("ab".repeat(64)), SdkValue::Int(0)]);
+}

@@ -82,6 +82,7 @@ module RunarCompiler
     :code_separator_index,
     :code_separator_indices,
     :raw_script_spans,
+    :pq_pub_key_params,
     :build_timestamp,
     :anf,
     keyword_init: true
@@ -103,6 +104,7 @@ module RunarCompiler
       code_separator_index: nil,
       code_separator_indices: nil,
       raw_script_spans: nil,
+      pq_pub_key_params: nil,
       build_timestamp: "",
       anf: nil
     )
@@ -994,6 +996,61 @@ module RunarCompiler
   # Artifact assembly
   # -------------------------------------------------------------------------
 
+  # PQ-F1: the public-key length each post-quantum verifier's compiled script
+  # splits its pk operand into: WOTS+ pubSeed(32)||pkRoot(32), SLH-DSA
+  # PK.seed(n)||PK.root(n) with n = 16 / 24 / 32.
+  PQ_PUBKEY_BYTES = {
+    "verifyWOTS" => 64,
+    "verifySLHDSA_SHA2_128s" => 32,
+    "verifySLHDSA_SHA2_128f" => 32,
+    "verifySLHDSA_SHA2_192s" => 48,
+    "verifySLHDSA_SHA2_192f" => 48,
+    "verifySLHDSA_SHA2_256s" => 64,
+    "verifySLHDSA_SHA2_256f" => 64,
+  }.freeze
+
+  # PQ-F1: `pqPubKeyParams` from the final ANF, exactly as the TS reference
+  # (packages/runar-ir-schema/src/pq-pubkey.ts): every method, nested if /
+  # loop bodies, `@ref:` aliases, pk = the verifier call's third arg; kept to
+  # constructor params, deduplicated on (name, scheme), sorted by (index, scheme).
+  def self._pq_pub_key_params(program, ctor_names)
+    out = []
+    seen = {}
+    program.methods.each do |m|
+      prop_of = {}
+      walk = lambda do |bindings|
+        (bindings || []).each do |b|
+          v = b.value
+          case v.kind
+          when "load_prop"
+            prop_of[b.name] = v.name unless v.name.nil?
+          when "load_const"
+            sv = v.const_string.nil? ? (v.raw_value.is_a?(String) ? v.raw_value : nil) : v.const_string
+            if sv.is_a?(String) && sv.start_with?("@ref:")
+              target = prop_of[sv.sub("@ref:", "")]
+              prop_of[b.name] = target unless target.nil?
+            end
+          when "call"
+            want = PQ_PUBKEY_BYTES[v.func]
+            args = v.args || []
+            prop = args.length > 2 ? prop_of[args[2]] : nil
+            idx = prop.nil? ? nil : ctor_names.index(prop)
+            if want && idx && !seen[[prop, v.func]]
+              seen[[prop, v.func]] = true
+              out << { "index" => idx, "name" => prop, "scheme" => v.func, "length" => want }
+            end
+          end
+          walk.call(v.then)
+          walk.call(v.else_)
+          walk.call(v.body)
+        end
+      end
+      walk.call(m.body)
+    end
+    out.sort_by { |e| [e["index"], e["scheme"]] }
+  end
+  private_class_method :_pq_pub_key_params
+
   # Build the final output artifact from the compilation products.
   def self._assemble_artifact(
     program,
@@ -1163,6 +1220,8 @@ module RunarCompiler
       raw_script_spans: (raw_script_spans && !raw_script_spans.empty? ? raw_script_spans : nil),
       build_timestamp: build_timestamp
     )
+    pq = _pq_pub_key_params(program, constructor_params.map(&:name))
+    art.pq_pub_key_params = pq unless pq.empty?
 
     # Always include ANF IR for stateful contracts -- the SDK uses it
     # to auto-compute state transitions without requiring manual newState.
@@ -1300,6 +1359,8 @@ module RunarCompiler
         }
       end
     end
+
+    d["pqPubKeyParams"] = artifact.pq_pub_key_params.map(&:dup) if artifact.pq_pub_key_params && !artifact.pq_pub_key_params.empty?
 
     d["buildTimestamp"] = artifact.build_timestamp
 

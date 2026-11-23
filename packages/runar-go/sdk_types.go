@@ -282,6 +282,20 @@ type RunarArtifact struct {
 	// compiler does not claim are sound (R-062). Empty for every ordinary
 	// contract; see sdk_unsound_primitives.go.
 	UnsoundPrimitives []string `json:"unsoundPrimitives,omitempty"`
+
+	// PqPubKeyParams (PQ-F1) lists the constructor params passed directly as
+	// a post-quantum verifier's public key, with the exact byte length each
+	// needs. NewRunarContract refuses a wrong-length value.
+	PqPubKeyParams []PqPubKeyParam `json:"pqPubKeyParams,omitempty"`
+}
+
+// PqPubKeyParam is one entry of RunarArtifact.PqPubKeyParams: Index is the
+// param's position in abi.constructor.params, Scheme the verifier builtin.
+type PqPubKeyParam struct {
+	Index  int    `json:"index"`
+	Name   string `json:"name"`
+	Scheme string `json:"scheme"`
+	Length int    `json:"length"`
 }
 
 // ABI describes the contract's public interface.
