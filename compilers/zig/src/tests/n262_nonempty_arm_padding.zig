@@ -47,6 +47,9 @@ fn lowerIr(a: std.mem.Allocator, src: []const u8) !void {
 }
 
 test "N-262: a non-empty else arm is never padded" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -54,6 +57,9 @@ test "N-262: a non-empty else arm is never padded" {
 }
 
 test "N-262: a non-empty then arm is never padded" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

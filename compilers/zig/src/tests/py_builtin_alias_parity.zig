@@ -160,6 +160,9 @@ test "require_output_p2pkh is byte-identical to requireOutputP2PKH" {
 }
 
 test "an unknown snake_case function is still rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     // Guards against the lazy fix: a blanket pass-through that maps any
     // snake_case identifier onto a builtin name would let this compile.
     const allocator = std.testing.allocator;

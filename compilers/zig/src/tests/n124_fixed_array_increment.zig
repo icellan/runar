@@ -202,6 +202,9 @@ test "N-124: the increment carries a state continuation the no-op control does n
 }
 
 test "N-124: an EXPRESSION-position increment is refused" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const a = std.testing.allocator;
     try std.testing.expectError(
         error.ValidationFailed,

@@ -1137,13 +1137,21 @@ func (p *rustMacroParser) parseStatementInner() Statement {
 		var elseBranch []Statement
 		if p.current().kind == rustTokElse {
 			p.advance()
-			p.expect(rustTokLBrace)
-			for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
+			if p.current().kind == rustTokIf {
+				// `else if ...` is sugar for `else { if ... }` -- same AST as
+				// the nested form, which every other tier already produces.
 				if s := p.parseStatement(); s != nil {
 					elseBranch = append(elseBranch, s)
 				}
+			} else {
+				p.expect(rustTokLBrace)
+				for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
+					if s := p.parseStatement(); s != nil {
+						elseBranch = append(elseBranch, s)
+					}
+				}
+				p.expect(rustTokRBrace)
 			}
-			p.expect(rustTokRBrace)
 		}
 		return IfStmt{
 			Condition:      condition,

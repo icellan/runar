@@ -294,6 +294,9 @@ test "R-073: bigint written into FixedArray<ByteString,2> is rejected" {
 }
 
 test "R-073: the whole compile refuses the repro, not just the typecheck pass" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const a = std.testing.allocator;
     try std.testing.expectError(
         error.TypeCheckFailed,
@@ -420,6 +423,9 @@ test "R-073: a parameter sharing the array's name does not disarm the check" {
 }
 
 test "R-073 control: whole-array reassignment is refused by expand_fixed_arrays" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const a = std.testing.allocator;
     // Typecheck deliberately stays quiet here (second early return) ...
     try std.testing.expectEqual(@as(usize, 0), try typecheckErrorCount(a, WHOLE_ARRAY_ASSIGN));

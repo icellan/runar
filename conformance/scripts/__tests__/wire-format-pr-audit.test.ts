@@ -1284,9 +1284,16 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // next edit to its file.
     // 2026-11-23 — SPENT and deleted by the PQ-F1 / currentBlockHeight pin PR
     // (it edits these files and moves its own pins): compilers/go/frontend/anf_lower.go, compilers/rust/src/frontend/anf_lower.rs, compilers/zig/src/codegen/emit.zig.
-    // 2026-11-23 — SPENT and deleted by the currentBlockHeight helper/ternary
-    // fix (it edits all four for the helper-read liveness extension and moves
-    // its own pins: the current-block-height-helper-ternary goldens + witness):
+    // 2026-11-23 (later) — the zig `stack_lower.zig` N-511 entry is SPENT and
+    // replaced: a test-only edit (two refusal tests lower
+    // std.testing.log_level so their expected diagnostic stays off stderr).
+    // No non-test line changes. Spent, and must be deleted, on the next edit
+    // to stack_lower.zig.
+    // 2026-11-24 — merging main: all four remaining entries (the three N-511
+    // stack-lowering ones and the zig stderr-quieting one) are SPENT and
+    // deleted by the currentBlockHeight helper/ternary fix, which edits every
+    // one of those files (helper-read liveness) and moves its own pins (the
+    // current-block-height-helper-ternary goldens + witness):
     // compilers/go/codegen/stack.go, compilers/java/src/main/java/runar/compiler/passes/StackLower.java,
     // compilers/rust/src/codegen/stack.rs, compilers/zig/src/passes/stack_lower.zig.
     const entries = loadExceptions(REPO_ROOT);
@@ -1295,7 +1302,11 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // exception, it is a permanent hole.
     for (const e of entries) {
       expect(e.expires).toBe('2027-05-22');
-      expect(e.reviewer).toBe('fix-session: N-511 dead-helper deletion');
+      expect(e.reviewer).toBe(
+        e.path === 'compilers/zig/src/passes/stack_lower.zig'
+          ? 'fix-session: zig test stderr quieting'
+          : 'fix-session: N-511 dead-helper deletion',
+      );
       expect(e.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
   });

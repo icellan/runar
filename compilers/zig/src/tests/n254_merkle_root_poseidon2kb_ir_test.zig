@@ -171,6 +171,9 @@ test "N-254: the compiled script packs all eight root limbs, not just the top on
 }
 
 test "N-254: depth 33 is refused as a DEPTH problem, not an unknown builtin" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.MerkleDepthOutOfRange,
         lowerAtDepth(std.testing.allocator, 33),

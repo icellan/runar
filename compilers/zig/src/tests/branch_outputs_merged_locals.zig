@@ -462,6 +462,9 @@ test "lowerToANF without a diagnostic sink still refuses the construct" {
 }
 
 test "conditional that declares outputs and leaves an extra result fails the full pipeline" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     for (REJECTED_CASES) |tc| {
         const result = compiler_api.compileSource(std.testing.allocator, tc.source, tc.file_name);
         // compileSource propagates the pass-4 error verbatim — it must NOT

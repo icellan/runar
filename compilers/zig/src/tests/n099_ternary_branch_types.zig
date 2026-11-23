@@ -121,6 +121,9 @@ fn typecheckHasError(a: std.mem.Allocator, src: []const u8, needle: []const u8) 
 }
 
 test "N-099: incompatible ternary arms are rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const a = std.testing.allocator;
     try std.testing.expect(try typecheckHasError(
         a,

@@ -288,6 +288,9 @@ fn frontendDiagnostics(alloc: Allocator, source: []const u8, file_name: []const 
 // ---------------------------------------------------------------------------
 
 test "N-061: a non-unit step is rejected, not coerced (.runar.zig)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -309,6 +312,9 @@ test "N-061: a non-unit step is rejected, not coerced (.runar.zig)" {
 // silently ran the loop 5 times over i = 0..4 instead of 3 times over
 // i = 0,2,4 — so "all seven reject a non-unit Move step" was never true.
 test "N-061: a non-unit step is rejected, not coerced (.runar.move)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -348,6 +354,9 @@ test "R-102: a descending Move while-fold compiles to the TS countdown bytes" {
 }
 
 test "N-061: a non-unit step is rejected, not coerced (.runar.java)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -356,6 +365,9 @@ test "N-061: a non-unit step is rejected, not coerced (.runar.java)" {
 }
 
 test "N-061: a negative non-unit step is rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -386,6 +398,9 @@ fn tsWithUpdate(alloc: Allocator, update: []const u8) ![]const u8 {
 }
 
 test "N-061: an undefined function in the update position is rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -394,6 +409,9 @@ test "N-061: an undefined function in the update position is rejected" {
 }
 
 test "N-061: a state mutation in the update position is rejected, not dropped" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -402,6 +420,9 @@ test "N-061: a state mutation in the update position is rejected, not dropped" {
 }
 
 test "N-061: an update advancing another variable is rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -494,6 +515,9 @@ fn javaWithUpdate(alloc: Allocator, update: []const u8) ![]const u8 {
 }
 
 test "N-128: unrepresentable .runar.java for-updates are rejected, not skipped" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const updates = [_][]const u8{
         "count += Bigint.ONE",
         "this.count += Bigint.ONE",
@@ -518,6 +542,9 @@ test "N-128: unrepresentable .runar.java for-updates are rejected, not skipped" 
 // `i++, this.count++` compiled as `i++` with the state write dropped. TS
 // refuses it in the parser with `expected ')', got ','`.
 test "N-128: a comma-joined .runar.java for-update is rejected, not truncated" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -560,6 +587,9 @@ test "N-128 CONTROL: unit-step .runar.java for-updates keep the bounded-loop byt
 // (pinned by the conformance negatives N180/N181 across all seven tiers).
 
 test "N-132: an empty .runar.ts for-update is rejected with the reference diagnostic" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -568,6 +598,9 @@ test "N-132: an empty .runar.ts for-update is rejected with the reference diagno
 }
 
 test "N-132: an empty .runar.sol for-update is rejected with the reference diagnostic" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -593,6 +626,9 @@ test "N-132: an empty .runar.sol for-update is rejected with the reference diagn
 // (those keep a placeholder iterator and the condition rule refuses them).
 
 test "N-116: a .runar.zig continue expression that only reads the iterator is rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -602,6 +638,9 @@ test "N-116: a .runar.zig continue expression that only reads the iterator is re
 }
 
 test "N-116: a .runar.ts for-update that only reads the iterator is rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -609,6 +648,9 @@ test "N-116: a .runar.ts for-update that only reads the iterator is rejected" {
 }
 
 test "N-116: a .runar.ts literal for-update is rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -632,6 +674,9 @@ test "N-116: a .runar.ts literal for-update is rejected" {
 // tiers (pinned by the conformance negatives N274/N275).
 
 test "N-135: an empty .runar.ts for-condition is rejected with the reference diagnostic" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -641,6 +686,9 @@ test "N-135: an empty .runar.ts for-condition is rejected with the reference dia
 }
 
 test "N-135: a shifted .runar.ts for-header (;; cond; update) is rejected with the reference diagnostic" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -698,6 +746,9 @@ fn tsForInitializer(alloc: Allocator, init: []const u8) ![]const u8 {
 }
 
 test "N-306: a non-declaration .runar.ts for-initializer is rejected with the reference diagnostic" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();

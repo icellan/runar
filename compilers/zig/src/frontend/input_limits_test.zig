@@ -164,6 +164,9 @@ test "every exported per-format parser accepts at-limit input at the guard" {
 }
 
 test "compileSource accepts small but invalid input without tripping size guard" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const allocator = testing.allocator;
     // A short snippet — too short to be a valid contract but well below the
     // size cap. We expect *some* downstream error (ParseFailed etc.) but

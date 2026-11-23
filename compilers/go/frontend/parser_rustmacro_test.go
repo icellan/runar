@@ -527,3 +527,74 @@ impl Old {
 		t.Fatalf("expected migration diagnostic for #[public], got: %s", strings.Join(result.ErrorStrings(), "; "))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestParseRustMacro_ElseIfChain -- frontend parity: Rust's `else if` chain is
+// sugar for `else { if ... }`. The Go tier's .runar.rs parser refused it
+// ("expected {"), while every other tier accepted it.
+// ---------------------------------------------------------------------------
+
+func TestParseRustMacro_ElseIfChain(t *testing.T) {
+	source := `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Sel {
+    pub a: Bigint,
+}
+
+impl Sel {
+    pub fn set(&mut self, i: Bigint, v: Bigint) {
+        if i == 0 {
+            self.a = v;
+        } else if i == 1 {
+            self.a = v + 1;
+        } else if i == 2 {
+            self.a = v + 2;
+        } else {
+            assert!(false);
+        }
+    }
+}
+`
+	result := ParseSource([]byte(source), "Sel.runar.rs")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	body := result.Contract.Methods[0].Body
+	if len(body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(body))
+	}
+	// The else-if is located at its own `if` keyword, not at the outer if.
+	wantLine := 0
+	for n, l := range strings.Split(source, "\n") {
+		if strings.Contains(l, "else if") {
+			wantLine = n + 1
+			break
+		}
+	}
+	if inner, isIf := body[0].(IfStmt).Else[0].(IfStmt); !isIf || inner.SourceLocation.Line != wantLine {
+		t.Fatalf("first else-if: want an IfStmt at line %d, got %#v", wantLine, body[0].(IfStmt).Else[0])
+	}
+	// Walk the chain: each else-if must be the SOLE statement of the outer
+	// else branch, exactly as the nested `else { if ... }` form parses.
+	cur, ok := body[0].(IfStmt)
+	for depth := 0; depth < 2; depth++ {
+		if !ok {
+			t.Fatalf("depth %d: expected IfStmt", depth)
+		}
+		if len(cur.Else) != 1 {
+			t.Fatalf("depth %d: expected else branch with 1 statement, got %d", depth, len(cur.Else))
+		}
+		cur, ok = cur.Else[0].(IfStmt)
+	}
+	if !ok {
+		t.Fatal("depth 2: expected IfStmt")
+	}
+	if len(cur.Else) != 1 {
+		t.Fatalf("terminal else: expected 1 statement, got %d", len(cur.Else))
+	}
+	if _, isIf := cur.Else[0].(IfStmt); isIf {
+		t.Fatal("terminal else must hold the assert, not another if")
+	}
+}

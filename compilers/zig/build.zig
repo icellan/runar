@@ -38,6 +38,13 @@ pub fn build(b: *std.Build) void {
     // one compiler, so the unit-test step must build+install the binary first.
     // Without this the parity test would compare against a stale binary.
     run_unit_tests.step.dependOn(b.getInstallStep());
+    // A passing test must write nothing to stderr: Zig 0.16's build runner
+    // prints any step with captured stderr through its failure renderer,
+    // ending in `failed command: ...`, even when every test passed. Tests that
+    // expect a refusal therefore lower `std.testing.log_level` to `.err` for
+    // their own duration, so the compiler's `std.log.warn` diagnostic for the
+    // refusal stays off stderr while an unexpected warning elsewhere still
+    // shows. CI fails the step on a `failed command:` line.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 

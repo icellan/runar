@@ -17,9 +17,9 @@
 
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { writeFileSync, readdirSync, existsSync } from 'fs';
+import { writeFileSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
-import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, runAllIrRoundTripChecks, printIrRoundTripReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults, emptyFixtureSetError } from './runner.js';
+import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, runAllIrRoundTripChecks, printIrRoundTripReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults, emptyFixtureSetError, discoverFixtureDirs } from './runner.js';
 import {
   generateReport,
   formatReportAsJSON,
@@ -375,16 +375,18 @@ async function main(): Promise<void> {
   // harness-fault 2 — the harness worked fine, a fixture just refused).
   if (opts.updateGolden) {
     console.log('Updating golden files from TypeScript compiler output...');
-    const entries = readdirSync(opts.testsDir, { withFileTypes: true });
-    // --filter scopes this mode like every other (substring, case-insensitive,
-    // as discoverTestDirs applies it): without it a request to stamp one
-    // fixture restamped every golden under --tests-dir.
-    const filterLower = opts.filter?.toLowerCase();
-    const testDirs = entries
-      .filter((e) => e.isDirectory())
-      .filter((e) => filterLower === undefined || e.name.toLowerCase().includes(filterLower))
-      .map((e) => join(opts.testsDir, e.name));
     if (opts.filter) console.log(`Filter: ${opts.filter}`);
+    // Same discovery (and --filter narrowing) as every comparison mode; this
+    // branch used to list --tests-dir itself, so a filtered restamp rewrote
+    // every golden in the suite.
+    const testDirs = discoverFixtureDirs(opts.testsDir, { filter: opts.filter });
+    const emptyUpdate = emptyFixtureSetError(testDirs.length, {
+      mode: 'update-golden', testsDir: opts.testsDir, filter: opts.filter,
+    });
+    if (emptyUpdate) {
+      console.error(emptyUpdate);
+      process.exit(1);
+    }
 
     const failedDirs: string[] = [];
     for (const testDir of testDirs) {
