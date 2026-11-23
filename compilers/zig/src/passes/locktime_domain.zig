@@ -351,20 +351,49 @@ fn propagates(op: types.BinOperator) bool {
 }
 
 /// Taint level of a source expression, given the taint of the names in scope.
-fn exprLevel(e: Expression, names: *const Levels) u2 {
+/// `g` (when given) resolves a private helper's return level.
+fn exprLevel(e: Expression, names: *const Levels, g: ?*SourceGates) u2 {
     if (isLocktimeRead(e)) return DIRECT;
     switch (e) {
         .identifier => |n| return names.get(n) orelse NONE,
-        .binary_op => |b| return if (propagates(b.op) and (exprLevel(b.left, names) != NONE or exprLevel(b.right, names) != NONE)) DERIVED else NONE,
-        .unary_op => |u| return if ((u.op == .negate or u.op == .bitnot) and exprLevel(u.operand, names) != NONE) DERIVED else NONE,
-        .ternary => |t| return if (exprLevel(t.then_expr, names) != NONE or exprLevel(t.else_expr, names) != NONE) DERIVED else NONE,
-        // A builtin (bare callee); a helper's return (`this.h(...)`) is not followed.
+        .binary_op => |b| return if (propagates(b.op) and (exprLevel(b.left, names, g) != NONE or exprLevel(b.right, names, g) != NONE)) DERIVED else NONE,
+        .unary_op => |u| return if ((u.op == .negate or u.op == .bitnot) and exprLevel(u.operand, names, g) != NONE) DERIVED else NONE,
+        .ternary => |t| return if (exprLevel(t.then_expr, names, g) != NONE or exprLevel(t.else_expr, names, g) != NONE) DERIVED else NONE,
+        // A builtin (bare callee) derives from its arguments.
         .call => |c| {
-            for (c.args) |x| if (exprLevel(x, names) != NONE) return DERIVED;
+            for (c.args) |x| if (exprLevel(x, names, g) != NONE) return DERIVED;
             return NONE;
+        },
+        // A private helper's return carries the locktime taint into the caller
+        // (inlined, `this.height()` IS its returned expression).
+        .method_call => |mc| {
+            const gg = g orelse return NONE;
+            const h = gg.lookupPrivate(mc.method) orelse return NONE;
+            const levels = gg.a.alloc(u2, mc.args.len) catch @panic("out of memory");
+            for (mc.args, 0..) |x, i| levels[i] = exprLevel(x, names, g);
+            return gg.helperReturn(h, levels) catch @panic("out of memory");
         },
         else => return NONE,
     }
+}
+
+/// Every `return` expression of a method body (if arms and loop bodies included).
+fn returnExpressions(a: Allocator, body: []const Statement) Allocator.Error![]const Expression {
+    var out: std.ArrayListUnmanaged(Expression) = .empty;
+    var work: std.ArrayListUnmanaged([]const Statement) = .empty;
+    try work.append(a, body);
+    while (work.pop()) |list| {
+        for (list) |st| switch (st) {
+            .return_stmt => |r| if (r.value) |v| try out.append(a, v),
+            .if_stmt => |if_s| {
+                try work.append(a, if_s.then_body);
+                if (if_s.else_body) |eb| try work.append(a, eb);
+            },
+            .for_stmt => |fs| try work.append(a, fs.body),
+            else => {},
+        };
+    }
+    return out.items;
 }
 
 fn literalOf(e: Expression) ?i128 {
@@ -379,16 +408,18 @@ fn literalOf(e: Expression) ?i128 {
 const SourceBind = union(enum) { expr: Expression, level: u2 };
 
 const SourceTaintCtx = struct {
-    fn tainted(_: SourceTaintCtx, b: SourceBind, t: *const Levels) bool {
+    g: ?*SourceGates = null,
+    fn tainted(c: SourceTaintCtx, b: SourceBind, t: *const Levels) bool {
         return switch (b) {
             .level => |lv| lv != NONE,
-            .expr => |e| exprLevel(e, t) != NONE,
+            .expr => |e| exprLevel(e, t, c.g) != NONE,
         };
     }
-    fn direct(_: SourceTaintCtx, b: SourceBind, d: *const Levels) bool {
+    fn direct(c: SourceTaintCtx, b: SourceBind, d: *const Levels) bool {
         return switch (b) {
             .level => |lv| lv == DIRECT,
-            .expr => |e| isLocktimeRead(e) or (e == .identifier and d.contains(e.identifier)),
+            .expr => |e| isLocktimeRead(e) or (e == .identifier and d.contains(e.identifier)) or
+                (e == .method_call and exprLevel(e, d, c.g) == DIRECT),
         };
     }
 };
@@ -403,6 +434,41 @@ const SourceGates = struct {
     in_progress: std.StringHashMapUnmanaged(void) = .empty,
     /// Taint level of the locals and parameters of the method being walked.
     locals: Levels = .empty,
+    /// Helper return levels, by helper key (name + argument levels).
+    return_levels: std.StringHashMapUnmanaged(u2) = .empty,
+    return_in_progress: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// Level of a private helper's return value: DIRECT when every `return`
+    /// expression is a direct read, DERIVED when some is tainted, else NONE
+    /// (the rule a local with several bindings follows). A call cycle
+    /// contributes NONE. Mirrors SourceGates.helperReturn in locktime-domain.ts.
+    fn helperReturn(g: *SourceGates, m: MethodNode, arg_levels: []const u2) Allocator.Error!u2 {
+        var params: Levels = .empty;
+        var key: std.ArrayListUnmanaged(u8) = .empty;
+        try key.appendSlice(g.a, m.name);
+        try key.append(g.a, '|');
+        for (m.params, 0..) |p, i| {
+            const lv = if (i < arg_levels.len) arg_levels[i] else NONE;
+            if (lv != NONE) try params.put(g.a, p.name, lv);
+            if (i > 0) try key.append(g.a, ',');
+            try key.append(g.a, '0' + @as(u8, lv));
+        }
+        if (g.return_levels.get(key.items)) |lv| return lv;
+        if (g.return_in_progress.contains(key.items)) return NONE;
+        try g.return_in_progress.put(g.a, key.items, {});
+        const locals = try collectLocals(g.a, m.body, params, g);
+        var all_none = true;
+        var all_direct = true;
+        for (try returnExpressions(g.a, m.body)) |r| {
+            const lv = exprLevel(r, &locals, g);
+            if (lv != NONE) all_none = false;
+            if (lv != DIRECT) all_direct = false;
+        }
+        _ = g.return_in_progress.remove(key.items);
+        const lv: u2 = if (all_none) NONE else if (all_direct) DIRECT else DERIVED;
+        try g.return_levels.put(g.a, key.items, lv);
+        return lv;
+    }
 
     fn lookupPrivate(g: *SourceGates, name: []const u8) ?MethodNode {
         for (g.contract.methods) |m| {
@@ -413,14 +479,14 @@ const SourceGates = struct {
 
     fn exits(g: *SourceGates, method: MethodNode, params: Levels) Allocator.Error!u4 {
         const saved = g.locals;
-        g.locals = try collectLocals(g.a, method.body, params);
+        g.locals = try collectLocals(g.a, method.body, params, g);
         const f = try g.stmts(method.body, ZERO);
         g.locals = saved;
         return f.live | f.returned;
     }
 
     fn level(g: *SourceGates, e: Expression) u2 {
-        return exprLevel(e, &g.locals);
+        return exprLevel(e, &g.locals, g);
     }
 
     fn compare(g: *SourceGates, e: Expression) Class {
@@ -546,7 +612,7 @@ const SourceGates = struct {
 /// Taint of the method's locals and parameters, from every binding in the
 /// body (declaration or assignment, anywhere) plus one binding per tainted
 /// parameter (the level its call passes it). Order-blind on purpose.
-fn collectLocals(a: Allocator, body: []const Statement, params: Levels) Allocator.Error!Levels {
+fn collectLocals(a: Allocator, body: []const Statement, params: Levels, g: ?*SourceGates) Allocator.Error!Levels {
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     var binds: std.ArrayListUnmanaged(SourceBind) = .empty;
     var it = params.iterator();
@@ -579,7 +645,7 @@ fn collectLocals(a: Allocator, body: []const Statement, params: Levels) Allocato
         }
     };
     try Visit.run(a, body, &names, &binds);
-    return solveTaint(SourceBind, a, names.items, binds.items, SourceTaintCtx{});
+    return solveTaint(SourceBind, a, names.items, binds.items, SourceTaintCtx{ .g = g });
 }
 
 /// D26 (source path): true iff some path through public `method` carries an

@@ -87,6 +87,14 @@ const Defs = std.StringHashMapUnmanaged(std.ArrayListUnmanaged(types.ANFValue));
 
 const IrTaintCtx = struct {
     params: *const ld.Levels,
+    prog: *Program,
+
+    fn helperLevel(c: IrTaintCtx, mc: types.ANFMethodCall, set: *const ld.Levels) u2 {
+        const levels = c.prog.a.alloc(u2, mc.args.len) catch @panic("out of memory");
+        for (mc.args, 0..) |x, i| levels[i] = if (set.contains(x)) ld.DIRECT else ld.NONE;
+        return (c.prog.helperReturn(mc.method, levels) catch @panic("out of memory")) orelse ld.NONE;
+    }
+
     pub fn tainted(c: IrTaintCtx, v: types.ANFValue, t: *const ld.Levels) bool {
         if (refOf(v)) |r| return t.contains(r);
         return switch (v) {
@@ -103,6 +111,9 @@ const IrTaintCtx = struct {
                 if (lastName(iff.@"else")) |n| if (t.contains(n)) break :blk true;
                 break :blk false;
             },
+            // The inlined call yields the helper's return value: it carries
+            // the helper's locktime taint into the caller.
+            .method_call => |mc| c.helperLevel(mc, t) != ld.NONE,
             else => false,
         };
     }
@@ -111,6 +122,7 @@ const IrTaintCtx = struct {
         return switch (v) {
             .call => |call| eql(call.func, "extractLocktime"),
             .load_param => |lp| (c.params.get(lp.name) orelse ld.NONE) == ld.DIRECT,
+            .method_call => |mc| c.helperLevel(mc, d) == ld.DIRECT,
             else => false,
         };
     }
@@ -121,6 +133,33 @@ const Program = struct {
     methods: []const types.ANFMethod,
     exits_of: std.StringHashMapUnmanaged(u4) = .empty,
     in_progress: std.StringHashMapUnmanaged(void) = .empty,
+    returns_of: std.StringHashMapUnmanaged(u2) = .empty,
+    returns_in_progress: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// A helper's RETURN level: the level of its last binding (the value the
+    /// inlined call yields), given its argument levels. A cycle contributes
+    /// NONE; null when `name` is no private helper.
+    fn helperReturn(p: *Program, name: []const u8, arg_levels: []const u2) Allocator.Error!?u2 {
+        const m = p.private(name) orelse return null;
+        var params: ld.Levels = .empty;
+        var key: std.ArrayListUnmanaged(u8) = .empty;
+        try key.appendSlice(p.a, m.name);
+        try key.append(p.a, '|');
+        for (m.params, 0..) |prm, i| {
+            const lv = if (i < arg_levels.len) arg_levels[i] else ld.NONE;
+            if (lv != ld.NONE) try params.put(p.a, prm.name, lv);
+            if (i > 0) try key.append(p.a, ',');
+            try key.append(p.a, '0' + @as(u8, lv));
+        }
+        if (p.returns_of.get(key.items)) |lv| return lv;
+        if (p.returns_in_progress.contains(key.items) or m.body.len == 0) return ld.NONE;
+        try p.returns_in_progress.put(p.a, key.items, {});
+        var g = try Gates.init(p, m, params);
+        const lv = g.level(m.body[m.body.len - 1].name);
+        _ = p.returns_in_progress.remove(key.items);
+        try p.returns_of.put(p.a, key.items, lv);
+        return lv;
+    }
 
     fn private(p: *Program, name: []const u8) ?types.ANFMethod {
         for (p.methods) |m| {
@@ -196,7 +235,7 @@ const Gates = struct {
         try index(a, &defs, &names, &vals, &cmps, m.body);
         const ps = try a.create(ld.Levels);
         ps.* = params;
-        const taint = try ld.solveTaint(types.ANFValue, a, names.items, vals.items, IrTaintCtx{ .params = ps });
+        const taint = try ld.solveTaint(types.ANFValue, a, names.items, vals.items, IrTaintCtx{ .params = ps, .prog = prog });
         return .{ .prog = prog, .defs = defs, .taint = taint, .self_pin_cmps = cmps };
     }
 

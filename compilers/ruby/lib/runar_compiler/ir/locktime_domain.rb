@@ -64,6 +64,27 @@ module RunarCompiler
         methods.each { |m| privates[m.name] = m if !m.is_public && m.name != "constructor" }
         exits_of = {}
         in_progress = Set.new
+        exits = nil
+        helper = ->(name, levels) { privates[name] && exits.call(privates[name], levels) }
+        # A helper's RETURN level: the level of its last binding (the value the
+        # inlined call yields), given its argument levels. A cycle contributes NONE.
+        returns_of = {}
+        returns_in_progress = Set.new
+        helper_return = nil
+        helper_return = lambda do |name, arg_levels|
+          m = privates[name]
+          next nil unless m
+
+          params, sig = LD.helper_params(m.params, arg_levels)
+          key = [m.name, sig]
+          next returns_of[key] if returns_of.key?(key)
+          next LD::NONE if returns_in_progress.include?(key) || m.body.nil? || m.body.empty?
+
+          returns_in_progress.add(key)
+          lv = Gates.new(m, params, helper, helper_return).level_of(m.body[-1].name)
+          returns_in_progress.delete(key)
+          returns_of[key] = lv
+        end
         exits = lambda do |m, arg_levels|
           params, sig = LD.helper_params(m.params, arg_levels)
           key = [m.name, sig]
@@ -71,8 +92,7 @@ module RunarCompiler
           next LD::FRESH if in_progress.include?(m.name)
 
           in_progress.add(m.name)
-          helper = ->(name, levels) { privates[name] && exits.call(privates[name], levels) }
-          ex = Gates.new(m, params, helper).run(m.body, LD::FRESH)
+          ex = Gates.new(m, params, helper, helper_return).run(m.body, LD::FRESH)
           in_progress.delete(m.name)
           exits_of[key] = ex
         end
@@ -96,7 +116,7 @@ module RunarCompiler
       end
 
       class Gates
-        def initialize(method, params, helper_exits)
+        def initialize(method, params, helper_exits, helper_return = nil)
           @helper_exits = helper_exits
           # Every binding of the method, by name (a name bound more than once
           # keeps all its values).
@@ -142,6 +162,11 @@ module RunarCompiler
             when "bin_op" then LD::PROPAGATE.include?(v.op) && (t.include?(v.left) || t.include?(v.right))
             when "unary_op" then LD::PROPAGATE_UNARY.include?(v.op) && t.include?(v.operand)
             when "if" then [last.call(v.then), last.call(v.else_)].any? { |n| !n.nil? && t.include?(n) }
+            # The inlined call yields the helper's return value: it carries the
+            # helper's locktime taint into the caller.
+            when "method_call"
+              lv = helper_return&.call(v.method, (v.args || []).map { |a| t.include?(a) ? LD::DIRECT : LD::NONE })
+              !lv.nil? && lv != LD::NONE
             else false
             end
           end
@@ -152,6 +177,8 @@ module RunarCompiler
             case v.kind
             when "call" then v.func == "extractLocktime" && !self_pinned.include?(v)
             when "load_param" then params[v.name] == LD::DIRECT
+            when "method_call"
+              helper_return&.call(v.method, (v.args || []).map { |a| d.include?(a) ? LD::DIRECT : LD::NONE }) == LD::DIRECT
             else false
             end
           end
@@ -175,6 +202,11 @@ module RunarCompiler
             end
           end
           s
+        end
+
+        # Taint level of one binding name (a helper's return: its last binding).
+        def level_of(name)
+          level(name)
         end
 
         private

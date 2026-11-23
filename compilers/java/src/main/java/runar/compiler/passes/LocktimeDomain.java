@@ -332,28 +332,61 @@ public final class LocktimeDomain {
         if (o != null) work.push(o);
     }
 
+    /** A private helper's return level, given its argument levels; null when the name is no private helper. */
+    @FunctionalInterface
+    private interface HelperReturn {
+        Integer level(String name, int[] argLevels);
+    }
+
     /** Taint level of a source expression, given the taint of the names in scope. */
-    private static int exprLevel(Expression e, Map<String, Integer> names) {
+    private static int exprLevel(Expression e, Map<String, Integer> names, HelperReturn hr) {
         if (e == null) return NONE;
         if (isLocktimeRead(e)) return DIRECT;
         if (e instanceof Identifier id) return names.getOrDefault(id.name(), NONE);
         if (e instanceof BinaryExpr b) {
             return PROPAGATE.contains(b.op().canonical())
-                && (exprLevel(b.left(), names) != NONE || exprLevel(b.right(), names) != NONE) ? DERIVED : NONE;
+                && (exprLevel(b.left(), names, hr) != NONE || exprLevel(b.right(), names, hr) != NONE) ? DERIVED : NONE;
         }
         if (e instanceof UnaryExpr u) {
-            return PROPAGATE_UNARY.contains(u.op().canonical()) && exprLevel(u.operand(), names) != NONE ? DERIVED : NONE;
+            return PROPAGATE_UNARY.contains(u.op().canonical()) && exprLevel(u.operand(), names, hr) != NONE ? DERIVED : NONE;
         }
         if (e instanceof TernaryExpr t) {
-            return exprLevel(t.consequent(), names) != NONE || exprLevel(t.alternate(), names) != NONE ? DERIVED : NONE;
+            return exprLevel(t.consequent(), names, hr) != NONE || exprLevel(t.alternate(), names, hr) != NONE ? DERIVED : NONE;
         }
         if (e instanceof CallExpr c) {
-            // A builtin (identifier callee); a helper's return is not followed.
-            if (!(c.callee() instanceof Identifier)) return NONE;
-            for (Expression a : c.args()) if (exprLevel(a, names) != NONE) return DERIVED;
-            return NONE;
+            // A builtin (identifier callee) derives from its arguments.
+            if (c.callee() instanceof Identifier) {
+                for (Expression a : c.args()) if (exprLevel(a, names, hr) != NONE) return DERIVED;
+                return NONE;
+            }
+            // A private helper's return carries the locktime taint into the
+            // caller (inlined, this.height() IS its returned expression).
+            String name = c.callee() instanceof PropertyAccessExpr pa ? pa.property()
+                : c.callee() instanceof MemberExpr me ? me.property() : null;
+            if (name == null || hr == null) return NONE;
+            int[] levels = new int[c.args().size()];
+            for (int i = 0; i < levels.length; i++) levels[i] = exprLevel(c.args().get(i), names, hr);
+            Integer lv = hr.level(name, levels);
+            return lv == null ? NONE : lv;
         }
         return NONE;
+    }
+
+    /** Every return expression of a method body (if arms and loop bodies included). */
+    private static List<Expression> returnExpressions(List<Statement> body) {
+        List<Expression> out = new ArrayList<>();
+        ArrayDeque<List<Statement>> work = new ArrayDeque<>();
+        if (body != null) work.push(body);
+        while (!work.isEmpty()) {
+            for (Statement st : work.pop()) {
+                if (st instanceof ReturnStatement r && r.value() != null) out.add(r.value());
+                else if (st instanceof IfStatement i) {
+                    if (i.thenBody() != null) work.push(i.thenBody());
+                    if (i.elseBody() != null) work.push(i.elseBody());
+                } else if (st instanceof ForStatement f && f.body() != null) work.push(f.body());
+            }
+        }
+        return out;
     }
 
     private static BigInteger literalOf(Expression e) {
@@ -365,7 +398,7 @@ public final class LocktimeDomain {
      * body (declaration or assignment, anywhere) plus one binding per tainted
      * parameter (the level its call passes it). Order-blind on purpose.
      */
-    private static Map<String, Integer> collectLocals(List<Statement> body, Map<String, Integer> params) {
+    private static Map<String, Integer> collectLocals(List<Statement> body, Map<String, Integer> params, HelperReturn hr) {
         List<String> names = new ArrayList<>();
         List<Object> binds = new ArrayList<>();
         for (Map.Entry<String, Integer> p : params.entrySet()) {
@@ -398,11 +431,16 @@ public final class LocktimeDomain {
                 if (b instanceof Integer lv) return lv != NONE;
                 Map<String, Integer> asMap = new HashMap<>();
                 for (String n : t) asMap.put(n, DIRECT);
-                return exprLevel((Expression) b, asMap) != NONE;
+                return exprLevel((Expression) b, asMap, hr) != NONE;
             },
             (b, d) -> {
                 if (b instanceof Integer lv) return lv == DIRECT;
                 Expression e = (Expression) b;
+                if (e instanceof CallExpr c && !(c.callee() instanceof Identifier)) {
+                    Map<String, Integer> asMap = new HashMap<>();
+                    for (String n : d) asMap.put(n, DIRECT);
+                    return exprLevel(e, asMap, hr) == DIRECT;
+                }
                 return isLocktimeRead(e) || (e instanceof Identifier id && d.contains(id.name()));
             });
     }
@@ -421,6 +459,45 @@ public final class LocktimeDomain {
         private final Set<String> inProgress = new HashSet<>();
         /** Taint level of the locals and parameters of the method being walked. */
         private Map<String, Integer> locals = new HashMap<>();
+        /** Helper return levels, by helper key (name + argument levels). */
+        private final Map<String, Integer> returnLevels = new HashMap<>();
+        private final Set<String> returnInProgress = new HashSet<>();
+
+        /**
+         * Level of a private helper's return value: DIRECT when every return
+         * expression is a direct read, DERIVED when some is tainted, else NONE
+         * (the rule a local with several bindings follows). A call cycle
+         * contributes NONE. Mirrors SourceGates.helperReturn in locktime-domain.ts.
+         */
+        private Integer helperReturn(String name, int[] argLevels) {
+            MethodNode m = privates.get(name);
+            if (m == null) return null;
+            Map<String, Integer> params = new HashMap<>();
+            StringBuilder key = new StringBuilder(m.name()).append('|');
+            List<ParamNode> ps = m.params();
+            for (int i = 0; i < ps.size(); i++) {
+                int lv = i < argLevels.length ? argLevels[i] : NONE;
+                if (lv != NONE) params.put(ps.get(i).name(), lv);
+                if (i > 0) key.append(',');
+                key.append(lv);
+            }
+            String k = key.toString();
+            Integer cached = returnLevels.get(k);
+            if (cached != null) return cached;
+            if (!returnInProgress.add(k)) return NONE;
+            Map<String, Integer> ls = collectLocals(m.body(), params, this::helperReturn);
+            boolean allNone = true;
+            boolean allDirect = true;
+            for (Expression r : returnExpressions(m.body())) {
+                int lv = exprLevel(r, ls, this::helperReturn);
+                if (lv != NONE) allNone = false;
+                if (lv != DIRECT) allDirect = false;
+            }
+            returnInProgress.remove(k);
+            int lv = allNone ? NONE : allDirect ? DIRECT : DERIVED;
+            returnLevels.put(k, lv);
+            return lv;
+        }
 
         SourceGates(ContractNode contract) {
             for (MethodNode m : contract.methods()) {
@@ -430,14 +507,14 @@ public final class LocktimeDomain {
 
         int exits(MethodNode method, Map<String, Integer> params) {
             Map<String, Integer> saved = locals;
-            locals = collectLocals(method.body(), params);
+            locals = collectLocals(method.body(), params, this::helperReturn);
             Flow f = stmts(method.body(), ZERO);
             locals = saved;
             return f.live() | f.returned();
         }
 
         private int level(Expression e) {
-            return exprLevel(e, locals);
+            return exprLevel(e, locals, this::helperReturn);
         }
 
         private Cls compare(Expression e) {
@@ -633,6 +710,35 @@ public final class LocktimeDomain {
         private final Map<String, AnfMethod> privates = new HashMap<>();
         private final Map<String, Integer> exitsOf = new HashMap<>();
         private final Set<String> inProgress = new HashSet<>();
+        private final Map<String, Integer> returnsOf = new HashMap<>();
+        private final Set<String> returnsInProgress = new HashSet<>();
+
+        /**
+         * A helper's RETURN level: the level of its last binding (the value the
+         * inlined call yields), given its argument levels. A cycle contributes
+         * NONE; null when the name is no private helper.
+         */
+        Integer helperReturn(String name, int[] argLevels) {
+            AnfMethod m = privates.get(name);
+            if (m == null) return null;
+            Map<String, Integer> params = new HashMap<>();
+            StringBuilder key = new StringBuilder(m.name()).append('|');
+            List<AnfParam> ps = m.params() != null ? m.params() : List.of();
+            for (int i = 0; i < ps.size(); i++) {
+                int lv = i < argLevels.length ? argLevels[i] : NONE;
+                if (lv != NONE) params.put(ps.get(i).name(), lv);
+                if (i > 0) key.append(',');
+                key.append(lv);
+            }
+            String k = key.toString();
+            Integer cached = returnsOf.get(k);
+            if (cached != null) return cached;
+            if (m.body() == null || m.body().isEmpty() || !returnsInProgress.add(k)) return NONE;
+            int lv = new IrGates(this, m, params).level(m.body().get(m.body().size() - 1).name());
+            returnsInProgress.remove(k);
+            returnsOf.put(k, lv);
+            return lv;
+        }
 
         IrProgram(List<AnfMethod> methods) {
             for (AnfMethod m : methods) {
@@ -721,6 +827,14 @@ public final class LocktimeDomain {
                         String b = lastName(iff.elseBranch());
                         return (a != null && t.contains(a)) || (b != null && t.contains(b));
                     }
+                    if (v instanceof MethodCall mc) {
+                        // The inlined call yields the helper's return value: it
+                        // carries the helper's locktime taint into the caller.
+                        int[] levels = new int[mc.args().size()];
+                        for (int i = 0; i < levels.length; i++) levels[i] = t.contains(mc.args().get(i)) ? DIRECT : NONE;
+                        Integer lv = prog.helperReturn(mc.method(), levels);
+                        return lv != null && lv != NONE;
+                    }
                     return false;
                 },
                 (v, d) -> {
@@ -728,6 +842,12 @@ public final class LocktimeDomain {
                     if (r != null) return d.contains(r);
                     if (v instanceof Call c) return "extractLocktime".equals(c.func()) && !selfPinned.contains(v);
                     if (v instanceof LoadParam lp) return params.getOrDefault(lp.name(), NONE) == DIRECT;
+                    if (v instanceof MethodCall mc) {
+                        int[] levels = new int[mc.args().size()];
+                        for (int i = 0; i < levels.length; i++) levels[i] = d.contains(mc.args().get(i)) ? DIRECT : NONE;
+                        Integer lv = prog.helperReturn(mc.method(), levels);
+                        return lv != null && lv == DIRECT;
+                    }
                     return false;
                 });
         }

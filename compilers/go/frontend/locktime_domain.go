@@ -372,6 +372,9 @@ type sourceGates struct {
 	inProgress  map[string]bool
 	// Taint level of the locals and parameters of the method being walked.
 	locals map[string]int
+	// Helper return levels, by helper key (name + argument levels).
+	returnLevels     map[string]int
+	returnInProgress map[string]bool
 }
 
 func newSourceGates(contract *ContractNode) *sourceGates {
@@ -380,6 +383,9 @@ func newSourceGates(contract *ContractNode) *sourceGates {
 		helperExits: map[string]pathSet{},
 		inProgress:  map[string]bool{},
 		locals:      map[string]int{},
+
+		returnLevels:     map[string]int{},
+		returnInProgress: map[string]bool{},
 	}
 	for _, m := range contract.Methods {
 		if m.Visibility == "private" {
@@ -391,13 +397,88 @@ func newSourceGates(contract *ContractNode) *sourceGates {
 
 func (sg *sourceGates) exits(method MethodNode, params map[string]int) pathSet {
 	saved := sg.locals
-	sg.locals = collectLocktimeLocals(method.Body, params)
+	sg.locals = collectLocktimeLocals(method.Body, params, sg.helperReturn)
 	live, returned := sg.stmts(method.Body, pathSetOf(0))
 	sg.locals = saved
 	return live.union(returned)
 }
 
-func (sg *sourceGates) level(e Expression) int { return ltExprLevel(e, sg.locals) }
+func (sg *sourceGates) level(e Expression) int { return ltExprLevel(e, sg.locals, sg.helperReturn) }
+
+// helperReturn: level of a private helper's return value -- DIRECT when every
+// `return` expression is a direct read, DERIVED when some is tainted, else
+// NONE (the rule a local with several bindings follows). A call cycle
+// contributes NONE. ok is false when name is no private helper. Mirrors
+// SourceGates.helperReturn in locktime-domain.ts.
+func (sg *sourceGates) helperReturn(name string, argLevels []int) (int, bool) {
+	m, ok := sg.privates[name]
+	if !ok {
+		return ltNone, false
+	}
+	params := map[string]int{}
+	names := make([]string, len(m.Params))
+	for i, p := range m.Params {
+		names[i] = p.Name
+		if i < len(argLevels) && argLevels[i] != ltNone {
+			params[p.Name] = argLevels[i]
+		}
+	}
+	key := ltHelperKey(m.Name, names, params)
+	if lv, ok := sg.returnLevels[key]; ok {
+		return lv, true
+	}
+	if sg.returnInProgress[key] {
+		return ltNone, true
+	}
+	sg.returnInProgress[key] = true
+	locals := collectLocktimeLocals(m.Body, params, sg.helperReturn)
+	allNone, allDirect := true, true
+	for _, r := range ltReturnExpressions(m.Body) {
+		lv := ltExprLevel(r, locals, sg.helperReturn)
+		if lv != ltNone {
+			allNone = false
+		}
+		if lv != ltDirect {
+			allDirect = false
+		}
+	}
+	delete(sg.returnInProgress, key)
+	lv := ltDerived
+	if allNone {
+		lv = ltNone
+	} else if allDirect {
+		lv = ltDirect
+	}
+	sg.returnLevels[key] = lv
+	return lv, true
+}
+
+// ltReturnExpressions: every `return` expression of a method body (if arms and
+// loop bodies included).
+func ltReturnExpressions(body []Statement) []Expression {
+	var out []Expression
+	work := [][]Statement{body}
+	for len(work) > 0 {
+		stmts := work[len(work)-1]
+		work = work[:len(work)-1]
+		for _, st := range stmts {
+			switch s := st.(type) {
+			case ReturnStmt:
+				if s.Value != nil {
+					out = append(out, s.Value)
+				}
+			case IfStmt:
+				work = append(work, s.Then)
+				if s.Else != nil {
+					work = append(work, s.Else)
+				}
+			case ForStmt:
+				work = append(work, s.Body)
+			}
+		}
+	}
+	return out
+}
 
 func (sg *sourceGates) compare(e Expression) string {
 	b, ok := e.(BinaryExpr)
@@ -552,14 +633,18 @@ func (sg *sourceGates) helper(m MethodNode, argLevels []int) pathSet {
 	return ex
 }
 
+// ltHelperReturnLevel: the taint level of a private helper's return value,
+// given its argument levels; ok false when name is no private helper.
+type ltHelperReturnLevel func(name string, argLevels []int) (int, bool)
+
 // ltExprLevel: taint level of a source expression, given the taint of the names in scope.
-func ltExprLevel(e Expression, names map[string]int) int {
+func ltExprLevel(e Expression, names map[string]int, hr ltHelperReturnLevel) int {
 	if ltIsRead(e) {
 		return ltDirect
 	}
 	anyOf := func(xs ...Expression) int {
 		for _, x := range xs {
-			if ltExprLevel(x, names) != ltNone {
+			if ltExprLevel(x, names, hr) != ltNone {
 				return ltDerived
 			}
 		}
@@ -579,9 +664,28 @@ func ltExprLevel(e Expression, names map[string]int) int {
 	case TernaryExpr:
 		return anyOf(x.Consequent, x.Alternate)
 	case CallExpr:
-		// A builtin (identifier callee); a helper's return is not followed.
+		// A builtin (identifier callee) derives from its arguments.
 		if _, ok := x.Callee.(Identifier); ok {
 			return anyOf(x.Args...)
+		}
+		// A private helper's return carries the locktime taint into the
+		// caller (inlined, `this.height()` IS its returned expression).
+		name := ""
+		switch c := x.Callee.(type) {
+		case PropertyAccessExpr:
+			name = c.Property
+		case MemberExpr:
+			name = c.Property
+		}
+		if name == "" || hr == nil {
+			return ltNone
+		}
+		levels := make([]int, len(x.Args))
+		for i, a := range x.Args {
+			levels[i] = ltExprLevel(a, names, hr)
+		}
+		if lv, ok := hr(name, levels); ok {
+			return lv
 		}
 	}
 	return ltNone
@@ -597,7 +701,7 @@ type ltSourceBind struct {
 // collectLocktimeLocals: taint of the method's locals and parameters, from
 // every binding in the body (declaration or assignment, anywhere) plus one
 // binding per tainted parameter. Order-blind on purpose.
-func collectLocktimeLocals(body []Statement, params map[string]int) map[string]int {
+func collectLocktimeLocals(body []Statement, params map[string]int, hr ltHelperReturnLevel) map[string]int {
 	var binds []ltBind[ltSourceBind]
 	for n, lv := range params {
 		binds = append(binds, ltBind[ltSourceBind]{n, ltSourceBind{level: lv}})
@@ -636,7 +740,7 @@ func collectLocktimeLocals(body []Statement, params map[string]int) map[string]i
 			if b.expr == nil {
 				return b.level != ltNone
 			}
-			return ltExprLevel(b.expr, asMap(t)) != ltNone
+			return ltExprLevel(b.expr, asMap(t), hr) != ltNone
 		},
 		func(b ltSourceBind, d map[string]bool) bool {
 			if b.expr == nil {
@@ -644,6 +748,11 @@ func collectLocktimeLocals(body []Statement, params map[string]int) map[string]i
 			}
 			if ltIsRead(b.expr) {
 				return true
+			}
+			if c, ok := b.expr.(CallExpr); ok {
+				if _, isID := c.Callee.(Identifier); !isID {
+					return ltExprLevel(b.expr, asMap(d), hr) == ltDirect
+				}
 			}
 			id, ok := b.expr.(Identifier)
 			return ok && d[id.Name]
@@ -654,9 +763,6 @@ func collectLocktimeLocals(body []Statement, params map[string]int) map[string]i
 // --ir path
 // ---------------------------------------------------------------------------
 
-// AssertIRLocktimeDomain is D26 on the --ir path: CompileFromIR* skips
-// validate, so the rule is re-derived from the ANF of every public method
-// (stateless and stateful). Mirrors assertIrLocktimeDomain.
 // IsSelfPinnedLocktimeRead: bs[i] is the ANF image of currentBlockHeight()
 // (anf_lower.go): `call extractLocktime` followed in the same block by
 // `load_const 500000000; bin_op < (bs[i], that const); assert (that compare)`.
@@ -676,6 +782,9 @@ func IsSelfPinnedLocktimeRead(bs []ir.ANFBinding, i int) bool {
 		a.Kind == "assert" && a.ValueRef == bs[i+2].Name
 }
 
+// AssertIRLocktimeDomain is D26 on the --ir path: CompileFromIR* skips
+// validate, so the rule is re-derived from the ANF of every public method
+// (stateless and stateful). Mirrors assertIrLocktimeDomain.
 func AssertIRLocktimeDomain(program *ir.ANFProgram) error {
 	// Prefilter (as ContractReadsLocktime): no extractLocktime call that is not
 	// currentBlockHeight()'s self-pinned one, no gate.
@@ -719,8 +828,7 @@ func AssertIRLocktimeDomain(program *ir.ANFProgram) error {
 	}
 	exitsOf := map[string]pathSet{}
 	inProgress := map[string]bool{}
-	var exits func(m *ir.ANFMethod, argLevels []int) pathSet
-	exits = func(m *ir.ANFMethod, argLevels []int) pathSet {
+	paramLevels := func(m *ir.ANFMethod, argLevels []int) (map[string]int, string) {
 		params := map[string]int{}
 		names := make([]string, len(m.Params))
 		for i, p := range m.Params {
@@ -729,7 +837,41 @@ func AssertIRLocktimeDomain(program *ir.ANFProgram) error {
 				params[p.Name] = argLevels[i]
 			}
 		}
-		key := ltHelperKey(m.Name, names, params)
+		return params, ltHelperKey(m.Name, names, params)
+	}
+	var exits func(m *ir.ANFMethod, argLevels []int) pathSet
+	helperExits := func(name string, levels []int) (pathSet, bool) {
+		t, ok := privates[name]
+		if !ok {
+			return nil, false
+		}
+		return exits(t, levels), true
+	}
+	// A helper's RETURN level: the level of its last binding (the value the
+	// inlined call yields), given its argument levels. A cycle contributes NONE.
+	returnOf := map[string]int{}
+	returnInProgress := map[string]bool{}
+	var helperReturn ltHelperReturnLevel
+	helperReturn = func(name string, argLevels []int) (int, bool) {
+		m, ok := privates[name]
+		if !ok {
+			return ltNone, false
+		}
+		params, key := paramLevels(m, argLevels)
+		if lv, ok := returnOf[key]; ok {
+			return lv, true
+		}
+		if returnInProgress[key] || len(m.Body) == 0 {
+			return ltNone, true
+		}
+		returnInProgress[key] = true
+		lv := newIRGates(m, params, helperExits, helperReturn).level(m.Body[len(m.Body)-1].Name)
+		delete(returnInProgress, key)
+		returnOf[key] = lv
+		return lv, true
+	}
+	exits = func(m *ir.ANFMethod, argLevels []int) pathSet {
+		params, key := paramLevels(m, argLevels)
 		if cached, ok := exitsOf[key]; ok {
 			return cached
 		}
@@ -737,13 +879,7 @@ func AssertIRLocktimeDomain(program *ir.ANFProgram) error {
 			return pathSetOf(0)
 		}
 		inProgress[m.Name] = true
-		g := newIRGates(m, params, func(name string, levels []int) (pathSet, bool) {
-			t, ok := privates[name]
-			if !ok {
-				return nil, false
-			}
-			return exits(t, levels), true
-		})
+		g := newIRGates(m, params, helperExits, helperReturn)
 		ex := g.run(m.Body, pathSetOf(0))
 		delete(inProgress, m.Name)
 		exitsOf[key] = ex
@@ -779,7 +915,7 @@ func ltRef(v *ir.ANFValue) (string, bool) {
 	return "", false
 }
 
-func newIRGates(method *ir.ANFMethod, params map[string]int, helperExits func(string, []int) (pathSet, bool)) *irGates {
+func newIRGates(method *ir.ANFMethod, params map[string]int, helperExits func(string, []int) (pathSet, bool), helperReturn ltHelperReturnLevel) *irGates {
 	g := &irGates{defs: map[string][]*ir.ANFValue{}, selfPinCompares: map[*ir.ANFValue]bool{}, helperExits: helperExits}
 	var binds []ltBind[*ir.ANFValue]
 	// currentBlockHeight()'s reads: not locktime reads (IsSelfPinnedLocktimeRead).
@@ -839,6 +975,20 @@ func newIRGates(method *ir.ANFMethod, params map[string]int, helperExits func(st
 					return true
 				}
 				return false
+			case "method_call":
+				// The inlined call yields the helper's return value: it
+				// carries the helper's locktime taint into the caller.
+				if helperReturn == nil {
+					return false
+				}
+				levels := make([]int, len(v.Args))
+				for i, a := range v.Args {
+					if t[a] {
+						levels[i] = ltDirect
+					}
+				}
+				lv, _ := helperReturn(v.Method, levels)
+				return lv != ltNone
 			}
 			return false
 		},
@@ -851,6 +1001,18 @@ func newIRGates(method *ir.ANFMethod, params map[string]int, helperExits func(st
 				return v.Func == "extractLocktime" && !selfPinned[v]
 			case "load_param":
 				return params[v.Name] == ltDirect
+			case "method_call":
+				if helperReturn == nil {
+					return false
+				}
+				levels := make([]int, len(v.Args))
+				for i, a := range v.Args {
+					if d[a] {
+						levels[i] = ltDirect
+					}
+				}
+				lv, _ := helperReturn(v.Method, levels)
+				return lv == ltDirect
 			}
 			return false
 		})

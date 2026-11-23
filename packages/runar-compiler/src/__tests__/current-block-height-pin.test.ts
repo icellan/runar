@@ -117,6 +117,21 @@ describe('currentBlockHeight() emits its own height-domain pin', () => {
     ).toMatch(D26);
   });
 
+  // A private helper's RETURN value carries the locktime taint into the
+  // caller. Before, `private height() { return extractLocktime(this.txPreimage); }`
+  // let `assert(this.height() >= H)` compile with no pin in all seven tiers,
+  // and @bsv/sdk Spend accepted nLockTime 500000000 / 1700000000 against a
+  // height gate of 600000 while refusing height 500000.
+  it('D26 follows a helper return value (raw read refused, pinned or currentBlockHeight accepted)', () => {
+    const RAW = '  private height(): bigint {\n    return extractLocktime(this.txPreimage);\n  }\n';
+    const ID = '  private id(x: bigint): bigint {\n    return x;\n  }\n';
+    expect(errorsOf(gate('    assert(this.height() >= this.h);', RAW)).join('\n')).toMatch(D26);
+    expect(errorsOf(gate('    const lt = this.height();\n    assert(lt >= this.h);', RAW)).join('\n')).toMatch(D26);
+    expect(errorsOf(gate('    assert(this.id(extractLocktime(this.txPreimage)) >= this.h);', ID)).join('\n')).toMatch(D26);
+    expect(errorsOf(gate('    assert(this.height() < 500000000n);\n    assert(this.height() >= this.h);', RAW))).toEqual([]);
+    expect(errorsOf(gate('    assert(this.id(currentBlockHeight()) >= this.h);', ID))).toEqual([]);
+  });
+
   it('TestContract refuses a timestamp-domain locktime and accepts a height', () => {
     const src = gate('    assert(currentBlockHeight() >= this.h);');
     const ok = TestContract.fromSource(src, { h: 100n, count: 0n }, 'G.runar.ts');

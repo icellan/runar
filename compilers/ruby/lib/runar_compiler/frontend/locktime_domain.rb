@@ -240,26 +240,61 @@ module RunarCompiler
         unpinned?(SourceGates.new(contract).exits(method, {}))
       end
 
-      def self.expr_level(e, names)
+      # Taint level of a source expression, given the taint of the names in
+      # scope. +helper_return+ (name, arg_levels) is a private helper's return
+      # level (nil when +name+ is no private helper).
+      def self.expr_level(e, names, helper_return = nil)
         return NONE if e.nil?
         return DIRECT if read?(e)
 
-        any = ->(*xs) { xs.any? { |x| expr_level(x, names) != NONE } ? DERIVED : NONE }
+        any = ->(*xs) { xs.any? { |x| expr_level(x, names, helper_return) != NONE } ? DERIVED : NONE }
         case e
         when Identifier then names[e.name] || NONE
         when BinaryExpr then PROPAGATE.include?(e.op) ? any.call(e.left, e.right) : NONE
         when UnaryExpr then PROPAGATE_UNARY.include?(e.op) ? any.call(e.operand) : NONE
         when TernaryExpr then any.call(e.consequent, e.alternate)
-        # A builtin (identifier callee); a helper's return is not followed.
-        when CallExpr then e.callee.is_a?(Identifier) ? any.call(*(e.args || [])) : NONE
+        when CallExpr
+          # A builtin (identifier callee) derives from its arguments.
+          next_level = nil
+          if e.callee.is_a?(Identifier)
+            next_level = any.call(*(e.args || []))
+          else
+            # A private helper's return carries the locktime taint into the
+            # caller (inlined, this.height() IS its returned expression).
+            callee = e.callee
+            name = callee.is_a?(PropertyAccessExpr) || callee.is_a?(MemberExpr) ? callee.property : nil
+            if name && helper_return
+              lv = helper_return.call(name, (e.args || []).map { |a| expr_level(a, names, helper_return) })
+              next_level = lv
+            end
+          end
+          next_level || NONE
         else NONE
         end
+      end
+
+      # Every return expression of a method body (if arms and loop bodies included).
+      def self.return_expressions(body)
+        out = []
+        work = [body || []]
+        until work.empty?
+          work.pop.each do |st|
+            case st
+            when ReturnStmt then out << st.value unless st.value.nil?
+            when IfStmt
+              work << (st.then || [])
+              work << st.else_ if st.else_
+            when ForStmt then work << (st.body || [])
+            end
+          end
+        end
+        out
       end
 
       # Taint of the method's locals and parameters, from every binding in the
       # body (declaration or assignment, anywhere) plus one binding per tainted
       # parameter. Order-blind on purpose, as the ANF names every binding the same.
-      def self.collect_locktime_locals(body, params)
+      def self.collect_locktime_locals(body, params, helper_return = nil)
         binds = params.map { |n, lv| [n, lv] }
         visit = lambda do |stmts|
           (stmts || []).each do |st|
@@ -279,10 +314,13 @@ module RunarCompiler
         tainted = lambda do |b, t|
           next b != NONE if b.is_a?(Integer)
 
-          expr_level(b, t.to_h { |n| [n, DIRECT] }) != NONE
+          expr_level(b, t.to_h { |n| [n, DIRECT] }, helper_return) != NONE
         end
         direct = lambda do |b, d|
           next b == DIRECT if b.is_a?(Integer)
+          if b.is_a?(CallExpr) && !b.callee.is_a?(Identifier)
+            next expr_level(b, d.to_h { |n| [n, DIRECT] }, helper_return) == DIRECT
+          end
 
           read?(b) || (b.is_a?(Identifier) && d.include?(b.name))
         end
@@ -297,11 +335,39 @@ module RunarCompiler
           @helper_exits = {}
           @in_progress = Set.new
           @locals = {}
+          # Helper return levels, by helper key (name + argument levels).
+          @return_levels = {}
+          @return_in_progress = Set.new
+          @helper_return = method(:helper_return)
+        end
+
+        # Level of a private helper's return value: DIRECT when every return
+        # expression is a direct read, DERIVED when some is tainted, else NONE
+        # (the rule a local with several bindings follows). A call cycle
+        # contributes NONE. Mirrors SourceGates.helperReturn.
+        def helper_return(name, arg_levels)
+          m = @privates[name]
+          return nil unless m
+
+          params, sig = LocktimeDomain.helper_params(m.params, arg_levels)
+          key = [m.name, sig]
+          return @return_levels[key] if @return_levels.key?(key)
+          return NONE if @return_in_progress.include?(key)
+
+          @return_in_progress.add(key)
+          locals = LocktimeDomain.collect_locktime_locals(m.body || [], params, @helper_return)
+          levels = LocktimeDomain.return_expressions(m.body).map { |r| LocktimeDomain.expr_level(r, locals, @helper_return) }
+          @return_in_progress.delete(key)
+          lv = if levels.all? { |l| l == NONE } then NONE
+               elsif levels.all? { |l| l == DIRECT } then DIRECT
+               else DERIVED
+               end
+          @return_levels[key] = lv
         end
 
         def exits(method, params)
           saved = @locals
-          @locals = LocktimeDomain.collect_locktime_locals(method.body || [], params)
+          @locals = LocktimeDomain.collect_locktime_locals(method.body || [], params, @helper_return)
           live, returned = stmts(method.body, FRESH)
           @locals = saved
           live | returned
@@ -310,7 +376,7 @@ module RunarCompiler
         private
 
         def level(e)
-          LocktimeDomain.expr_level(e, @locals)
+          LocktimeDomain.expr_level(e, @locals, @helper_return)
         end
 
         def compare(e)

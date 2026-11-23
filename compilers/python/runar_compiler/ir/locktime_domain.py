@@ -80,6 +80,30 @@ def locktime_domain_error(program: ANFProgram) -> str | None:
     }
     exits_of: dict[tuple, frozenset[int]] = {}
     in_progress: set[str] = set()
+    # A helper's RETURN level: the level of its last binding (the value the
+    # inlined call yields), given its argument levels. A cycle contributes NONE.
+    return_of: dict[tuple, int] = {}
+    return_in_progress: set[tuple] = set()
+
+    def helper_return(name: str, arg_levels):
+        m = privates.get(name)
+        if m is None:
+            return None
+        params, sig = helper_params(m.params, arg_levels)
+        key = (m.name, sig)
+        if key in return_of:
+            return return_of[key]
+        if key in return_in_progress or not m.body:
+            return NONE
+        return_in_progress.add(key)
+        lv = _IrGates(m, params, helper, helper_return).level_of(m.body[-1].name)
+        return_in_progress.discard(key)
+        return_of[key] = lv
+        return lv
+
+    def helper(name: str, levels):
+        t = privates.get(name)
+        return exits(t, levels) if t is not None else None
 
     def exits(m: ANFMethod, arg_levels) -> frozenset[int]:
         params, sig = helper_params(m.params, arg_levels)
@@ -90,12 +114,7 @@ def locktime_domain_error(program: ANFProgram) -> str | None:
         if m.name in in_progress:
             return FRESH
         in_progress.add(m.name)
-
-        def helper(name: str, levels):
-            t = privates.get(name)
-            return exits(t, levels) if t is not None else None
-
-        ex = _IrGates(m, params, helper).run(m.body, FRESH)
+        ex = _IrGates(m, params, helper, helper_return).run(m.body, FRESH)
         in_progress.discard(m.name)
         exits_of[key] = ex
         return ex
@@ -116,7 +135,7 @@ def _is_const_false_arm(arm) -> bool:
 
 
 class _IrGates:
-    def __init__(self, method: ANFMethod, params: dict[str, int], helper_exits) -> None:
+    def __init__(self, method: ANFMethod, params: dict[str, int], helper_exits, helper_return=None) -> None:
         self.helper_exits = helper_exits
         # Every binding of the method, by name (a name bound more than once
         # keeps all its values).
@@ -163,6 +182,11 @@ class _IrGates:
                 return v.op in PROPAGATE_UNARY and v.operand in t
             if v.kind == "if":
                 return any(n is not None and n in t for n in (last(v.then), last(v.else_)))
+            if v.kind == "method_call" and helper_return is not None:
+                # The inlined call yields the helper's return value: it
+                # carries the helper's locktime taint into the caller.
+                lv = helper_return(v.method, [DIRECT if a in t else NONE for a in v.args or []])
+                return lv is not None and lv != NONE
             return False
 
         def direct(v: ANFValue, d) -> bool:
@@ -173,12 +197,18 @@ class _IrGates:
                 return v.func == "extractLocktime" and id(v) not in self_pinned
             if v.kind == "load_param":
                 return params.get(v.name) == DIRECT
+            if v.kind == "method_call" and helper_return is not None:
+                return helper_return(v.method, [DIRECT if a in d else NONE for a in v.args or []]) == DIRECT
             return False
 
         self.taint = solve_taint(binds, tainted, direct)
 
     def _level(self, name) -> int:
         return self.taint.get(name, NONE)
+
+    def level_of(self, name) -> int:
+        """Taint level of one binding name (a helper's return: its last binding)."""
+        return self._level(name)
 
     def _literal(self, name, seen=None) -> int | None:
         seen = set() if seen is None else seen
