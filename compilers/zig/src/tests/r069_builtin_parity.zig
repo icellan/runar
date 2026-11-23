@@ -286,6 +286,9 @@ const SRC_UNKNOWN_BUILTIN =
 ;
 
 test "R-069 control: an unknown builtin name is still rejected" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const allocator = std.testing.allocator;
     const result = compileProbe(allocator, SRC_UNKNOWN_BUILTIN);
     if (result) |hex| {

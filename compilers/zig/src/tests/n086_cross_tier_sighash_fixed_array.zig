@@ -292,10 +292,6 @@ test "N-086 every available tier compiles the same FixedArray @sighash script" {
     defer allocator.free(reference);
     try expectFlagAt(reference, "zig");
 
-    var compared: std.ArrayListUnmanaged(u8) = .empty;
-    defer compared.deinit(allocator);
-    try compared.appendSlice(allocator, "zig");
-
     // Peers that could not be exercised, each with its reason and build command.
     var unavailable: std.ArrayListUnmanaged(u8) = .empty;
     defer unavailable.deinit(allocator);
@@ -314,8 +310,6 @@ test "N-086 every available tier compiles the same FixedArray @sighash script" {
         };
         defer allocator.free(hex);
         peers_found += 1;
-        try compared.append(allocator, ' ');
-        try compared.appendSlice(allocator, tier.name);
         try expectFlagAt(hex, tier.name);
         try std.testing.expectEqualStrings(reference, hex);
     }
@@ -330,7 +324,6 @@ test "N-086 every available tier compiles the same FixedArray @sighash script" {
             };
             defer allocator.free(hex);
             peers_found += 1;
-            try compared.appendSlice(allocator, " java");
             try expectFlagAt(hex, "java");
             try std.testing.expectEqualStrings(reference, hex);
         } else {
@@ -345,8 +338,6 @@ test "N-086 every available tier compiles the same FixedArray @sighash script" {
             JAVA_BUILD_CMD,
         );
     }
-
-    std.debug.print("  N-086 cross-tier: compared [{s}]\n", .{compared.items});
 
     // An explicit floor outranks the skip: a job that claims to build N peers
     // must go red, not quietly skip, when it did not.

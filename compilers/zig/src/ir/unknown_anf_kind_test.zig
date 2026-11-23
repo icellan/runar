@@ -14,6 +14,9 @@ const json = @import("json.zig");
 const unknown_anf_kind = @import("unknown_anf_kind.zig");
 
 test "unknownAnfKind helper returns UnknownAnfKind" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.UnknownAnfKind,
         @as(unknown_anf_kind.UnknownAnfKindError!void, unknown_anf_kind.unknownAnfKind("ghost_kind", "test.helper")),
@@ -21,6 +24,9 @@ test "unknownAnfKind helper returns UnknownAnfKind" {
 }
 
 test "json loader: unknown ANF kind surfaces as UnknownAnfKind" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     // Synthetic program with one binding whose `value.kind` is not a real
     // ANFValue variant. Prior to F-003 this returned a generic
     // ParseError.InvalidKind, hiding the missed dispatch from the caller.
@@ -50,6 +56,9 @@ test "json loader: unknown ANF kind surfaces as UnknownAnfKind" {
 }
 
 test "json loader: nested unknown kind inside if-branch also surfaces UnknownAnfKind" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     // Confirms the error propagates through `parseIf` (which recursively
     // parses then/else branches via BindingError). Without the propagation
     // wiring the recursive call would coerce to `ParseError.InvalidKind` and

@@ -171,6 +171,9 @@ test "N-092: the rule is not scoped to StatefulSmartContract" {
 }
 
 test "N-092: the whole compile refuses it — no locking script is emitted" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const a = std.testing.allocator;
     try std.testing.expectError(
         error.ValidationFailed,

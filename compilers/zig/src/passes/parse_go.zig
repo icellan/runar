@@ -3323,7 +3323,8 @@ fn f010ExpectOnlyError(source: []const u8, want: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const r = parseGo(arena.allocator(), source, "Guarded.runar.go");
-    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    // The one refusal is the expected outcome; print only an unexpected set.
+    if (r.errors.len != 1) for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
     try std.testing.expectEqual(@as(usize, 1), r.errors.len);
     try std.testing.expect(std.mem.endsWith(u8, r.errors[0], want));
     try std.testing.expect(std.mem.endsWith(u8, r.errors[0][0 .. r.errors[0].len - want.len], ": "));

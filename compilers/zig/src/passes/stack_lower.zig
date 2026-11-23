@@ -8518,6 +8518,9 @@ test "lower for loop keeps outer const alive across iterations (fix 5)" {
 }
 
 test "lower rejects load_param of a missing param instead of emitting OP_0 (fix 5)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     // Hand-written ANF referencing a parameter that is not on the stack.
     // The old fallback silently pushed OP_0 (producing scripts that passed
     // the interpreter but failed on chain); it must now hard-error.
@@ -8545,6 +8548,9 @@ test "lower rejects load_param of a missing param instead of emitting OP_0 (fix 
 }
 
 test "lower rejects load_prop for a property with no constructor slot (H1)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     // #119 tail: a `load_prop` whose name is not a declared constructor-param
     // property used to be coerced onto slot 0, silently splicing an UNRELATED
     // constructor argument's placeholder into the locking script. It must now

@@ -17,12 +17,10 @@ contract Selector is StatefulSmartContract {
     function set(bigint i, bigint v) public {
         if (i == 0) {
             this.a = v;
+        } else if (i == 1) {
+            this.b = v;
         } else {
-            if (i == 1) {
-                this.b = v;
-            } else {
-                require(false);
-            }
+            require(false);
         }
     }
 }

@@ -1116,15 +1116,21 @@ module RunarCompiler
         else_block = []
         if check_ident("else")
           advance
-          expect(TOK_LBRACE)
-          while !check(TOK_RBRACE) && !check(TOK_EOF)
-            if check(TOK_SEMICOLON)
-              advance
-              next
+          if check_ident("if")
+            # `else if (...)` is sugar for `else { if (...) }` -- same AST as
+            # the nested form, located at the inner `if` keyword.
+            else_block << parse_if_statement(loc)
+          else
+            expect(TOK_LBRACE)
+            while !check(TOK_RBRACE) && !check(TOK_EOF)
+              if check(TOK_SEMICOLON)
+                advance
+                next
+              end
+              else_block << parse_statement
             end
-            else_block << parse_statement
+            expect(TOK_RBRACE)
           end
-          expect(TOK_RBRACE)
         end
 
         IfStmt.new(

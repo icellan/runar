@@ -221,6 +221,9 @@ test "N-109: the diagnostic carries the property's source location" {
 }
 
 test "N-109: the pipeline fails at ValidationFailed, not StackLowerFailed" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const a = std.testing.allocator;
     try std.testing.expectError(
         error.ValidationFailed,
@@ -249,6 +252,9 @@ test "N-109 control: every legitimate property type still validates and compiles
 }
 
 test "N-109 control: a SigHashPreimage property draws the preimage-property diagnostic only, never the unknown-type one" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try expectOnlyPreimagePropertyError(READONLY_PREIMAGE_PROPERTY, "PreimageConst.runar.ts");
     try expectOnlyPreimagePropertyError(MUTABLE_PREIMAGE_PROPERTY, "PreimageState.runar.ts");
 }

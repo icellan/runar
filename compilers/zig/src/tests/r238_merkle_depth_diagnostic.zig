@@ -122,6 +122,9 @@ test "R-238: the boundaries of the supported range still compile" {
 // check_multisig.zig already uses for the same reason.
 
 test "R-238: depth 0 is refused as a DEPTH problem, not an unknown builtin" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.MerkleDepthOutOfRange,
         lowerAtDepth(std.testing.allocator, 0),
@@ -129,6 +132,9 @@ test "R-238: depth 0 is refused as a DEPTH problem, not an unknown builtin" {
 }
 
 test "R-238: depth 65 is refused as a DEPTH problem, not an unknown builtin" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.MerkleDepthOutOfRange,
         lowerAtDepth(std.testing.allocator, 65),
@@ -140,6 +146,9 @@ test "R-238: a legal depth lowers through the same IR path" {
 }
 
 test "R-238: an out-of-range depth is reachable from source too" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     try std.testing.expectError(
         error.StackLowerFailed,
         hexAtDepth(std.testing.allocator, 65),

@@ -590,6 +590,9 @@ test "frontend guard: .runar.ts honours @embedAlways directive (compiles, not re
 }
 
 test "frontend guard: non-TS surface rejects @sighash directive (fail closed)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     // A .runar.sol surface parser ignores comments, so the guard must fire.
     const src =
         \\contract Counter {
@@ -602,6 +605,9 @@ test "frontend guard: non-TS surface rejects @sighash directive (fail closed)" {
 }
 
 test "frontend guard: non-TS surface rejects @embedAlways directive (fail closed)" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const src =
         \\contract Counter {
         \\  // @embedAlways

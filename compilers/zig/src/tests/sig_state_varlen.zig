@@ -158,6 +158,9 @@ test "fixed-width state types are NOT push-data framed" {
 }
 
 test "D9: a SigHashPreimage state field is refused at VALIDATE, read or written" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const allocator = std.testing.allocator;
     const write = try writeSrc(allocator, "SigHashPreimage");
     defer allocator.free(write);

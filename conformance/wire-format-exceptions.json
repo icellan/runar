@@ -27,11 +27,11 @@
     },
     {
       "path": "compilers/zig/src/passes/stack_lower.zig",
-      "reason": "Deletion of file-private helpers nothing references (staticcheck U1000 / rustc dead-code / reachability scan); no emitted code path changes. Conformance multi-format fold-OFF 892/892 byte-equal to the goldens.",
+      "reason": "Test-only edit: two refusal tests (load_param of a missing param; load_prop with no constructor slot) lower std.testing.log_level to .err for their own duration so their expected diagnostic stays off stderr. No non-test line changes, so no emitted code path changes. Replaces the spent N-511 entry for this file.",
       "date": "2026-11-23",
       "expires": "2027-05-22",
-      "sha256": "b98fc57f22f9e983b25142a2eecc60b0deaae29634a38010b9e8f01699a0fdd4",
-      "reviewer": "fix-session: N-511 dead-helper deletion"
+      "sha256": "0381c9feb85bafcf0b301f6f6bab2cfba2bc123c6302273a60c48e582bc3ca5d",
+      "reviewer": "fix-session: zig test stderr quieting"
     }
   ]
 }

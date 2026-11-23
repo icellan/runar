@@ -694,7 +694,8 @@ jobs:
           # Counts PEERS, which excludes Zig itself. Verified locally: with 5
           # peers built, 5 exits 0 and 7 exits non-zero naming what is missing.
           RUNAR_CROSS_TIER_MIN: '3'
-        run: cd compilers/zig && zig build test
+        # Fails if a passing test wrote to stderr (see the script).
+        run: scripts/zig-build-test.sh
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
       # N-391: `zig build test` does not depend on this step, so the per-tier

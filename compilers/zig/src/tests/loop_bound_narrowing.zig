@@ -133,6 +133,9 @@ test "a loop that unrolls past MAX_LOOP_COUNT is refused, naming the limit" {
 // flattening it into the anonymous `error.ANFLowerFailed`, so a caller can
 // tell a loop-count refusal from any other pass-4 failure.
 test "the full pipeline propagates the loop-count refusal" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -150,6 +153,9 @@ test "the full pipeline propagates the loop-count refusal" {
 // test pins that it fails rather than silently unrolling something, and
 // records that the diagnostic differs in wording from the other six tiers.
 test "a loop bound outside i64 is refused before lowering" {
+    // Expected refusal: keep its diagnostic off stderr (see build.zig).
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
     const bounds = [_][]const u8{
         "9223372036854775808", // 2^63
         "18446744073709551626", // 2^64 + 10
