@@ -10,6 +10,29 @@ import (
 // OP_SPLIT out of range). The Rust, Java and Zig suites pin the same text.
 const ScriptVerifyFailed = "mandatory-script-verify-flag-failed"
 
+// teranodeScriptFailed is how Teranode words the same refusal: its
+// validator reports "error validating transaction scripts -> TX_INVALID (31):
+// ScriptVerifierGoBDK fail to VerifyScript -> <interpreter error>". Both
+// parts are required, so a TX_INVALID for any other cause does not match.
+var teranodeScriptFailed = []string{"error validating transaction scripts", "fail to VerifyScript"}
+
+// refusalMatches reports whether a node's refusal text is the refusal
+// `reason` names. ScriptVerifyFailed also matches Teranode's wording.
+func refusalMatches(msg, reason string) bool {
+	if strings.Contains(msg, reason) {
+		return true
+	}
+	if reason != ScriptVerifyFailed {
+		return false
+	}
+	for _, part := range teranodeScriptFailed {
+		if !strings.Contains(msg, part) {
+			return false
+		}
+	}
+	return true
+}
+
 // broadcastStateSource is satisfied by *RPCProvider and, through embedding,
 // by *BatchRPCProvider, so a negative passes whichever provider it used.
 type broadcastStateSource interface {
@@ -71,7 +94,7 @@ func CheckNodeRejected(src broadcastStateSource, before int, err error, reason s
 	if last.Kind != BroadcastNodeRejected {
 		return fmt.Errorf("the node never ruled on the spend (%s: %s): %w", last.Kind, last.Detail, err)
 	}
-	if !strings.Contains(last.Detail, reason) {
+	if !refusalMatches(last.Detail, reason) {
 		return fmt.Errorf("the node rejected the spend for the wrong reason: expected %q, got %q",
 			reason, last.Detail)
 	}
