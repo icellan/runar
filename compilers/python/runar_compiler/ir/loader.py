@@ -318,19 +318,9 @@ def validate_ir(program: ANFProgram) -> list[str]:
     # anyone-can-spend. Appended after the structural checks so a malformed
     # binding keeps priority. IR carries no parentClass, so the terminal
     # raw_script form is accepted without the UnsafeSmartContract gate.
-    for method in program.methods:
-        if (
-            method.is_public
-            and method.name != "constructor"
-            and not _ends_with_assert(method.body)
-        ):
-            # N-071: the sentence is shared verbatim by all seven tiers.
-            errors.append(
-                f"public method '{method.name}' must end with an assert() call "
-                f"(or an if/else whose arms both do, or a terminal raw_script "
-                f"with out_arity 1); otherwise the value its last binding "
-                f"leaves on the stack decides the spend"
-            )
+    terminal_error = terminal_assert_error(program)
+    if terminal_error:
+        errors.append(terminal_error)
 
     # N-101: a StatefulSmartContract (declared or inferred) must carry exactly
     # the scaffolding the frontend injects into each public method. Runs only
@@ -604,6 +594,31 @@ def _parent_class_error(program: ANFProgram) -> str | None:
                     f"'raw_script' in method '{method.name}' is only available "
                     f"in contracts extending UnsafeSmartContract; got {pc}"
                 )
+    return None
+
+
+def terminal_assert_error(program: ANFProgram) -> str | None:
+    """N-071: the first public method that does not end with a terminal
+    assert (see ``_ends_with_assert``), as the diagnostic all seven tiers
+    share, or None. Also run on the source path right after ANF lowering
+    (compiler.py ``_lower_to_anf``): the source validator exempts
+    StatefulSmartContract, whose injected continuation assert ends a
+    state-writing method, but a TERMINAL stateful method gets no
+    continuation, so a body ending in a loop, an else-less ``if`` or a
+    binding left the leftover stack value as the spend result."""
+    for method in program.methods:
+        if (
+            method.is_public
+            and method.name != "constructor"
+            and not _ends_with_assert(method.body)
+        ):
+            # N-071: the sentence is shared verbatim by all seven tiers.
+            return (
+                f"public method '{method.name}' must end with an assert() call "
+                f"(or an if/else whose arms both do, or a terminal raw_script "
+                f"with out_arity 1); otherwise the value its last binding "
+                f"leaves on the stack decides the spend"
+            )
     return None
 
 

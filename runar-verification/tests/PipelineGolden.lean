@@ -975,7 +975,11 @@ number. It is pinned from both sides:
 -- 2026-11-16 (GK-GAP-003): `ternary-expression` (byte-exact, baselineMatches;
 -- the first fixture pinning a surface-level conditional expression):
 -- 80 = baselineMatches (77) + (22 - 19).
-def expectedByteExact : Nat := 80
+--
+-- 2026-11-23 (terminal-loop parity): `stateful-terminal-loop` (byte-exact,
+-- baselineMatches; a terminal stateful method whose assert loop is followed
+-- by the terminal assert): 81 = baselineMatches (78) + (22 - 19).
+def expectedByteExact : Nat := 81
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -1006,8 +1010,11 @@ compiles to `OP_RUNAR_UNKNOWN_BUILTIN` and is not byte-exact).
 (in `baselineMatches`; pins the fused OP_CHECKMULTISIGVERIFY).
 2026-11-16 (GK-GAP-003): 99 -> 100 for `ternary-expression` (in
 `baselineMatches`; bigint, ByteString and nested conditional-expression arms).
+2026-11-23 (terminal-loop parity): 100 -> 101 for `stateful-terminal-loop` (in
+`baselineMatches`; a terminal stateful method ending in an assert loop plus
+the terminal assert).
 -/
-def expectedFixtureTotal : Nat := 100
+def expectedFixtureTotal : Nat := 101
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -1084,6 +1091,7 @@ def baselineMatches : List String := [
   "stateful",
   "stateful-bytestring",
   "stateful-counter",
+  "stateful-terminal-loop",
   "stateful-wots-gate",
   "terminal-varlen-read",
   "ternary-expression",
@@ -1411,7 +1419,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 100 := by rfl
+        + lowerDivergencePending.length = 101 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

@@ -56,10 +56,8 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 		if m.Name == "constructor" {
 			continue
 		}
-		if m.IsPublic && !endsWithTerminalAssert(m.Body) {
-			return fmt.Errorf(
-				"IR validation: public method '%s' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
-				m.Name)
+		if err := checkIRTerminalAssert(m); err != nil {
+			return err
 		}
 		if err := checkNoReadonlyWrites(m.Body, m.Name, readonly); err != nil {
 			return err
@@ -179,6 +177,21 @@ func walkIRBindings(bindings []ir.ANFBinding, fn func(v *ir.ANFValue) error) err
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// checkIRTerminalAssert is the F-004 / N-071 terminal-assert rule for one
+// method. CompileSourceToIRCollectingWarnings (--emit-ir) also runs it on each
+// freshly lowered method: the source validator exempts StatefulSmartContract,
+// whose injected continuation assert ends a state-writing method, but a
+// TERMINAL stateful method gets no continuation, so a body ending in a loop,
+// an else-less if or a binding would otherwise lower to IR that --hex refuses.
+func checkIRTerminalAssert(m *ir.ANFMethod) error {
+	if m.IsPublic && m.Name != "constructor" && !endsWithTerminalAssert(m.Body) {
+		return fmt.Errorf(
+			"IR validation: public method '%s' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+			m.Name)
 	}
 	return nil
 }

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./StatefulTerminalLoop.runar.ts",
+    ".runar.sol": "./StatefulTerminalLoop.runar.sol",
+    ".runar.move": "./StatefulTerminalLoop.runar.move",
+    ".runar.go": "./StatefulTerminalLoop.runar.go",
+    ".runar.rs": "./StatefulTerminalLoop.runar.rs",
+    ".runar.py": "./StatefulTerminalLoop.runar.py",
+    ".runar.zig": "./StatefulTerminalLoop.runar.zig",
+    ".runar.rb": "./StatefulTerminalLoop.runar.rb",
+    ".runar.java": "./StatefulTerminalLoop.runar.java"
+  }
+}
