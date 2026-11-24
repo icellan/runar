@@ -13,7 +13,7 @@ mod stateful_scaffold;
 
 use artifact::{assemble_artifact, RunarArtifact};
 use codegen::emit::emit;
-use codegen::optimizer::{optimize_stack_ops, optimize_stack_ops_with_locs};
+use codegen::optimizer::optimize_stack_ops_with_locs;
 use codegen::stack::lower_to_stack;
 use ir::loader::{load_ir, load_ir_from_str};
 
@@ -46,12 +46,12 @@ fn guarded_pass<T>(prefix: &str, f: impl FnOnce() -> T) -> Result<T, refusal::Re
     })
 }
 
-/// Test-only panic injection for `guarded_pass`.
-///
-/// Every guard in this file is a catch-all for a site no input is known to
-/// reach, so the only way to test that the guard is actually THERE is to raise
-/// a panic at the boundary on purpose. `#[cfg(test)]`, so release builds carry
-/// neither the check nor the thread-local.
+// Test-only panic injection for `guarded_pass`.
+//
+// Every guard in this file is a catch-all for a site no input is known to
+// reach, so the only way to test that the guard is actually THERE is to raise
+// a panic at the boundary on purpose. `#[cfg(test)]`, so release builds carry
+// neither the check nor the thread-local.
 #[cfg(test)]
 thread_local! {
     static PANIC_IN_PASS: std::cell::RefCell<Option<String>> =

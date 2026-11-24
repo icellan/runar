@@ -35,12 +35,6 @@ export interface MethodEffects {
   mutatesState: boolean;
   /** Calls `this.addOutput(...)` or `this.addRawOutput(...)`. */
   hasStateOutput: boolean;
-  /**
-   * Calls `this.addOutput(...)` itself (D18: the only output intrinsic that
-   * carries state). Always set by `computeSideEffectSummary`; optional only so
-   * effects literals built elsewhere need not spell it.
-   */
-  callsAddOutput?: boolean;
   /** Calls `this.addDataOutput(...)`. */
   hasDataOutput: boolean;
   /** Calls `checkPreimage(...)` (manually, outside the auto-injected one). */
@@ -63,7 +57,6 @@ function emptyEffects(): MethodEffects {
   return {
     mutatesState: false,
     hasStateOutput: false,
-    callsAddOutput: false,
     hasDataOutput: false,
     usesPreimage: false,
     callsRequireOutputP2PKH: false,
@@ -75,7 +68,6 @@ function emptyEffects(): MethodEffects {
 function unionInto(target: MethodEffects, source: MethodEffects): void {
   target.mutatesState ||= source.mutatesState;
   target.hasStateOutput ||= source.hasStateOutput;
-  target.callsAddOutput ||= source.callsAddOutput;
   target.hasDataOutput ||= source.hasDataOutput;
   target.usesPreimage ||= source.usesPreimage;
   target.callsRequireOutputP2PKH ||= source.callsRequireOutputP2PKH;
@@ -233,7 +225,6 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
         if (callee.kind === 'property_access' || callee.kind === 'member_expr') {
           const name = callee.property;
           if (STATE_OUTPUT_INTRINSICS.has(name)) into.hasStateOutput = true;
-          if (name === 'addOutput') into.callsAddOutput = true;
           if (DATA_OUTPUT_INTRINSICS.has(name)) into.hasDataOutput = true;
           const target = privateMethodsByName.get(name);
           if (target) {

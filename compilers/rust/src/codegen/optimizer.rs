@@ -4,7 +4,6 @@
 //! fewer or cheaper opcodes. Applies rules iteratively until a fixed point
 //! is reached. Mirrors the TypeScript peephole optimizer.
 
-use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 const MAX_ITERATIONS: usize = 100;
@@ -607,6 +606,7 @@ fn is_opcode(op: &StackOp, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_bigint::BigInt;
 
     /// Test matcher: true if `op` is `PushValue::Int(n)` holding the given i128.
     fn is_push_int_eq(op: &StackOp, n: i128) -> bool {

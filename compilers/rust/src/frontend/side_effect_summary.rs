@@ -37,9 +37,6 @@ pub struct MethodEffects {
     pub mutates_state: bool,
     /// Calls `this.addOutput(...)` or `this.addRawOutput(...)`.
     pub has_state_output: bool,
-    /// Calls `this.addOutput(...)` itself (D18: the only output intrinsic
-    /// that carries state).
-    pub calls_add_output: bool,
     /// Calls `this.addDataOutput(...)`.
     pub has_data_output: bool,
     /// Calls `checkPreimage(...)` (manually, outside auto-injected one).
@@ -56,7 +53,6 @@ impl MethodEffects {
     fn union(&mut self, other: &MethodEffects) {
         self.mutates_state |= other.mutates_state;
         self.has_state_output |= other.has_state_output;
-        self.calls_add_output |= other.calls_add_output;
         self.has_data_output |= other.has_data_output;
         self.uses_preimage |= other.uses_preimage;
         self.calls_require_output_p2pkh |= other.calls_require_output_p2pkh;
@@ -327,9 +323,6 @@ fn collect_expr<'a>(
             if let Some(name) = callee_name {
                 if STATE_OUTPUT_INTRINSICS.contains(&name) {
                     into.has_state_output = true;
-                }
-                if name == "addOutput" {
-                    into.calls_add_output = true;
                 }
                 if DATA_OUTPUT_INTRINSICS.contains(&name) {
                     into.has_data_output = true;

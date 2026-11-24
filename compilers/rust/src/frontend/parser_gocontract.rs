@@ -2517,7 +2517,6 @@ impl<'a> GoParser<'a> {
                 let saved = self.pos;
                 self.advance(); // consume '['
                 // Try to detect composite literal: `[ <number>? ] <type>+ {`.
-                let mut composite = false;
                 let known_miss = matches!(self.composite_miss, Some((start, end)) if saved >= start && saved < end);
                 if !known_miss && matches!(self.current().typ, TokenType::Number(_) | TokenType::RBracket) {
                     if matches!(self.current().typ, TokenType::Number(_)) {
@@ -2555,16 +2554,13 @@ impl<'a> GoParser<'a> {
                             }
                         }
                         if matches!(self.current().typ, TokenType::LBrace) {
-                            composite = true;
                             return Some(self.parse_go_brace_literal());
                         }
                         self.composite_miss = Some((saved, dims_end));
                     }
                 }
-                if !composite {
-                    self.pos = saved;
-                    self.advance(); // re-consume '['
-                }
+                self.pos = saved;
+                self.advance(); // re-consume '['
                 let mut elements: Vec<Expression> = Vec::new();
                 while !matches!(self.current().typ, TokenType::RBracket | TokenType::Eof) {
                     if matches!(self.current().typ, TokenType::Comma) {
