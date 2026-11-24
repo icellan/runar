@@ -31,9 +31,6 @@ package frontend
 type MethodEffects struct {
 	MutatesState   bool // mutates a non-readonly property (assignment or ++/--)
 	HasStateOutput bool // calls this.addOutput(...) or this.addRawOutput(...)
-	// CallsAddOutput: calls this.addOutput(...) itself (D18: the only output
-	// intrinsic that carries state).
-	CallsAddOutput bool
 	HasDataOutput  bool // calls this.addDataOutput(...)
 	UsesPreimage   bool // calls checkPreimage(...) (manually, outside auto-injected one)
 	// CallsRequireOutputP2PKH: calls requireOutputP2PKH(...) with any index.
@@ -126,9 +123,6 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 		if source.HasStateOutput {
 			target.HasStateOutput = true
 		}
-		if source.CallsAddOutput {
-			target.CallsAddOutput = true
-		}
 		if source.HasDataOutput {
 			target.HasDataOutput = true
 		}
@@ -208,9 +202,6 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 			if calleeName != "" {
 				if sideEffectStateOutputIntrinsics[calleeName] {
 					into.HasStateOutput = true
-				}
-				if calleeName == "addOutput" {
-					into.CallsAddOutput = true
 				}
 				if sideEffectDataOutputIntrinsics[calleeName] {
 					into.HasDataOutput = true

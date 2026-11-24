@@ -270,7 +270,7 @@ function containsKind(bindings: ANFBinding[], kinds: ReadonlySet<string>): boole
  */
 function irMethodShape(program: ANFProgram, method: ANFMethod): ContinuationShape {
   const effects = {
-    mutatesState: false, hasStateOutput: false, callsAddOutput: false, hasDataOutput: false,
+    mutatesState: false, hasStateOutput: false, hasDataOutput: false,
     usesPreimage: false, callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false,
     callsExtractPrevOutputScript: false,
   };

@@ -66,9 +66,6 @@ class MethodEffects:
 
     mutates_state: bool = False
     has_state_output: bool = False
-    # Calls this.addOutput(...) itself (D18: the only output intrinsic that
-    # carries state).
-    calls_add_output: bool = False
     has_data_output: bool = False
     uses_preimage: bool = False
     # Calls requireOutputP2PKH(...) with any output index.
@@ -81,7 +78,6 @@ class MethodEffects:
     def union(self, other: "MethodEffects") -> None:
         self.mutates_state = self.mutates_state or other.mutates_state
         self.has_state_output = self.has_state_output or other.has_state_output
-        self.calls_add_output = self.calls_add_output or other.calls_add_output
         self.has_data_output = self.has_data_output or other.has_data_output
         self.uses_preimage = self.uses_preimage or other.uses_preimage
         self.calls_require_output_p2pkh = (
@@ -289,8 +285,6 @@ def _collect_expr(
         if callee_name is not None:
             if callee_name in _STATE_OUTPUT_INTRINSICS:
                 into.has_state_output = True
-            if callee_name == "addOutput":
-                into.calls_add_output = True
             if callee_name in _DATA_OUTPUT_INTRINSICS:
                 into.has_data_output = True
             target = private_by_name.get(callee_name)

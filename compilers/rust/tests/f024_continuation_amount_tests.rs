@@ -24,7 +24,6 @@ class Counter extends StatefulSmartContract {
 }
 "#;
 
-const READ_ONLY: &str = "continuationAmount() is read-only and cannot be assigned";
 const UNAVAILABLE: &str = "continuationAmount() is only available in a public StatefulSmartContract method whose state continues through the default single-output continuation";
 
 fn pot(body: &str) -> String {

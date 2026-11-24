@@ -270,7 +270,6 @@ impl<'a> Checker<'a> {
                     // a `return` inside it still ends a path.
                     self.walk(body, &done, &mut aliases.clone(), stack, exits);
                 }
-                _ => {}
             }
         }
         Some(done)

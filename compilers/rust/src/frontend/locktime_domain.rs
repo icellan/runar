@@ -266,7 +266,7 @@ pub fn compares_current_block_height_to_timestamp(method: &MethodNode) -> bool {
     }
     // Locals bound only to currentBlockHeight() (every declaration/assignment).
     fn collect(stmts: &[Statement], binds: &mut HashMap<String, bool>) {
-        let mut bind = |name: &str, v: &Expression, binds: &mut HashMap<String, bool>| {
+        let bind = |name: &str, v: &Expression, binds: &mut HashMap<String, bool>| {
             let ok = is_call_to(v, "currentBlockHeight");
             let e = binds.entry(name.to_string()).or_insert(true);
             *e = *e && ok;
