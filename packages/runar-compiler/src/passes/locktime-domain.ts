@@ -256,15 +256,45 @@ class SourceGates {
     for (const m of contract.methods) if (m.visibility === 'private') this.privates.set(m.name, m);
   }
 
+  /** Helper return levels, by helper name and argument levels. */
+  private readonly returnLevels = new Map<string, number>();
+  private readonly returnInProgress = new Set<string>();
+
+  /**
+   * Level of a private helper's return value: DIRECT when every `return`
+   * expression is a direct read, DERIVED when some is tainted, else NONE (the
+   * rule a local with several bindings follows). A call cycle contributes NONE.
+   */
+  private helperReturn: HelperReturnLevel = (name, argLevels) => {
+    const m = this.privates.get(name);
+    if (!m) return undefined;
+    const params = new Map<string, number>();
+    m.params.forEach((p, i) => {
+      const lv = argLevels[i] ?? NONE;
+      if (lv !== NONE) params.set(p.name, lv);
+    });
+    const key = `${m.name}|${m.params.map((p) => params.get(p.name) ?? NONE).join(',')}`;
+    const cached = this.returnLevels.get(key);
+    if (cached !== undefined) return cached;
+    if (this.returnInProgress.has(key)) return NONE;
+    this.returnInProgress.add(key);
+    const locals = collectLocktimeLocals(m.body, params, this.helperReturn);
+    const levels = returnExpressions(m.body).map((r) => exprLevel(r, locals, this.helperReturn));
+    this.returnInProgress.delete(key);
+    const lv = levels.every((l) => l === NONE) ? NONE : levels.every((l) => l === DIRECT) ? DIRECT : DERIVED;
+    this.returnLevels.set(key, lv);
+    return lv;
+  };
+
   exits(method: MethodNode, params: Map<string, number>): Set<number> {
     const saved = this.locals;
-    this.locals = collectLocktimeLocals(method.body, params);
+    this.locals = collectLocktimeLocals(method.body, params, this.helperReturn);
     const { live, returned } = this.stmts(method.body, new Set([0]));
     this.locals = saved;
     return new Set([...live, ...returned]);
   }
 
-  private level = (e: Expression): number => exprLevel(e, this.locals);
+  private level = (e: Expression): number => exprLevel(e, this.locals, this.helperReturn);
 
   private compare(e: Expression): 'gate' | 'pin' | 'none' {
     if (e.kind !== 'binary_expr') return 'none';
@@ -380,10 +410,17 @@ class SourceGates {
   }
 }
 
+/**
+ * Taint level of a private helper's RETURN value, given the level of each
+ * argument; undefined when `name` is no private helper.
+ */
+type HelperReturnLevel = (name: string, argLevels: number[]) => number | undefined;
+
 /** Taint level of a source expression, given the taint of the names in scope. */
-function exprLevel(e: Expression, names: Map<string, number>): number {
+function exprLevel(e: Expression, names: Map<string, number>, helperReturn?: HelperReturnLevel): number {
   if (isCallTo(e, 'extractLocktime')) return DIRECT;
-  const any = (...xs: Expression[]): number => (xs.some((x) => exprLevel(x, names) !== NONE) ? DERIVED : NONE);
+  const any = (...xs: Expression[]): number =>
+    (xs.some((x) => exprLevel(x, names, helperReturn) !== NONE) ? DERIVED : NONE);
   switch (e.kind) {
     case 'identifier':
       return names.get(e.name) ?? NONE;
@@ -393,12 +430,37 @@ function exprLevel(e: Expression, names: Map<string, number>): number {
       return PROPAGATE_UNARY.has(e.op) ? any(e.operand) : NONE;
     case 'ternary_expr':
       return any(e.consequent, e.alternate);
-    case 'call_expr':
-      // A builtin (identifier callee); a helper's return is not followed.
-      return e.callee.kind === 'identifier' ? any(...e.args) : NONE;
+    case 'call_expr': {
+      // A builtin (identifier callee) derives from its arguments.
+      if (e.callee.kind === 'identifier') return any(...e.args);
+      // A private helper's return carries the locktime taint into the caller
+      // (inlined, `this.height()` IS its returned expression): without this a
+      // helper returning extractLocktime(...) let the caller gate on it with
+      // no pin, and any timestamp-domain nLockTime passed a height gate.
+      const callee = e.callee;
+      const name = callee.kind === 'property_access' || callee.kind === 'member_expr' ? callee.property : undefined;
+      if (name === undefined || helperReturn === undefined) return NONE;
+      return helperReturn(name, e.args.map((a) => exprLevel(a, names, helperReturn))) ?? NONE;
+    }
     default:
       return NONE;
   }
+}
+
+/** Every `return` expression of a method body (if arms and loop bodies included). */
+function returnExpressions(body: Statement[]): Expression[] {
+  const out: Expression[] = [];
+  const work: Statement[][] = [body];
+  while (work.length > 0) {
+    for (const st of work.pop()!) {
+      if (st.kind === 'return_statement' && st.value) out.push(st.value);
+      else if (st.kind === 'if_statement') {
+        work.push(st.then);
+        if (st.else) work.push(st.else);
+      } else if (st.kind === 'for_statement') work.push(st.body);
+    }
+  }
+  return out;
 }
 
 /**
@@ -407,7 +469,11 @@ function exprLevel(e: Expression, names: Map<string, number>): number {
  * (the level its call passes it). Order-blind on purpose: the ANF the --ir
  * path sees names a local's every binding the same.
  */
-function collectLocktimeLocals(body: Statement[], params: Map<string, number>): Map<string, number> {
+function collectLocktimeLocals(
+  body: Statement[],
+  params: Map<string, number>,
+  helperReturn?: HelperReturnLevel,
+): Map<string, number> {
   type B = Expression | number;
   const binds: Array<[string, B]> = [...params].map(([n, lv]): [string, B] => [n, lv]);
   const visit = (stmts: Statement[]): void => {
@@ -427,11 +493,13 @@ function collectLocktimeLocals(body: Statement[], params: Map<string, number>): 
   const asMap = (set: Set<string>): Map<string, number> => new Map([...set].map((n) => [n, DIRECT]));
   return solveTaint<B>(
     binds,
-    (b, t) => (typeof b === 'number' ? b !== NONE : exprLevel(b, asMap(t)) !== NONE),
+    (b, t) => (typeof b === 'number' ? b !== NONE : exprLevel(b, asMap(t), helperReturn) !== NONE),
     (b, d) =>
       typeof b === 'number'
         ? b === DIRECT
-        : isCallTo(b, 'extractLocktime') || (b.kind === 'identifier' && d.has(b.name)),
+        : isCallTo(b, 'extractLocktime') ||
+          (b.kind === 'identifier' && d.has(b.name)) ||
+          (b.kind === 'call_expr' && b.callee.kind !== 'identifier' && exprLevel(b, asMap(d), helperReturn) === DIRECT),
   );
 }
 
@@ -447,12 +515,39 @@ function collectLocktimeLocals(body: Statement[], params: Map<string, number>): 
  * compare, or to the `&&` lowering (a value `if` whose `else` arm is the
  * constant `false`) of a chain with a pin conjunct.
  */
+/**
+ * The ANF image of `currentBlockHeight()` (04-anf-lower.ts): `bs[i]` is a
+ * `call extractLocktime` and the next three bindings of the same block are
+ * `load_const 500000000; bin_op < (bs[i], that const); assert (that compare)`.
+ * The assert runs on every path through the block and before any later use of
+ * the read, so the read is a height by construction: the --ir path does not
+ * count it as a locktime read (nothing derived from it is a gate), as the
+ * source path does not count currentBlockHeight(), so a ternary arm holding
+ * one no longer taints the other arm's path. Its assert still counts as a pin.
+ * Matches only that exact four-binding shape.
+ */
+export function isSelfPinnedLocktimeRead(bs: ANFBinding[], i: number): boolean {
+  const [read, lit, cmp, pin] = [bs[i], bs[i + 1], bs[i + 2], bs[i + 3]];
+  if (!read || !lit || !cmp || !pin) return false;
+  const r = read.value;
+  const l = lit.value;
+  const c = cmp.value;
+  const a = pin.value;
+  return (
+    r.kind === 'call' && r.func === 'extractLocktime' &&
+    l.kind === 'load_const' && typeof l.value === 'bigint' && l.value === LOCKTIME_THRESHOLD &&
+    c.kind === 'bin_op' && c.op === '<' && c.left === read.name && c.right === lit.name &&
+    a.kind === 'assert' && a.value === cmp.name
+  );
+}
+
 export function assertIrLocktimeDomain(program: ANFProgram): void {
-  // Prefilter (as contractReadsLocktime): no extractLocktime call, no gate.
+  // Prefilter (as contractReadsLocktime): no extractLocktime call that is not
+  // currentBlockHeight()'s self-pinned one, no gate.
   const reads = (bs: ANFBinding[]): boolean =>
-    bs.some((b) => {
+    bs.some((b, i) => {
       const v = b.value;
-      if (v.kind === 'call') return v.func === 'extractLocktime';
+      if (v.kind === 'call') return v.func === 'extractLocktime' && !isSelfPinnedLocktimeRead(bs, i);
       if (v.kind === 'if') return reads(v.then) || reads(v.else);
       if (v.kind === 'loop') return reads(v.body);
       return false;
@@ -463,21 +558,43 @@ export function assertIrLocktimeDomain(program: ANFProgram): void {
   );
   const exitsOf = new Map<string, Set<number>>();
   const inProgress = new Set<string>();
-  const exits = (m: ANFMethod, argLevels: number[]): Set<number> => {
+  const paramLevels = (m: ANFMethod, argLevels: number[]): { params: Map<string, number>; key: string } => {
     const params = new Map<string, number>();
     m.params.forEach((p, i) => {
       const lv = argLevels[i] ?? NONE;
       if (lv !== NONE) params.set(p.name, lv);
     });
-    const key = `${m.name}|${m.params.map((p) => params.get(p.name) ?? NONE).join(',')}`;
+    return { params, key: `${m.name}|${m.params.map((p) => params.get(p.name) ?? NONE).join(',')}` };
+  };
+  const helperExits = (name: string, levels: number[]): Set<number> | undefined => {
+    const t = privates.get(name);
+    return t ? exits(t, levels) : undefined;
+  };
+  // A helper's RETURN level: the level of its last binding (the value the
+  // inlined call yields), given its argument levels. A cycle contributes NONE.
+  const returnOf = new Map<string, number>();
+  const returnInProgress = new Set<string>();
+  const helperReturn = (name: string, argLevels: number[]): number | undefined => {
+    const m = privates.get(name);
+    if (!m) return undefined;
+    const { params, key } = paramLevels(m, argLevels);
+    const cached = returnOf.get(key);
+    if (cached !== undefined) return cached;
+    if (returnInProgress.has(key)) return NONE;
+    returnInProgress.add(key);
+    const last = m.body[m.body.length - 1]?.name;
+    const lv = last === undefined ? NONE : new IrGates(m, params, helperExits, helperReturn).levelOf(last);
+    returnInProgress.delete(key);
+    returnOf.set(key, lv);
+    return lv;
+  };
+  const exits = (m: ANFMethod, argLevels: number[]): Set<number> => {
+    const { params, key } = paramLevels(m, argLevels);
     const cached = exitsOf.get(key);
     if (cached) return cached;
     if (inProgress.has(m.name)) return new Set([0]);
     inProgress.add(m.name);
-    const ex = new IrGates(m, params, (name, levels) => {
-      const t = privates.get(name);
-      return t ? exits(t, levels) : undefined;
-    }).run(m.body, new Set([0]));
+    const ex = new IrGates(m, params, helperExits, helperReturn).run(m.body, new Set([0]));
     inProgress.delete(m.name);
     exitsOf.set(key, ex);
     return ex;
@@ -497,9 +614,15 @@ class IrGates {
     /** Taint level of the method's parameters (a helper's, from its call). */
     params: Map<string, number>,
     private readonly helperExits: (name: string, argLevels: number[]) => Set<number> | undefined,
+    /** A private helper's return level (see assertIrLocktimeDomain). */
+    helperReturn: (name: string, argLevels: number[]) => number | undefined = () => undefined,
   ) {
     const index = (bs: ANFBinding[]): void => {
-      for (const b of bs) {
+      for (const [i, b] of bs.entries()) {
+        if (isSelfPinnedLocktimeRead(bs, i)) {
+          selfPinned.add(b.value);
+          this.selfPinCompares.add(bs[i + 2]!.value);
+        }
         const list = this.defs.get(b.name) ?? [];
         list.push(b.value);
         this.defs.set(b.name, list);
@@ -510,6 +633,8 @@ class IrGates {
         } else if (v.kind === 'loop') index(v.body);
       }
     };
+    // currentBlockHeight()'s reads: not locktime reads (isSelfPinnedLocktimeRead).
+    const selfPinned = new Set<ANFValue>();
     index(method.body);
     const binds: Array<[string, ANFValue]> = [];
     for (const [n, vs] of this.defs) for (const v of vs) binds.push([n, v]);
@@ -523,7 +648,7 @@ class IrGates {
         if (r !== undefined) return t.has(r);
         switch (v.kind) {
           case 'call':
-            return v.func === 'extractLocktime' || v.args.some((a) => t.has(a));
+            return (v.func === 'extractLocktime' && !selfPinned.has(v)) || v.args.some((a) => t.has(a));
           case 'load_param':
             return (params.get(v.name) ?? NONE) !== NONE;
           case 'bin_op':
@@ -532,6 +657,10 @@ class IrGates {
             return PROPAGATE_UNARY.has(v.op) && t.has(v.operand);
           case 'if':
             return [last(v.then), last(v.else)].some((n) => n !== undefined && t.has(n));
+          case 'method_call':
+            // The inlined call yields the helper's return value: it carries
+            // the helper's locktime taint into the caller.
+            return (helperReturn(v.method, v.args.map((a) => (t.has(a) ? DIRECT : NONE))) ?? NONE) !== NONE;
           default:
             return false;
         }
@@ -539,16 +668,33 @@ class IrGates {
       (v, d) => {
         const r = ref(v);
         if (r !== undefined) return d.has(r);
-        if (v.kind === 'call') return v.func === 'extractLocktime';
+        if (v.kind === 'call') return v.func === 'extractLocktime' && !selfPinned.has(v);
         if (v.kind === 'load_param') return params.get(v.name) === DIRECT;
+        if (v.kind === 'method_call') {
+          return helperReturn(v.method, v.args.map((a) => (d.has(a) ? DIRECT : NONE))) === DIRECT;
+        }
         return false;
       },
     );
   }
 
+  /**
+   * The `bin_op <` of each currentBlockHeight() image. Its read is no
+   * locktime read (no gate can derive from it), but its assert still PINS the
+   * domain on its path, exactly as the same compare written by hand did
+   * before: the pin bounds the transaction's nLockTime, whichever read it is
+   * spelled on.
+   */
+  private readonly selfPinCompares = new Set<ANFValue>();
+
   /** Taint level of every temp (solveTaint over the method's bindings). */
   private readonly taint: Map<string, number>;
   private level = (name: string): number => this.taint.get(name) ?? NONE;
+
+  /** Taint level of one binding name (a helper's return: its last binding). */
+  levelOf(name: string): number {
+    return this.level(name);
+  }
 
   private literal = (name: string): bigint | null => {
     const vs = this.defs.get(name) ?? [];
@@ -572,7 +718,7 @@ class IrGates {
     const vs = this.defs.get(name) ?? [];
     if (vs.length !== 1) return false;
     const v = vs[0]!;
-    if (this.compare(v) === 'pin') return true;
+    if (this.compare(v) === 'pin' || this.selfPinCompares.has(v)) return true;
     if (v.kind === 'load_const' && typeof v.value === 'string' && v.value.startsWith('@ref:')) {
       return this.assertedPin(v.value.slice(5), seen);
     }

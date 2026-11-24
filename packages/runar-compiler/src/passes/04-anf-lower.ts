@@ -2555,8 +2555,15 @@ function lowerCallExpr(
   //   load_param txPreimage; call extractLocktime; load_const 500000000;
   //   bin_op <; assert. The value is the extractLocktime binding.
   // Only valid in StatefulSmartContract methods (typecheck enforces).
+  // The preimage resolves exactly as `this.txPreimage` does here: load_param
+  // in a public method (where txPreimage is the injected param), load_prop in
+  // a private helper. A load_param in an inlined helper body is the helper's
+  // own last use of the caller's preimage, so stack lowering consumed it and
+  // the caller's later reads failed; load_prop is copied, never consumed.
   if (callee.kind === 'identifier' && callee.name === 'currentBlockHeight') {
-    const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
+    const preimageRef = ctx.isParam('txPreimage')
+      ? ctx.emit({ kind: 'load_param', name: 'txPreimage' })
+      : ctx.emit({ kind: 'load_prop', name: 'txPreimage' });
     const heightRef = ctx.emit({ kind: 'call', func: 'extractLocktime', args: [preimageRef] });
     const thresholdRef = ctx.emit({ kind: 'load_const', value: 500000000n });
     const inDomainRef = ctx.emit({ kind: 'bin_op', op: '<', left: heightRef, right: thresholdRef });

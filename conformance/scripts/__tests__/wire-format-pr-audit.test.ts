@@ -1289,8 +1289,15 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // std.testing.log_level so their expected diagnostic stays off stderr).
     // No non-test line changes. Spent, and must be deleted, on the next edit
     // to stack_lower.zig.
+    // 2026-11-24 — merging main: all four remaining entries (the three N-511
+    // stack-lowering ones and the zig stderr-quieting one) are SPENT and
+    // deleted by the currentBlockHeight helper/ternary fix, which edits every
+    // one of those files (helper-read liveness) and moves its own pins (the
+    // current-block-height-helper-ternary goldens + witness):
+    // compilers/go/codegen/stack.go, compilers/java/src/main/java/runar/compiler/passes/StackLower.java,
+    // compilers/rust/src/codegen/stack.rs, compilers/zig/src/passes/stack_lower.zig.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual(["compilers/go/codegen/stack.go", "compilers/java/src/main/java/runar/compiler/passes/StackLower.java", "compilers/rust/src/codegen/stack.rs", "compilers/zig/src/passes/stack_lower.zig"]);
+    expect(entries.map((e) => e.path).sort()).toEqual([]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {

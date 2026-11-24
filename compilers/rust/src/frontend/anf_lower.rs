@@ -3145,9 +3145,20 @@ fn lower_call_expr(
     // Only valid in StatefulSmartContract methods (typecheck enforces).
     if let Expression::Identifier { name, .. } = callee {
         if name == "currentBlockHeight" {
-            let preimage_ref = ctx.emit(ANFValue::LoadParam {
-                name: "txPreimage".to_string(),
-            });
+            // The preimage resolves as `this.txPreimage` does here: load_param
+            // in a public method, load_prop in a private helper (an inlined
+            // helper's load_param is its own last use of the caller's preimage
+            // and consumed it).
+            let preimage_ref = if ctx.is_param("txPreimage") {
+                ctx.emit(ANFValue::LoadParam {
+                    name: "txPreimage".to_string(),
+                })
+            } else {
+                ctx.emit(ANFValue::LoadProp {
+                    name: "txPreimage".to_string(),
+                    preserve: false,
+                })
+            };
             let height_ref = ctx.emit(ANFValue::Call {
                 func: "extractLocktime".to_string(),
                 args: vec![preimage_ref],

@@ -884,6 +884,8 @@ type loweringContext struct {
 	maxDepth       int
 	properties     []ir.ANFProperty
 	privateMethods map[string]*ir.ANFMethod
+	// helperReadsMemo memoizes helperOuterReads per private method name.
+	helperReadsMemo map[string]map[string]bool
 	// R-010: true when Emit supplies the script-level OP_CODESEPARATOR, so
 	// lowerCheckPreimage must not emit its own.
 	scriptLevelCodeSeparator bool                // private methods available for inlining
@@ -913,6 +915,108 @@ type loweringContext struct {
 	// validated PoC tuple). Set via LowerToStackOptions.SP1FriParams,
 	// which the compiler-level CompileOptions.SP1FriParams threads through.
 	sp1FriParams *SP1FriVerifierParams
+}
+
+// helperOuterReads: the caller-scope stack slots a private method reads --
+// every load_param name that is not one of its own parameters and every
+// load_prop name that is not a contract property (`this.txPreimage` and
+// currentBlockHeight() in a helper lower to `load_prop txPreimage`, the
+// CALLER's preimage slot) -- including what the helpers it calls read, minus
+// its own parameters (bound by the call). Searched through if arms and loop
+// bodies. Private methods are inlined, so these are reads of the caller's
+// slots at the call site; collectRefs of a method_call is its arguments only,
+// so without extendLastUsesForHelpers the caller consumed its preimage before
+// the helper read it. Mirrors helperOuterReads in 05-stack-lower.ts.
+func helperOuterReads(method *ir.ANFMethod, privateMethods map[string]*ir.ANFMethod, propertyNames map[string]bool, memo map[string]map[string]bool, visiting map[string]bool) map[string]bool {
+	if cached, ok := memo[method.Name]; ok {
+		return cached
+	}
+	if visiting[method.Name] {
+		return map[string]bool{}
+	}
+	visiting[method.Name] = true
+	reads := map[string]bool{}
+	var walk func(bs []ir.ANFBinding)
+	walk = func(bs []ir.ANFBinding) {
+		for i := range bs {
+			v := &bs[i].Value
+			switch v.Kind {
+			case "load_param":
+				reads[v.Name] = true
+			case "load_prop":
+				if !propertyNames[v.Name] {
+					reads[v.Name] = true
+				}
+			case "if":
+				walk(v.Then)
+				walk(v.Else)
+			case "loop":
+				walk(v.Body)
+			case "method_call":
+				if callee, ok := privateMethods[v.Method]; ok {
+					for n := range helperOuterReads(callee, privateMethods, propertyNames, memo, visiting) {
+						reads[n] = true
+					}
+				}
+			}
+		}
+	}
+	walk(method.Body)
+	delete(visiting, method.Name)
+	for _, p := range method.Params {
+		delete(reads, p.Name)
+	}
+	memo[method.Name] = reads
+	return reads
+}
+
+// helperReads: the caller-scope slots `method` reads (see helperOuterReads).
+func (ctx *loweringContext) helperReads(method *ir.ANFMethod) map[string]bool {
+	if ctx.helperReadsMemo == nil {
+		ctx.helperReadsMemo = map[string]map[string]bool{}
+	}
+	props := make(map[string]bool, len(ctx.properties))
+	for _, p := range ctx.properties {
+		props[p.Name] = true
+	}
+	return helperOuterReads(method, ctx.privateMethods, props, ctx.helperReadsMemo, map[string]bool{})
+}
+
+// extendLastUsesForHelpers: a method_call to a private method at binding i
+// (anywhere inside it, if arms and loop bodies included) is a use, at i, of
+// every caller-scope slot the helper reads, so the caller keeps that slot on
+// the stack through the call. Only ever moves a last use LATER, and only for a
+// slot a helper reads. Mirrors extendLastUsesForHelpers in 05-stack-lower.ts.
+func (ctx *loweringContext) extendLastUsesForHelpers(bindings []ir.ANFBinding, lastUses map[string]int) {
+	var visit func(v *ir.ANFValue, i int)
+	visit = func(v *ir.ANFValue, i int) {
+		switch v.Kind {
+		case "method_call":
+			callee, ok := ctx.privateMethods[v.Method]
+			if !ok {
+				return
+			}
+			for n := range ctx.helperReads(callee) {
+				if last, ok := lastUses[n]; !ok || last < i {
+					lastUses[n] = i
+				}
+			}
+		case "if":
+			for j := range v.Then {
+				visit(&v.Then[j].Value, i)
+			}
+			for j := range v.Else {
+				visit(&v.Else[j].Value, i)
+			}
+		case "loop":
+			for j := range v.Body {
+				visit(&v.Body[j].Value, i)
+			}
+		}
+	}
+	for i := range bindings {
+		visit(&bindings[i].Value, i)
+	}
 }
 
 func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringContext {
@@ -1805,6 +1909,7 @@ func (ctx *loweringContext) lowerBindingsWithArrays(bindings []ir.ANFBinding, te
 		ctx.localBindings[b.Name] = true
 	}
 	lastUses := computeLastUsesWithArrays(bindings, inheritedArrays)
+	ctx.extendLastUsesForHelpers(bindings, lastUses)
 
 	// Protect parent-scope refs that are still needed after this scope
 	if ctx.outerProtectedRefs != nil {
@@ -2608,8 +2713,27 @@ func (ctx *loweringContext) inlineMethodCall(bindingName string, method *ir.ANFM
 		}
 	}
 
+	// A caller-scope slot the helper reads and the caller reads again after
+	// this call must survive the helper's body: protect it exactly as lowerIf
+	// protects a parent-scope ref still needed after the `if`. One whose last
+	// caller use IS this call may be consumed by the helper's own last read.
+	prevProtected := ctx.outerProtectedRefs
+	protectedRefs := make(map[string]bool, len(prevProtected))
+	for ref := range prevProtected {
+		protectedRefs[ref] = true
+	}
+	for n := range ctx.helperReads(method) {
+		if last, ok := lastUses[n]; ok && last > bindingIndex && ctx.sm.has(n) {
+			protectedRefs[n] = true
+		}
+	}
+	if len(protectedRefs) > 0 {
+		ctx.outerProtectedRefs = protectedRefs
+	}
+
 	// Lower the method body
 	ctx.lowerBindings(method.Body, false)
+	ctx.outerProtectedRefs = prevProtected
 
 	// Restore shadowed names so the caller's scope sees its original entries.
 	for _, s := range shadowed {
@@ -2800,6 +2924,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	// are source-level substitution (spec/semantics.md §6.3), which stack
 	// lowering performs; an arm is not a different scope for that.
 	thenCtx.privateMethods = ctx.privateMethods
+	thenCtx.helperReadsMemo = ctx.helperReadsMemo // shared: one contract
 	// N-007 / issue #130: the arm's cloned stack carries the parent's reserved
 	// `__param_<name>` slot for a param that shadows a mutable property, so the
 	// arm must resolve load_param through the same map. newLoweringContext
@@ -2843,6 +2968,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.scriptLevelCodeSeparator = ctx.scriptLevelCodeSeparator
 	elseCtx.privateMethods = ctx.privateMethods // N-051, see thenCtx above
+	elseCtx.helperReadsMemo = ctx.helperReadsMemo
 	// N-007, see thenCtx above.
 	for param, slot := range ctx.renamedParams {
 		elseCtx.renamedParams[param] = slot
@@ -3488,6 +3614,15 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 			}
 		}
 	}
+	// An inlined helper's caller-scope reads are outer refs of the body too
+	// (see extendLastUsesForHelpers): the next iteration reads them again.
+	helperUses := map[string]int{}
+	ctx.extendLastUsesForHelpers(body, helperUses)
+	for ref := range helperUses {
+		if ref != iterVar && !deepBodyBindingNames[ref] {
+			outerRefs[ref] = true
+		}
+	}
 
 	// A local the body REBINDS and then READS AGAIN in the same iteration is
 	// carried across iterations through the rebound slot, so it must survive
@@ -3535,6 +3670,7 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 		ctx.sm.push(iterVar)
 
 		lastUses := computeLastUsesWithArrays(body, outerArrays)
+		ctx.extendLastUsesForHelpers(body, lastUses)
 
 		// Prevent outer-scope refs from being consumed by setting their
 		// last-use beyond any body binding index:
@@ -6721,6 +6857,7 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 
 	ctx := newLoweringContext(paramNames, properties)
 	ctx.privateMethods = privateMethods
+	ctx.helperReadsMemo = map[string]map[string]bool{}
 	// R-010: when Emit places the script-level separator, lowerCheckPreimage
 	// must NOT emit a per-method one — a later separator would win and
 	// re-narrow scriptCode, undoing the `_codePart` authentication.

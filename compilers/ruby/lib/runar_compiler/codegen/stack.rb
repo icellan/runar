@@ -268,6 +268,71 @@ module RunarCompiler::Codegen
 
   # @param bindings [Array<IR::ANFBinding>]
   # @return [Hash{String => Integer}]
+  # The caller-scope stack slots a private method reads: every load_param
+  # name that is not one of its own parameters and every load_prop name that
+  # is not a contract property (this.txPreimage and currentBlockHeight() in a
+  # helper lower to load_prop txPreimage, the CALLER's preimage slot),
+  # including what the helpers it calls read, minus its own parameters (bound
+  # by the call). Searched through if arms and loop bodies. Private methods are
+  # inlined, so these are reads of the caller's slots at the call site;
+  # collect_refs of a method_call is its arguments only, so without
+  # _extend_last_uses_for_helpers the caller consumed its preimage before the
+  # helper read it. N-264: an explicit work list over both the nesting and the
+  # call graph; a call cycle (--ir only) contributes nothing. Mirrors
+  # helperOuterReads in 05-stack-lower.ts.
+  def self.helper_outer_reads(method, private_methods, property_names, memo)
+    direct = lambda do |m|
+      reads = Set.new
+      callees = []
+      work = [m.body || []]
+      until work.empty?
+        work.pop.each do |b|
+          v = b.value
+          next if v.nil?
+
+          case v.kind
+          when "load_param" then reads.add(v.name)
+          when "load_prop" then reads.add(v.name) unless property_names.include?(v.name)
+          when "if"
+            work << (v.then || [])
+            work << (v.else_ || [])
+          when "loop" then work << (v.body || [])
+          when "method_call"
+            callee = private_methods[v.method]
+            callees << callee if callee
+          end
+        end
+      end
+      [reads, callees]
+    end
+
+    on_path = Set.new
+    stack = [[method, nil]]
+    until stack.empty?
+      top = stack.last
+      m = top[0]
+      if memo.key?(m.name)
+        stack.pop
+        next
+      end
+      if top[1].nil?
+        top[1] = direct.call(m)
+        on_path.add(m.name)
+        top[1][1].each do |c|
+          stack << [c, nil] unless memo.key?(c.name) || on_path.include?(c.name)
+        end
+        next
+      end
+      stack.pop
+      reads = Set.new(top[1][0])
+      top[1][1].each { |c| reads.merge(memo[c.name] || []) }
+      (m.params || []).each { |p| reads.delete(p.name) }
+      memo[m.name] = reads
+      on_path.delete(m.name)
+    end
+    memo[method.name] || Set.new
+  end
+
   def self.compute_last_uses(bindings, inherited_arrays = nil)
     last_use = {}
     # Pre-scan: map each array_literal binding to its element refs. Used to
@@ -1005,6 +1070,8 @@ module RunarCompiler::Codegen
   end
 
   class LoweringContext
+    # helper_reads_memo: shared by every if-arm context of one contract.
+    attr_accessor :helper_reads_memo
     attr_accessor :sm, :ops, :max_depth, :properties, :private_methods,
                   :local_bindings, :outer_protected_refs, :inside_branch,
                   :current_source_loc,
@@ -1118,6 +1185,8 @@ module RunarCompiler::Codegen
       @array_elements = {}
       @const_values = {}
       @outer_protected_refs = nil
+      # Memo for helper_outer_reads, per private method name.
+      @helper_reads_memo = {}
       @inside_branch = false
       @current_source_loc = nil
 
@@ -1954,10 +2023,50 @@ module RunarCompiler::Codegen
 
     # lower_bindings as a resumable LowerTask (N-264). The setup below runs
     # when the task is built, which is immediately before its first step.
+    # The caller-scope slots +method+ reads (see helper_outer_reads).
+    def _helper_reads(method)
+      @helper_reads_memo ||= {}
+      RunarCompiler::Codegen.helper_outer_reads(
+        method, @private_methods, Set.new((@properties || []).map(&:name)), @helper_reads_memo
+      )
+    end
+
+    # A method_call to a private method at binding i (anywhere inside it, if
+    # arms and loop bodies included) is a use, at i, of every caller-scope slot
+    # the helper reads, so the caller keeps that slot on the stack through the
+    # call. Only ever moves a last use LATER, and only for a slot a helper
+    # reads. Mirrors extendLastUsesForHelpers.
+    def _extend_last_uses_for_helpers(bindings, last_uses)
+      # N-264: an explicit work list over the nesting, not recursion.
+      bindings.each_with_index do |b, i|
+        work = [b.value]
+        until work.empty?
+          v = work.pop
+          next if v.nil?
+
+          case v.kind
+          when "method_call"
+            callee = @private_methods[v.method]
+            next unless callee
+
+            _helper_reads(callee).each do |n|
+              last_uses[n] = i if (last_uses[n] || -1) < i
+            end
+          when "if"
+            (v.then || []).each { |x| work << x.value }
+            (v.else_ || []).each { |x| work << x.value }
+          when "loop"
+            (v.body || []).each { |x| work << x.value }
+          end
+        end
+      end
+    end
+
     def _lower_bindings_task(bindings, terminal_assert, inherited_arrays = nil)
       @local_bindings = {}
       bindings.each { |b| @local_bindings[b.name] = true }
       last_uses = RunarCompiler::Codegen.compute_last_uses(bindings, inherited_arrays)
+      _extend_last_uses_for_helpers(bindings, last_uses)
 
       # Protect parent-scope refs that are still needed after this scope
       if @outer_protected_refs
@@ -2745,9 +2854,24 @@ module RunarCompiler::Codegen
         @sm.push(param_name)
       end
 
+      # A caller-scope slot the helper reads and the caller reads again after
+      # this call must survive the helper's body: protect it exactly as
+      # lower_if protects a parent-scope ref still needed after the +if+. One
+      # whose last caller use IS this call may be consumed by the helper's own
+      # last read.
+      prev_protected = @outer_protected_refs
+      protected_refs = Set.new(prev_protected || [])
+      _helper_reads(method).each do |n|
+        protected_refs.add(n) if (last_uses[n] || -1) > binding_index && @sm.has?(n)
+      end
+
       RunarCompiler::Codegen.seq_task(
-        -> { _lower_bindings_task(method.body, false) },
         lambda do
+          @outer_protected_refs = protected_refs unless protected_refs.empty?
+          _lower_bindings_task(method.body, false)
+        end,
+        lambda do
+          @outer_protected_refs = prev_protected
           _inline_method_call_tail(binding_name, method, shadowed)
           nil
         end
@@ -2922,6 +3046,7 @@ module RunarCompiler::Codegen
       then_ctx.outer_protected_refs = protected_refs
       then_ctx.inside_branch = true
       then_ctx.private_methods = @private_methods
+      then_ctx.helper_reads_memo = @helper_reads_memo
       # R-010: branch arms lower in a FRESH context, so the contract-level
       # OP_CODESEPARATOR decision has to be carried in explicitly. Without this a
       # checkPreimage inside an if-branch emits a stray per-method separator,
@@ -2972,6 +3097,7 @@ module RunarCompiler::Codegen
         else_ctx.outer_protected_refs = protected_refs
         else_ctx.inside_branch = true
         else_ctx.private_methods = @private_methods
+        else_ctx.helper_reads_memo = @helper_reads_memo
         else_ctx.script_level_code_separator = @script_level_code_separator
         else_ctx.renamed_params = @renamed_params.dup # N-007, see then_ctx above
         else_ctx.array_elements = @array_elements.transform_values(&:dup) # F-081, see then_ctx above
@@ -3562,6 +3688,13 @@ module RunarCompiler::Codegen
           outer_refs.add(ref) if ref != iter_var && !deep_body_binding_names.include?(ref)
         end
       end
+      # An inlined helper's caller-scope reads are outer refs of the body too
+      # (see _extend_last_uses_for_helpers): the next iteration reads them.
+      helper_uses = {}
+      _extend_last_uses_for_helpers(body, helper_uses)
+      helper_uses.each_key do |ref|
+        outer_refs.add(ref) if ref != iter_var && !deep_body_binding_names.include?(ref)
+      end
 
       # A local the body REBINDS and then READS AGAIN in the same iteration is
       # carried across iterations through the rebound slot, so it must survive
@@ -3610,6 +3743,7 @@ module RunarCompiler::Codegen
             @sm.push(iter_var)
 
             lu = RunarCompiler::Codegen.compute_last_uses(body, outer_arrays)
+            _extend_last_uses_for_helpers(body, lu)
 
             # Prevent outer-scope refs from being consumed by setting their
             # last-use beyond any body binding index:

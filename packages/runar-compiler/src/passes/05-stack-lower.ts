@@ -636,6 +636,84 @@ function collectRefs(value: ANFValue): string[] {
   return refs;
 }
 
+/**
+ * The caller-scope stack slots a private method reads: every `load_param`
+ * name that is not one of its own parameters, and every `load_prop` name
+ * that is not a contract property (`this.txPreimage` and
+ * `currentBlockHeight()` in a helper lower to `load_prop txPreimage`, which
+ * reads the CALLER's preimage slot), including what the helpers it calls
+ * read, minus its own parameters (those are bound by the call). Searched
+ * through if arms and loop bodies.
+ *
+ * Private methods are inlined, so these are reads of the caller's slots at
+ * the call site. `computeLastUses` cannot see them (`collectRefs` of a
+ * `method_call` is its arguments only), and without
+ * `extendLastUsesForHelpers` the caller consumed its preimage at its own last
+ * read, BEFORE the helper read it: "method parameter 'txPreimage' is not on
+ * the stack", or "property 'txPreimage' ... is neither on the stack".
+ *
+ * N-264: an explicit work list, not recursion, over both the nesting of a
+ * body and the call graph (a D-deep helper chain whose calls sit under K
+ * nested ifs). A call cycle (only reachable via `--ir`) contributes nothing.
+ */
+function helperOuterReads(
+  method: ANFMethod,
+  privateMethods: ReadonlyMap<string, ANFMethod>,
+  propertyNames: ReadonlySet<string>,
+  memo: Map<string, ReadonlySet<string>>,
+): ReadonlySet<string> {
+  const direct = (m: ANFMethod): { reads: Set<string>; callees: ANFMethod[] } => {
+    const reads = new Set<string>();
+    const callees: ANFMethod[] = [];
+    const work: ANFBinding[][] = [m.body];
+    while (work.length > 0) {
+      for (const b of work.pop()!) {
+        const v = b.value;
+        if (v.kind === 'load_param') reads.add(v.name);
+        else if (v.kind === 'load_prop' && !propertyNames.has(v.name)) reads.add(v.name);
+        else if (v.kind === 'if') work.push(v.then, v.else);
+        else if (v.kind === 'loop') work.push(v.body);
+        else if (v.kind === 'method_call') {
+          const callee = privateMethods.get(v.method);
+          if (callee) callees.push(callee);
+        }
+      }
+    }
+    return { reads, callees };
+  };
+  const onPath = new Set<string>();
+  const stack: Array<{ m: ANFMethod; info?: ReturnType<typeof direct> }> = [{ m: method }];
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1]!;
+    if (memo.has(top.m.name)) {
+      stack.pop();
+      continue;
+    }
+    if (!top.info) {
+      top.info = direct(top.m);
+      onPath.add(top.m.name);
+      for (const c of top.info.callees) {
+        if (!memo.has(c.name) && !onPath.has(c.name)) stack.push({ m: c });
+      }
+      continue;
+    }
+    stack.pop();
+    const reads = new Set(top.info.reads);
+    for (const c of top.info.callees) for (const n of memo.get(c.name) ?? []) reads.add(n);
+    for (const p of top.m.params) reads.delete(p.name);
+    memo.set(top.m.name, reads);
+    onPath.delete(top.m.name);
+  }
+  return memo.get(method.name) ?? new Set();
+}
+
+/**
+ * {@link helperOuterReads} memo, shared by every lowering context of one
+ * contract: branch-arm contexts share the contract's `privateMethods` map, so
+ * it keys the memo (a per-context memo recomputed the chain in every arm).
+ */
+const helperReadsMemos = new WeakMap<ReadonlyMap<string, ANFMethod>, Map<string, ReadonlySet<string>>>();
+
 // ---------------------------------------------------------------------------
 // Core lowering context
 // ---------------------------------------------------------------------------
@@ -1681,6 +1759,7 @@ class LoweringContext {
   ): LowerTask {
     this.localBindings = new Set(bindings.map(b => b.name));
     const lastUses = computeLastUses(bindings, inheritedArrays);
+    this.extendLastUsesForHelpers(bindings, lastUses);
 
     // Protect parent-scope refs that are still needed after this scope
     // (e.g., txPreimage used both inside an if-branch and after the if).
@@ -1836,6 +1915,45 @@ class LoweringContext {
   private isLastUse(ref: string, currentIndex: number, lastUses: Map<string, number>): boolean {
     const last = lastUses.get(ref);
     return last === undefined || last <= currentIndex;
+  }
+
+  /** The caller-scope slots `method` reads (see {@link helperOuterReads}). */
+  private helperReads(method: ANFMethod): ReadonlySet<string> {
+    let memo = helperReadsMemos.get(this.privateMethods);
+    if (!memo) {
+      memo = new Map();
+      helperReadsMemos.set(this.privateMethods, memo);
+    }
+    return helperOuterReads(method, this.privateMethods, new Set(this._properties.map((p) => p.name)), memo);
+  }
+
+  /**
+   * A `method_call` to a private method at binding `i` (anywhere inside it,
+   * if arms and loop bodies included) is a use, at `i`, of every caller-scope
+   * slot the helper reads, so the caller keeps that slot on the stack through
+   * the call. Only ever moves a last use LATER, and only for a slot a helper
+   * reads, which used to fail to compile when it was consumed first.
+   */
+  private extendLastUsesForHelpers(bindings: ANFBinding[], lastUses: Map<string, number>): void {
+    // N-264: an explicit work list over the nesting, not recursion.
+    for (let i = 0; i < bindings.length; i++) {
+      const work: ANFValue[] = [bindings[i]!.value];
+      while (work.length > 0) {
+        const v = work.pop()!;
+        if (v.kind === 'method_call') {
+          const callee = this.privateMethods.get(v.method);
+          if (!callee) continue;
+          for (const n of this.helperReads(callee)) {
+            if ((lastUses.get(n) ?? -1) < i) lastUses.set(n, i);
+          }
+        } else if (v.kind === 'if') {
+          for (const b of v.then) work.push(b.value);
+          for (const b of v.else) work.push(b.value);
+        } else if (v.kind === 'loop') {
+          for (const b of v.body) work.push(b.value);
+        }
+      }
+    }
   }
 
   /**
@@ -2685,7 +2803,18 @@ class LoweringContext {
       }
     }
 
+    // A caller-scope slot the helper reads and the caller reads again after
+    // this call must survive the helper's body: protect it exactly as lowerIf
+    // protects a parent-scope ref still needed after the `if`. One whose last
+    // caller use IS this call may be consumed by the helper's own last read.
+    const prevProtected = this.outerProtectedRefs;
+    const protectedRefs = new Set(prevProtected ?? []);
+    for (const n of this.helperReads(method)) {
+      if ((lastUses.get(n) ?? -1) > bindingIndex && this.stackMap.has(n)) protectedRefs.add(n);
+    }
+    this.outerProtectedRefs = protectedRefs.size > 0 ? protectedRefs : prevProtected;
     yield this.lowerBindingsTask(method.body);
+    this.outerProtectedRefs = prevProtected;
 
     // Restore shadowed names so the caller's scope sees its original entries.
     for (const { paramName, shadowedName } of shadowed) {
@@ -3635,6 +3764,13 @@ class LoweringContext {
         }
       }
     }
+    // An inlined helper's caller-scope reads are outer refs of the body too
+    // (see extendLastUsesForHelpers): the next iteration reads them again.
+    const helperUses = new Map<string, number>();
+    this.extendLastUsesForHelpers(body, helperUses);
+    for (const ref of helperUses.keys()) {
+      if (ref !== _iterVar && !deepBodyBindingNames.has(ref)) outerRefs.add(ref);
+    }
 
     // A local the body REBINDS and then READS again in the same iteration is
     // carried across iterations through the rebound slot, so it must survive
@@ -3670,6 +3806,7 @@ class LoweringContext {
       this.stackMap.push(_iterVar);
 
       const lastUses = computeLastUses(body, outerArrays);
+      this.extendLastUsesForHelpers(body, lastUses);
 
       // Prevent outer-scope refs from being consumed by setting their
       // last-use beyond any body binding index:

@@ -276,14 +276,17 @@ def has_unpinned_locktime_gate(contract, method) -> bool:
     return unpinned(_SourceGates(contract).exits(method, {}))
 
 
-def _expr_level(e, names: dict[str, int]) -> int:
+def _expr_level(e, names: dict[str, int], helper_return=None) -> int:
+    """Taint level of a source expression, given the taint of the names in
+    scope. ``helper_return(name, arg_levels)`` is a private helper's return
+    level (None when ``name`` is no private helper)."""
     if e is None:
         return NONE
     if _is_read(e):
         return DIRECT
 
     def any_(*xs) -> int:
-        return DERIVED if any(_expr_level(x, names) != NONE for x in xs) else NONE
+        return DERIVED if any(_expr_level(x, names, helper_return) != NONE for x in xs) else NONE
 
     if isinstance(e, Identifier):
         return names.get(e.name, NONE)
@@ -294,12 +297,39 @@ def _expr_level(e, names: dict[str, int]) -> int:
     if isinstance(e, TernaryExpr):
         return any_(e.consequent, e.alternate)
     if isinstance(e, CallExpr):
-        # A builtin (identifier callee); a helper's return is not followed.
-        return any_(*e.args) if isinstance(e.callee, Identifier) else NONE
+        # A builtin (identifier callee) derives from its arguments.
+        if isinstance(e.callee, Identifier):
+            return any_(*e.args)
+        # A private helper's return carries the locktime taint into the caller
+        # (inlined, ``this.height()`` IS its returned expression).
+        callee = e.callee
+        name = callee.property if isinstance(callee, (PropertyAccessExpr, MemberExpr)) else None
+        if name is None or helper_return is None:
+            return NONE
+        lv = helper_return(name, [_expr_level(a, names, helper_return) for a in e.args])
+        return NONE if lv is None else lv
     return NONE
 
 
-def _collect_locktime_locals(body, params: dict[str, int]) -> dict[str, int]:
+def _return_expressions(body) -> list:
+    """Every ``return`` expression of a method body (if arms and loop bodies
+    included)."""
+    out = []
+    work = [body or []]
+    while work:
+        for st in work.pop():
+            if isinstance(st, ReturnStmt) and st.value is not None:
+                out.append(st.value)
+            elif isinstance(st, IfStmt):
+                work.append(st.then or [])
+                if st.else_:
+                    work.append(st.else_)
+            elif isinstance(st, ForStmt):
+                work.append(st.body or [])
+    return out
+
+
+def _collect_locktime_locals(body, params: dict[str, int], helper_return=None) -> dict[str, int]:
     """Taint of the method's locals and parameters, from every binding in the
     body (declaration or assignment, anywhere) plus one binding per tainted
     parameter. Order-blind on purpose, as the ANF names every binding the same."""
@@ -325,11 +355,13 @@ def _collect_locktime_locals(body, params: dict[str, int]) -> dict[str, int]:
     def tainted(b, t) -> bool:
         if isinstance(b, int):
             return b != NONE
-        return _expr_level(b, {n: DIRECT for n in t}) != NONE
+        return _expr_level(b, {n: DIRECT for n in t}, helper_return) != NONE
 
     def direct(b, d) -> bool:
         if isinstance(b, int):
             return b == DIRECT
+        if isinstance(b, CallExpr) and not isinstance(b.callee, Identifier):
+            return _expr_level(b, {n: DIRECT for n in d}, helper_return) == DIRECT
         return _is_read(b) or (isinstance(b, Identifier) and b.name in d)
 
     return solve_taint(binds, tainted, direct)
@@ -342,16 +374,46 @@ class _SourceGates:
         self.helper_exits: dict[tuple, frozenset[int]] = {}
         self.in_progress: set[str] = set()
         self.locals: dict[str, int] = {}
+        # Helper return levels, by helper key (name + argument levels).
+        self.return_levels: dict[tuple, int] = {}
+        self.return_in_progress: set[tuple] = set()
+
+    def _helper_return(self, name, arg_levels):
+        """Level of a private helper's return value: DIRECT when every
+        ``return`` expression is a direct read, DERIVED when some is tainted,
+        else NONE (the rule a local with several bindings follows). A call
+        cycle contributes NONE. Mirrors SourceGates.helperReturn."""
+        m = self.privates.get(name)
+        if m is None:
+            return None
+        params, sig = helper_params(m.params, arg_levels)
+        key = (m.name, sig)
+        if key in self.return_levels:
+            return self.return_levels[key]
+        if key in self.return_in_progress:
+            return NONE
+        self.return_in_progress.add(key)
+        locals_ = _collect_locktime_locals(m.body, params, self._helper_return)
+        levels = [_expr_level(r, locals_, self._helper_return) for r in _return_expressions(m.body)]
+        self.return_in_progress.discard(key)
+        if all(lv == NONE for lv in levels):
+            lv = NONE
+        elif all(lv == DIRECT for lv in levels):
+            lv = DIRECT
+        else:
+            lv = DERIVED
+        self.return_levels[key] = lv
+        return lv
 
     def exits(self, method, params: dict[str, int]) -> frozenset[int]:
         saved = self.locals
-        self.locals = _collect_locktime_locals(method.body, params)
+        self.locals = _collect_locktime_locals(method.body, params, self._helper_return)
         live, returned = self._stmts(method.body, FRESH)
         self.locals = saved
         return live | returned
 
     def _level(self, e) -> int:
-        return _expr_level(e, self.locals)
+        return _expr_level(e, self.locals, self._helper_return)
 
     def _compare(self, e) -> str:
         if not isinstance(e, BinaryExpr):

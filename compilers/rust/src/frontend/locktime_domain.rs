@@ -346,7 +346,74 @@ pub fn has_unpinned_locktime_gate(contract: &ContractNode, method: &MethodNode) 
     SourceGates::new(contract).exits(method, HashMap::new()).unpinned(G, P)
 }
 
+/// Level of a private helper's RETURN value given its argument levels: DIRECT
+/// when every `return` expression is a direct read, DERIVED when some is
+/// tainted, else NONE (the rule a local with several bindings follows). A call
+/// cycle contributes NONE; `None` when the name is no private helper. Mirrors
+/// `SourceGates.helperReturn` in locktime-domain.ts.
+struct SourceReturns<'a> {
+    privates: HashMap<&'a str, &'a MethodNode>,
+    memo: std::cell::RefCell<HashMap<String, u8>>,
+    in_progress: std::cell::RefCell<HashSet<String>>,
+}
+
+impl<'a> SourceReturns<'a> {
+    fn ret(&self, name: &str, arg_levels: &[u8]) -> Option<u8> {
+        let m = *self.privates.get(name)?;
+        let mut params = HashMap::new();
+        for (i, p) in m.params.iter().enumerate() {
+            let lv = arg_levels.get(i).copied().unwrap_or(NONE);
+            if lv != NONE {
+                params.insert(p.name.clone(), lv);
+            }
+        }
+        let names: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
+        let key = helper_key(&m.name, &names, &params);
+        if let Some(lv) = self.memo.borrow().get(&key) {
+            return Some(*lv);
+        }
+        if !self.in_progress.borrow_mut().insert(key.clone()) {
+            return Some(NONE);
+        }
+        let locals = collect_locktime_locals(&m.body, &params, Some(self));
+        let levels: Vec<u8> = return_expressions(&m.body).iter().map(|r| expr_level(r, &locals, Some(self))).collect();
+        self.in_progress.borrow_mut().remove(&key);
+        let lv = if levels.iter().all(|l| *l == NONE) {
+            NONE
+        } else if levels.iter().all(|l| *l == DIRECT) {
+            DIRECT
+        } else {
+            DERIVED
+        };
+        self.memo.borrow_mut().insert(key, lv);
+        Some(lv)
+    }
+}
+
+/// Every `return` expression of a method body (if arms and loop bodies included).
+fn return_expressions(body: &[Statement]) -> Vec<&Expression> {
+    let mut out = Vec::new();
+    let mut work: Vec<&[Statement]> = vec![body];
+    while let Some(stmts) = work.pop() {
+        for st in stmts {
+            match st {
+                Statement::ReturnStatement { value: Some(v), .. } => out.push(v),
+                Statement::IfStatement { then_branch, else_branch, .. } => {
+                    work.push(then_branch);
+                    if let Some(e) = else_branch {
+                        work.push(e);
+                    }
+                }
+                Statement::ForStatement { body, .. } => work.push(body),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 struct SourceGates<'a> {
+    returns: SourceReturns<'a>,
     privates: HashMap<&'a str, &'a MethodNode>,
     /// Helper exits, by helper name and the taint level of each argument.
     helper_exits: HashMap<String, PathSet>,
@@ -357,13 +424,19 @@ struct SourceGates<'a> {
 
 impl<'a> SourceGates<'a> {
     fn new(contract: &'a ContractNode) -> Self {
+        let privates: HashMap<&'a str, &'a MethodNode> = contract
+            .methods
+            .iter()
+            .filter(|m| m.visibility == Visibility::Private)
+            .map(|m| (m.name.as_str(), m))
+            .collect();
         SourceGates {
-            privates: contract
-                .methods
-                .iter()
-                .filter(|m| m.visibility == Visibility::Private)
-                .map(|m| (m.name.as_str(), m))
-                .collect(),
+            returns: SourceReturns {
+                privates: privates.clone(),
+                memo: std::cell::RefCell::new(HashMap::new()),
+                in_progress: std::cell::RefCell::new(HashSet::new()),
+            },
+            privates,
             helper_exits: HashMap::new(),
             in_progress: HashSet::new(),
             locals: HashMap::new(),
@@ -371,7 +444,7 @@ impl<'a> SourceGates<'a> {
     }
 
     fn exits(&mut self, method: &MethodNode, params: HashMap<String, u8>) -> PathSet {
-        let locals = collect_locktime_locals(&method.body, &params);
+        let locals = collect_locktime_locals(&method.body, &params, Some(&self.returns));
         let saved = std::mem::replace(&mut self.locals, locals);
         let (live, returned) = self.stmts(&method.body, PathSet::FRESH);
         self.locals = saved;
@@ -379,7 +452,7 @@ impl<'a> SourceGates<'a> {
     }
 
     fn level(&self, e: &Expression) -> u8 {
-        expr_level(e, &self.locals)
+        expr_level(e, &self.locals, Some(&self.returns))
     }
 
     fn compare(&self, e: &Expression) -> Kind {
@@ -536,20 +609,31 @@ impl<'a> SourceGates<'a> {
 }
 
 /// Taint level of a source expression, given the taint of the names in scope.
-fn expr_level(e: &Expression, names: &HashMap<String, u8>) -> u8 {
+fn expr_level(e: &Expression, names: &HashMap<String, u8>, hr: Option<&SourceReturns>) -> u8 {
     if is_read(e) {
         return DIRECT;
     }
-    let any = |xs: &[&Expression]| if xs.iter().any(|x| expr_level(x, names) != NONE) { DERIVED } else { NONE };
+    let any = |xs: &[&Expression]| if xs.iter().any(|x| expr_level(x, names, hr) != NONE) { DERIVED } else { NONE };
     match e {
         Expression::Identifier { name, .. } => names.get(name).copied().unwrap_or(NONE),
         Expression::BinaryExpr { op, left, right, .. } if propagates(op.as_str()) => any(&[left, right]),
         Expression::UnaryExpr { op, operand, .. } if propagates_unary(op.as_str()) => any(&[operand]),
         Expression::TernaryExpr { consequent, alternate, .. } => any(&[consequent, alternate]),
-        // A builtin (identifier callee); a helper's return is not followed.
+        // A builtin (identifier callee) derives from its arguments.
         Expression::CallExpr { callee, args, .. } if matches!(callee.as_ref(), Expression::Identifier { .. }) => {
             let xs: Vec<&Expression> = args.iter().collect();
             any(&xs)
+        }
+        // A private helper's return carries the locktime taint into the
+        // caller (inlined, `this.height()` IS its returned expression).
+        Expression::CallExpr { callee, args, .. } => {
+            let name = match callee.as_ref() {
+                Expression::PropertyAccess { property, .. } | Expression::MemberExpr { property, .. } => property,
+                _ => return NONE,
+            };
+            let Some(hr) = hr else { return NONE };
+            let levels: Vec<u8> = args.iter().map(|a| expr_level(a, names, Some(hr))).collect();
+            hr.ret(name, &levels).unwrap_or(NONE)
         }
         _ => NONE,
     }
@@ -565,7 +649,11 @@ enum SourceBind<'e> {
 /// Taint of the method's locals and parameters, from every binding in the
 /// body (declaration or assignment, anywhere) plus one binding per tainted
 /// parameter. Order-blind on purpose.
-fn collect_locktime_locals(body: &[Statement], params: &HashMap<String, u8>) -> HashMap<String, u8> {
+fn collect_locktime_locals(
+    body: &[Statement],
+    params: &HashMap<String, u8>,
+    hr: Option<&SourceReturns>,
+) -> HashMap<String, u8> {
     fn visit<'e>(stmts: &'e [Statement], binds: &mut Vec<(String, SourceBind<'e>)>) {
         for st in stmts {
             match st {
@@ -595,12 +683,15 @@ fn collect_locktime_locals(body: &[Statement], params: &HashMap<String, u8>) -> 
         &binds,
         |b, t| match b {
             SourceBind::Level(lv) => *lv != NONE,
-            SourceBind::Expr(e) => expr_level(e, &as_map(t)) != NONE,
+            SourceBind::Expr(e) => expr_level(e, &as_map(t), hr) != NONE,
         },
         |b, d| match b {
             SourceBind::Level(lv) => *lv == DIRECT,
             SourceBind::Expr(e) => {
-                is_read(e) || matches!(e, Expression::Identifier { name, .. } if d.contains(name))
+                is_read(e)
+                    || matches!(e, Expression::Identifier { name, .. } if d.contains(name))
+                    || (matches!(e, Expression::CallExpr { callee, .. } if !matches!(callee.as_ref(), Expression::Identifier { .. }))
+                        && expr_level(e, &as_map(d), hr) == DIRECT)
             }
         },
     )
@@ -617,14 +708,36 @@ fn ref_of(v: &ANFValue) -> Option<&str> {
     }
 }
 
+/// `bs[i]` is the ANF image of `currentBlockHeight()` (anf_lower.rs): a
+/// `call extractLocktime` followed in the same block by `load_const 500000000;
+/// bin_op < (bs[i], that const); assert (that compare)`. The assert runs on
+/// every path through the block before any later use, so the read is a height
+/// by construction and the `--ir` path does not count it as a locktime read
+/// (nothing derived from it is a gate), as the source path does not count
+/// `currentBlockHeight()`. Its assert still counts as a pin. Matches only that
+/// exact four-binding shape. Mirrors `isSelfPinnedLocktimeRead`.
+pub fn is_self_pinned_locktime_read(bs: &[ANFBinding], i: usize) -> bool {
+    if i + 3 >= bs.len() {
+        return false;
+    }
+    let (r, l, c, a) = (&bs[i], &bs[i + 1], &bs[i + 2], &bs[i + 3]);
+    matches!(&r.value, ANFValue::Call { func, .. } if func == "extractLocktime")
+        && matches!(&l.value, ANFValue::LoadConst { .. })
+        && matches!(l.value.const_value(), Some(ConstValue::Int(n)) if n == BigInt::from(500_000_000i64))
+        && matches!(&c.value, ANFValue::BinOp { op, left, right, .. }
+            if op == "<" && *left == r.name && *right == l.name)
+        && matches!(&a.value, ANFValue::Assert { value, .. } if *value == c.name)
+}
+
 /// D26 on the `--ir` path: `--ir` skips typecheck, so the rule is re-derived
 /// from the ANF of every public method (stateless and stateful). Mirrors
 /// `assertIrLocktimeDomain`.
 pub fn assert_ir_locktime_domain(program: &ANFProgram) -> Result<(), String> {
-    // Prefilter (as contract_reads_locktime): no extractLocktime call, no gate.
+    // Prefilter (as contract_reads_locktime): no extractLocktime call that is
+    // not currentBlockHeight()'s self-pinned one, no gate.
     fn reads(bs: &[ANFBinding]) -> bool {
-        bs.iter().any(|b| match &b.value {
-            ANFValue::Call { func, .. } => func == "extractLocktime",
+        bs.iter().enumerate().any(|(i, b)| match &b.value {
+            ANFValue::Call { func, .. } => func == "extractLocktime" && !is_self_pinned_locktime_read(bs, i),
             ANFValue::If { then, else_branch, .. } => reads(then) || reads(else_branch),
             ANFValue::Loop { body, .. } => reads(body),
             _ => false,
@@ -639,7 +752,12 @@ pub fn assert_ir_locktime_domain(program: &ANFProgram) -> Result<(), String> {
         .filter(|m| !m.is_public && m.name != "constructor")
         .map(|m| (m.name.as_str(), m))
         .collect();
-    let mut walk = IrWalk { privates, exits_of: HashMap::new(), in_progress: HashSet::new() };
+    let returns = IrReturns {
+        privates: privates.clone(),
+        memo: std::cell::RefCell::new(HashMap::new()),
+        in_progress: std::cell::RefCell::new(HashSet::new()),
+    };
+    let mut walk = IrWalk { privates, exits_of: HashMap::new(), in_progress: HashSet::new(), returns: &returns };
     for m in &program.methods {
         if !m.is_public || m.name == "constructor" {
             continue;
@@ -655,6 +773,42 @@ struct IrWalk<'a> {
     privates: HashMap<&'a str, &'a ANFMethod>,
     exits_of: HashMap<String, PathSet>,
     in_progress: HashSet<String>,
+    returns: &'a IrReturns<'a>,
+}
+
+/// A helper's RETURN level on the `--ir` path: the level of its last binding
+/// (the value the inlined call yields), given its argument levels. A cycle
+/// contributes NONE; `None` when the name is no private helper.
+struct IrReturns<'a> {
+    privates: HashMap<&'a str, &'a ANFMethod>,
+    memo: std::cell::RefCell<HashMap<String, u8>>,
+    in_progress: std::cell::RefCell<HashSet<String>>,
+}
+
+impl<'a> IrReturns<'a> {
+    fn ret(&self, name: &str, arg_levels: &[u8]) -> Option<u8> {
+        let m = *self.privates.get(name)?;
+        let mut params = HashMap::new();
+        for (i, p) in m.params.iter().enumerate() {
+            let lv = arg_levels.get(i).copied().unwrap_or(NONE);
+            if lv != NONE {
+                params.insert(p.name.clone(), lv);
+            }
+        }
+        let names: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
+        let key = helper_key(&m.name, &names, &params);
+        if let Some(lv) = self.memo.borrow().get(&key) {
+            return Some(*lv);
+        }
+        let Some(last) = m.body.last() else { return Some(NONE) };
+        if !self.in_progress.borrow_mut().insert(key.clone()) {
+            return Some(NONE);
+        }
+        let lv = IrGates::new(m, &params, self).level(&last.name);
+        self.in_progress.borrow_mut().remove(&key);
+        self.memo.borrow_mut().insert(key, lv);
+        Some(lv)
+    }
 }
 
 impl<'a> IrWalk<'a> {
@@ -675,7 +829,7 @@ impl<'a> IrWalk<'a> {
             return PathSet::FRESH;
         }
         self.in_progress.insert(m.name.clone());
-        let gates = IrGates::new(m, &params);
+        let gates = IrGates::new(m, &params, self.returns);
         let ex = gates.run(&m.body, PathSet::FRESH, self);
         self.in_progress.remove(&m.name);
         self.exits_of.insert(key, ex);
@@ -688,27 +842,45 @@ struct IrGates<'a> {
     defs: HashMap<&'a str, Vec<&'a ANFValue>>,
     /// Taint level of every temp.
     taint: HashMap<String, u8>,
+    /// The `bin_op <` of each currentBlockHeight() image: its read is no
+    /// locktime read, but its assert still pins the domain on its path (the
+    /// pin bounds the transaction's nLockTime, whichever read it is spelled on).
+    self_pin_compares: HashSet<*const ANFValue>,
 }
 
 impl<'a> IrGates<'a> {
-    fn new(method: &'a ANFMethod, params: &HashMap<String, u8>) -> Self {
-        fn index<'a>(bs: &'a [ANFBinding], defs: &mut HashMap<&'a str, Vec<&'a ANFValue>>, binds: &mut Vec<(String, &'a ANFValue)>) {
-            for b in bs {
+    fn new(method: &'a ANFMethod, params: &HashMap<String, u8>, returns: &IrReturns) -> Self {
+        type Pinned = (HashSet<*const ANFValue>, HashSet<*const ANFValue>);
+        fn index<'a>(
+            bs: &'a [ANFBinding],
+            defs: &mut HashMap<&'a str, Vec<&'a ANFValue>>,
+            binds: &mut Vec<(String, &'a ANFValue)>,
+            pinned: &mut Pinned,
+        ) {
+            for (i, b) in bs.iter().enumerate() {
+                if is_self_pinned_locktime_read(bs, i) {
+                    pinned.0.insert(&b.value as *const ANFValue);
+                    pinned.1.insert(&bs[i + 2].value as *const ANFValue);
+                }
                 defs.entry(b.name.as_str()).or_default().push(&b.value);
                 binds.push((b.name.clone(), &b.value));
                 match &b.value {
                     ANFValue::If { then, else_branch, .. } => {
-                        index(then, defs, binds);
-                        index(else_branch, defs, binds);
+                        index(then, defs, binds, pinned);
+                        index(else_branch, defs, binds, pinned);
                     }
-                    ANFValue::Loop { body, .. } => index(body, defs, binds),
+                    ANFValue::Loop { body, .. } => index(body, defs, binds, pinned),
                     _ => {}
                 }
             }
         }
         let mut defs = HashMap::new();
         let mut binds = Vec::new();
-        index(&method.body, &mut defs, &mut binds);
+        // currentBlockHeight()'s reads (not locktime reads) and their compares.
+        let mut pinned: Pinned = (HashSet::new(), HashSet::new());
+        index(&method.body, &mut defs, &mut binds, &mut pinned);
+        let (self_pinned, self_pin_compares) = pinned;
+        let raw_read = |v: &ANFValue| !self_pinned.contains(&(v as *const ANFValue));
         let last = |arm: &[ANFBinding]| arm.last().map(|b| b.name.clone());
         let taint = solve_taint(
             &binds,
@@ -717,12 +889,20 @@ impl<'a> IrGates<'a> {
                     return t.contains(r);
                 }
                 match v {
-                    ANFValue::Call { func, args, .. } => func == "extractLocktime" || args.iter().any(|a| t.contains(a)),
+                    ANFValue::Call { func, args, .. } => {
+                        (func == "extractLocktime" && raw_read(v)) || args.iter().any(|a| t.contains(a))
+                    }
                     ANFValue::LoadParam { name } => params.get(name).copied().unwrap_or(NONE) != NONE,
                     ANFValue::BinOp { op, left, right, .. } => propagates(op) && (t.contains(left) || t.contains(right)),
                     ANFValue::UnaryOp { op, operand, .. } => propagates_unary(op) && t.contains(operand),
                     ANFValue::If { then, else_branch, .. } => {
                         [last(then), last(else_branch)].iter().flatten().any(|n| t.contains(n))
+                    }
+                    // The inlined call yields the helper's return value: it
+                    // carries the helper's locktime taint into the caller.
+                    ANFValue::MethodCall { method, args, .. } => {
+                        let levels: Vec<u8> = args.iter().map(|a| if t.contains(a) { DIRECT } else { NONE }).collect();
+                        returns.ret(method, &levels).unwrap_or(NONE) != NONE
                     }
                     _ => false,
                 }
@@ -732,13 +912,17 @@ impl<'a> IrGates<'a> {
                     return d.contains(r);
                 }
                 match v {
-                    ANFValue::Call { func, .. } => func == "extractLocktime",
+                    ANFValue::Call { func, .. } => func == "extractLocktime" && raw_read(v),
                     ANFValue::LoadParam { name } => params.get(name).copied() == Some(DIRECT),
+                    ANFValue::MethodCall { method, args, .. } => {
+                        let levels: Vec<u8> = args.iter().map(|a| if d.contains(a) { DIRECT } else { NONE }).collect();
+                        returns.ret(method, &levels) == Some(DIRECT)
+                    }
                     _ => false,
                 }
             },
         );
-        IrGates { defs, taint }
+        IrGates { defs, taint, self_pin_compares }
     }
 
     fn level(&self, name: &str) -> u8 {
@@ -782,7 +966,7 @@ impl<'a> IrGates<'a> {
             return false;
         }
         let v = vs[0];
-        if self.compare(v) == Kind::Pin {
+        if self.compare(v) == Kind::Pin || self.self_pin_compares.contains(&(v as *const ANFValue)) {
             return true;
         }
         if let Some(r) = ref_of(v) {

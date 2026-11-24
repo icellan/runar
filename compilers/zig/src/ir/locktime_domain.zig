@@ -43,10 +43,39 @@ fn isPropagateUnary(op: []const u8) bool {
     return eql(op, "-") or eql(op, "~");
 }
 
-/// Prefilter: some binding (if / loop arms included) is `call extractLocktime`.
+/// `bs[i]` is the ANF image of `currentBlockHeight()` (anf_lower.zig): a
+/// `call extractLocktime` followed in the same block by `load_const 500000000;
+/// bin_op < (bs[i], that const); assert (that compare)`. The assert runs on
+/// every path through the block before any later use, so the read is a height
+/// by construction and the --ir path does not count it as a locktime read
+/// (nothing derived from it is a gate), as the source path does not count
+/// `currentBlockHeight()`. Its assert still counts as a pin. Matches only that
+/// exact four-binding shape. Mirrors isSelfPinnedLocktimeRead.
+pub fn isSelfPinnedLocktimeRead(bs: []const types.ANFBinding, i: usize) bool {
+    if (i + 3 >= bs.len) return false;
+    const r = bs[i];
+    const l = bs[i + 1];
+    const c = bs[i + 2];
+    const a = bs[i + 3];
+    if (r.value != .call or !eql(r.value.call.func, "extractLocktime")) return false;
+    if (l.value != .load_const) return false;
+    const n: ?i128 = switch (l.value.load_const.value) {
+        .integer => |x| x,
+        .big_integer => |x| ld.parseBig(x),
+        else => null,
+    };
+    if (n == null or n.? != 500000000) return false;
+    if (c.value != .bin_op) return false;
+    const b = c.value.bin_op;
+    if (!eql(b.op, "<") or !eql(b.left, r.name) or !eql(b.right, l.name)) return false;
+    return a.value == .assert and eql(a.value.assert.value, c.name);
+}
+
+/// Prefilter: some binding (if / loop arms included) is a `call
+/// extractLocktime` that is not currentBlockHeight()'s self-pinned one.
 fn reads(bs: []const types.ANFBinding) bool {
-    for (bs) |b| switch (b.value) {
-        .call => |c| if (eql(c.func, "extractLocktime")) return true,
+    for (bs, 0..) |b, i| switch (b.value) {
+        .call => |c| if (eql(c.func, "extractLocktime") and !isSelfPinnedLocktimeRead(bs, i)) return true,
         .@"if" => |iff| if (reads(iff.then) or reads(iff.@"else")) return true,
         .loop => |lp| if (reads(lp.body)) return true,
         else => {},
@@ -58,6 +87,14 @@ const Defs = std.StringHashMapUnmanaged(std.ArrayListUnmanaged(types.ANFValue));
 
 const IrTaintCtx = struct {
     params: *const ld.Levels,
+    prog: *Program,
+
+    fn helperLevel(c: IrTaintCtx, mc: types.ANFMethodCall, set: *const ld.Levels) u2 {
+        const levels = c.prog.a.alloc(u2, mc.args.len) catch @panic("out of memory");
+        for (mc.args, 0..) |x, i| levels[i] = if (set.contains(x)) ld.DIRECT else ld.NONE;
+        return (c.prog.helperReturn(mc.method, levels) catch @panic("out of memory")) orelse ld.NONE;
+    }
+
     pub fn tainted(c: IrTaintCtx, v: types.ANFValue, t: *const ld.Levels) bool {
         if (refOf(v)) |r| return t.contains(r);
         return switch (v) {
@@ -74,6 +111,9 @@ const IrTaintCtx = struct {
                 if (lastName(iff.@"else")) |n| if (t.contains(n)) break :blk true;
                 break :blk false;
             },
+            // The inlined call yields the helper's return value: it carries
+            // the helper's locktime taint into the caller.
+            .method_call => |mc| c.helperLevel(mc, t) != ld.NONE,
             else => false,
         };
     }
@@ -82,6 +122,7 @@ const IrTaintCtx = struct {
         return switch (v) {
             .call => |call| eql(call.func, "extractLocktime"),
             .load_param => |lp| (c.params.get(lp.name) orelse ld.NONE) == ld.DIRECT,
+            .method_call => |mc| c.helperLevel(mc, d) == ld.DIRECT,
             else => false,
         };
     }
@@ -92,6 +133,33 @@ const Program = struct {
     methods: []const types.ANFMethod,
     exits_of: std.StringHashMapUnmanaged(u4) = .empty,
     in_progress: std.StringHashMapUnmanaged(void) = .empty,
+    returns_of: std.StringHashMapUnmanaged(u2) = .empty,
+    returns_in_progress: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// A helper's RETURN level: the level of its last binding (the value the
+    /// inlined call yields), given its argument levels. A cycle contributes
+    /// NONE; null when `name` is no private helper.
+    fn helperReturn(p: *Program, name: []const u8, arg_levels: []const u2) Allocator.Error!?u2 {
+        const m = p.private(name) orelse return null;
+        var params: ld.Levels = .empty;
+        var key: std.ArrayListUnmanaged(u8) = .empty;
+        try key.appendSlice(p.a, m.name);
+        try key.append(p.a, '|');
+        for (m.params, 0..) |prm, i| {
+            const lv = if (i < arg_levels.len) arg_levels[i] else ld.NONE;
+            if (lv != ld.NONE) try params.put(p.a, prm.name, lv);
+            if (i > 0) try key.append(p.a, ',');
+            try key.append(p.a, '0' + @as(u8, lv));
+        }
+        if (p.returns_of.get(key.items)) |lv| return lv;
+        if (p.returns_in_progress.contains(key.items) or m.body.len == 0) return ld.NONE;
+        try p.returns_in_progress.put(p.a, key.items, {});
+        var g = try Gates.init(p, m, params);
+        const lv = g.level(m.body[m.body.len - 1].name);
+        _ = p.returns_in_progress.remove(key.items);
+        try p.returns_of.put(p.a, key.items, lv);
+        return lv;
+    }
 
     fn private(p: *Program, name: []const u8) ?types.ANFMethod {
         for (p.methods) |m| {
@@ -128,20 +196,31 @@ const Gates = struct {
     /// Every binding of the method, by name (a name bound more than once keeps all its values).
     defs: Defs,
     taint: ld.Levels,
+    /// Names of the `bin_op <` of each currentBlockHeight() image: its read
+    /// is no locktime read, but its assert still pins the domain on its path
+    /// (the pin bounds the transaction's nLockTime, whichever read it is
+    /// spelled on). Honoured only for a singly-bound name (as every pin is).
+    self_pin_cmps: std.StringHashMapUnmanaged(void),
 
-    fn index(a: Allocator, defs: *Defs, names: *std.ArrayListUnmanaged([]const u8), vals: *std.ArrayListUnmanaged(types.ANFValue), bs: []const types.ANFBinding) Allocator.Error!void {
-        for (bs) |b| {
+    /// The value the taint solve sees for a currentBlockHeight() image's read:
+    /// the source-level call it lowers from, which is no locktime read.
+    const self_pinned_read: types.ANFValue = .{ .call = .{ .func = "currentBlockHeight", .args = &.{} } };
+
+    fn index(a: Allocator, defs: *Defs, names: *std.ArrayListUnmanaged([]const u8), vals: *std.ArrayListUnmanaged(types.ANFValue), cmps: *std.StringHashMapUnmanaged(void), bs: []const types.ANFBinding) Allocator.Error!void {
+        for (bs, 0..) |b, i| {
+            const pinned = isSelfPinnedLocktimeRead(bs, i);
+            if (pinned) try cmps.put(a, bs[i + 2].name, {});
             const gop = try defs.getOrPut(a, b.name);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(a, b.value);
             try names.append(a, b.name);
-            try vals.append(a, b.value);
+            try vals.append(a, if (pinned) self_pinned_read else b.value);
             switch (b.value) {
                 .@"if" => |iff| {
-                    try index(a, defs, names, vals, iff.then);
-                    try index(a, defs, names, vals, iff.@"else");
+                    try index(a, defs, names, vals, cmps, iff.then);
+                    try index(a, defs, names, vals, cmps, iff.@"else");
                 },
-                .loop => |lp| try index(a, defs, names, vals, lp.body),
+                .loop => |lp| try index(a, defs, names, vals, cmps, lp.body),
                 else => {},
             }
         }
@@ -152,11 +231,12 @@ const Gates = struct {
         var defs: Defs = .empty;
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
         var vals: std.ArrayListUnmanaged(types.ANFValue) = .empty;
-        try index(a, &defs, &names, &vals, m.body);
+        var cmps: std.StringHashMapUnmanaged(void) = .empty;
+        try index(a, &defs, &names, &vals, &cmps, m.body);
         const ps = try a.create(ld.Levels);
         ps.* = params;
-        const taint = try ld.solveTaint(types.ANFValue, a, names.items, vals.items, IrTaintCtx{ .params = ps });
-        return .{ .prog = prog, .defs = defs, .taint = taint };
+        const taint = try ld.solveTaint(types.ANFValue, a, names.items, vals.items, IrTaintCtx{ .params = ps, .prog = prog });
+        return .{ .prog = prog, .defs = defs, .taint = taint, .self_pin_cmps = cmps };
     }
 
     fn level(g: *const Gates, name: []const u8) u2 {
@@ -205,7 +285,7 @@ const Gates = struct {
             const gop = try seen.getOrPut(a, name);
             if (gop.found_existing) continue;
             const v = g.single(name) orelse continue;
-            if (g.compare(v) == .pin) return true;
+            if (g.compare(v) == .pin or g.self_pin_cmps.contains(name)) return true;
             if (refOf(v)) |r| {
                 try work.append(a, r);
                 continue;

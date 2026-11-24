@@ -2647,8 +2647,15 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	// is a Unix timestamp). One pin per call; emission order matches
 	// 04-anf-lower.ts byte for byte. The value is the extractLocktime binding.
 	// Only valid in StatefulSmartContract methods (typecheck enforces).
+	// The preimage resolves as `this.txPreimage` does here: load_param in a
+	// public method, load_prop in a private helper (an inlined helper's
+	// load_param is its own last use of the caller's preimage and consumed it).
 	if id, ok := callee.(Identifier); ok && id.Name == "currentBlockHeight" {
-		preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+		preimageKind := "load_prop"
+		if ctx.isParam("txPreimage") {
+			preimageKind = "load_param"
+		}
+		preimageRef := ctx.emit(ir.ANFValue{Kind: preimageKind, Name: "txPreimage"})
 		heightRef := ctx.emit(makeCall("extractLocktime", []string{preimageRef}))
 		thresholdRef := ctx.emit(makeLoadConstInt(big.NewInt(500000000)))
 		inDomainRef := ctx.emit(ir.ANFValue{Kind: "bin_op", Op: "<", Left: heightRef, Right: thresholdRef})

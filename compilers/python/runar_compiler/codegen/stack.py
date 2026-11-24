@@ -623,6 +623,75 @@ class StackMap:
 # Use analysis -- determine last-use sites for each variable
 # ---------------------------------------------------------------------------
 
+def helper_outer_reads(
+    method: ANFMethod,
+    private_methods: dict[str, ANFMethod],
+    property_names: set[str],
+    memo: dict[str, frozenset[str]],
+) -> frozenset[str]:
+    """The caller-scope stack slots a private method reads: every
+    ``load_param`` name that is not one of its own parameters and every
+    ``load_prop`` name that is not a contract property (``this.txPreimage``
+    and ``currentBlockHeight()`` in a helper lower to ``load_prop
+    txPreimage``, the CALLER's preimage slot), including what the helpers it
+    calls read, minus its own parameters (bound by the call). Searched
+    through if arms and loop bodies. Private methods are inlined, so these are
+    reads of the caller's slots at the call site; ``collect_refs`` of a
+    ``method_call`` is its arguments only, so without
+    ``_extend_last_uses_for_helpers`` the caller consumed its preimage before
+    the helper read it. N-264: an explicit work list over both the nesting
+    and the call graph; a call cycle (``--ir`` only) contributes nothing.
+    Mirrors ``helperOuterReads`` in 05-stack-lower.ts.
+    """
+
+    def direct(m: ANFMethod) -> tuple[set[str], list[ANFMethod]]:
+        reads: set[str] = set()
+        callees: list[ANFMethod] = []
+        work = [m.body or []]
+        while work:
+            for b in work.pop():
+                v = b.value
+                if v.kind == "load_param":
+                    reads.add(v.name)
+                elif v.kind == "load_prop" and v.name not in property_names:
+                    reads.add(v.name)
+                elif v.kind == "if":
+                    work.append(v.then or [])
+                    work.append(v.else_ or [])
+                elif v.kind == "loop":
+                    work.append(v.body or [])
+                elif v.kind == "method_call":
+                    callee = private_methods.get(v.method)
+                    if callee is not None:
+                        callees.append(callee)
+        return reads, callees
+
+    on_path: set[str] = set()
+    stack: list[list] = [[method, None]]
+    while stack:
+        top = stack[-1]
+        m = top[0]
+        if m.name in memo:
+            stack.pop()
+            continue
+        if top[1] is None:
+            top[1] = direct(m)
+            on_path.add(m.name)
+            for c in top[1][1]:
+                if c.name not in memo and c.name not in on_path:
+                    stack.append([c, None])
+            continue
+        stack.pop()
+        reads = set(top[1][0])
+        for c in top[1][1]:
+            reads.update(memo.get(c.name, frozenset()))
+        for p in m.params or []:
+            reads.discard(p.name)
+        memo[m.name] = frozenset(reads)
+        on_path.discard(m.name)
+    return memo.get(method.name, frozenset())
+
+
 def compute_last_uses(
     bindings: list[ANFBinding],
     inherited_arrays: dict[str, list[str]] | None = None,
@@ -951,6 +1020,8 @@ class _LoweringContext:
         self.script_level_code_separator: bool = False
         self.local_bindings: dict[str, bool] = {}
         self.outer_protected_refs: Optional[set[str]] = None
+        # Memo for helper_outer_reads, per private method name.
+        self._helper_reads_memo: dict[str, frozenset[str]] = {}
         self.inside_branch: bool = False
         self.current_source_loc: Optional[SourceLocation] = None
         self.const_values: dict[str, int | str | bool] = {}
@@ -1674,6 +1745,37 @@ class _LoweringContext:
                 self.sm.pop()
                 self.sm.push(self.sm.remove_at_depth(depth))
 
+    def _helper_reads(self, method: ANFMethod) -> frozenset[str]:
+        """The caller-scope slots ``method`` reads (see helper_outer_reads)."""
+        return helper_outer_reads(
+            method, self.private_methods, {p.name for p in self.properties}, self._helper_reads_memo,
+        )
+
+    def _extend_last_uses_for_helpers(self, bindings: list[ANFBinding], last_uses: dict[str, int]) -> None:
+        """A ``method_call`` to a private method at binding ``i`` (anywhere
+        inside it, if arms and loop bodies included) is a use, at ``i``, of
+        every caller-scope slot the helper reads, so the caller keeps that
+        slot on the stack through the call. Only ever moves a last use LATER,
+        and only for a slot a helper reads. Mirrors extendLastUsesForHelpers.
+        """
+        # N-264: an explicit work list over the nesting, not recursion.
+        for i, b in enumerate(bindings):
+            work = [b.value]
+            while work:
+                v = work.pop()
+                if v.kind == "method_call":
+                    callee = self.private_methods.get(v.method)
+                    if callee is None:
+                        continue
+                    for n in self._helper_reads(callee):
+                        if last_uses.get(n, -1) < i:
+                            last_uses[n] = i
+                elif v.kind == "if":
+                    work.extend(x.value for x in v.then or [])
+                    work.extend(x.value for x in v.else_ or [])
+                elif v.kind == "loop":
+                    work.extend(x.value for x in v.body or [])
+
     def _is_last_use(self, ref: str, current_index: int, last_uses: dict[str, int]) -> bool:
         last = last_uses.get(ref)
         if last is None:
@@ -1721,6 +1823,7 @@ class _LoweringContext:
     ) -> _LowerTask:
         self.local_bindings = {b.name: True for b in bindings}
         last_uses = compute_last_uses(bindings, inherited_arrays)
+        self._extend_last_uses_for_helpers(bindings, last_uses)
 
         # Protect parent-scope refs that are still needed after this scope
         if self.outer_protected_refs is not None:
@@ -2396,7 +2499,20 @@ class _LoweringContext:
                 self.sm.push(param_name)
 
         # Lower the method body
+        # A caller-scope slot the helper reads and the caller reads again after
+        # this call must survive the helper's body: protect it exactly as
+        # lower_if protects a parent-scope ref still needed after the ``if``.
+        # One whose last caller use IS this call may be consumed by the
+        # helper's own last read.
+        prev_protected = self.outer_protected_refs
+        protected_refs: set[str] = set(prev_protected or ())
+        for n in self._helper_reads(method):
+            if last_uses.get(n, -1) > binding_index and self.sm.has(n):
+                protected_refs.add(n)
+        if protected_refs:
+            self.outer_protected_refs = protected_refs
         yield self._lower_bindings_task(method.body, False)
+        self.outer_protected_refs = prev_protected
 
         # Restore shadowed names so the caller's scope sees its original entries.
         for entry in shadowed:
@@ -2569,6 +2685,7 @@ class _LoweringContext:
         # (spec/semantics.md §6.3), which stack lowering performs; an arm is not
         # a different scope for that.
         then_ctx.private_methods = self.private_methods
+        then_ctx._helper_reads_memo = self._helper_reads_memo  # shared: one contract
         # F-015 / issue #130: the arm's cloned stack carries the parent's
         # reserved ``__param_<name>`` slot for a param that shadows a mutable
         # property, so the arm must resolve ``load_param`` through the same
@@ -2609,6 +2726,7 @@ class _LoweringContext:
         else_ctx.outer_protected_refs = protected_refs
         else_ctx.script_level_code_separator = self.script_level_code_separator
         else_ctx.private_methods = self.private_methods  # N-051, see then_ctx above
+        else_ctx._helper_reads_memo = self._helper_reads_memo  # shared: one contract
         else_ctx.renamed_params = self.renamed_params  # F-015, see then_ctx above
         # F-081, see then_ctx above
         else_ctx.array_elements = {k: list(v) for k, v in self.array_elements.items()}
@@ -3205,6 +3323,13 @@ class _LoweringContext:
             for ref in collect_refs(b.value):
                 if ref != iter_var and ref not in deep_body_binding_names:
                     outer_refs.add(ref)
+        # An inlined helper's caller-scope reads are outer refs of the body
+        # too (see _extend_last_uses_for_helpers): the next iteration reads them.
+        helper_uses: dict[str, int] = {}
+        self._extend_last_uses_for_helpers(body, helper_uses)
+        for ref in helper_uses:
+            if ref != iter_var and ref not in deep_body_binding_names:
+                outer_refs.add(ref)
 
         # A local the body REBINDS and then READS AGAIN in the same iteration
         # is carried across iterations through the rebound slot, so it must
@@ -3240,6 +3365,7 @@ class _LoweringContext:
             self.sm.push(iter_var)
 
             last_uses = compute_last_uses(body, outer_arrays)
+            self._extend_last_uses_for_helpers(body, last_uses)
 
             # Prevent outer-scope refs from being consumed by setting their
             # last-use beyond any body binding index:

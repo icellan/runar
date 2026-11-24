@@ -17,13 +17,35 @@ module RunarCompiler
     module LocktimeDomain
       LD = Frontend::LocktimeDomain
 
+      # bs[i] is the ANF image of currentBlockHeight() (anf_lower.rb): a call
+      # extractLocktime followed in the same block by load_const 500000000;
+      # bin_op < (bs[i], that const); assert (that compare). The assert runs on
+      # every path through the block before any later use, so the read is a
+      # height by construction and the --ir path does not count it as a
+      # locktime read (nothing derived from it is a gate), as the source path
+      # does not count currentBlockHeight(). Its assert still counts as a pin.
+      # Matches only that exact four-binding shape. Mirrors
+      # isSelfPinnedLocktimeRead.
+      def self.self_pinned_read?(bs, i)
+        return false unless bs.is_a?(Array) && i + 3 < bs.length
+
+        r, l, c, a = bs[i], bs[i + 1], bs[i + 2], bs[i + 3]
+        return false if [r, l, c, a].any? { |b| b.value.nil? }
+
+        rv, lv, cv, av = r.value, l.value, c.value, a.value
+        rv.kind == "call" && rv.func == "extractLocktime" &&
+          lv.kind == "load_const" && lv.const_bool.nil? && lv.const_big_int == 500_000_000 &&
+          cv.kind == "bin_op" && cv.op == "<" && cv.left == r.name && cv.right == l.name &&
+          av.kind == "assert" && av.value_ref == c.name
+      end
+
       def self.reads?(bindings)
-        (bindings || []).any? do |b|
+        (bindings || []).each_with_index.any? do |b, i|
           v = b.value
           next false if v.nil?
 
           case v.kind
-          when "call" then v.func == "extractLocktime"
+          when "call" then v.func == "extractLocktime" && !self_pinned_read?(bindings, i)
           when "if" then reads?(v.then) || reads?(v.else_)
           when "loop" then reads?(v.body)
           else false
@@ -34,13 +56,35 @@ module RunarCompiler
       # The D26 text for the first public method with an unpinned gate.
       def self.error(program)
         methods = program.methods || []
-        # Prefilter (as contract_reads_locktime?): no extractLocktime call, no gate.
+        # Prefilter (as contract_reads_locktime?): no extractLocktime call that
+        # is not currentBlockHeight()'s self-pinned one, no gate.
         return nil unless methods.any? { |m| reads?(m.body) }
 
         privates = {}
         methods.each { |m| privates[m.name] = m if !m.is_public && m.name != "constructor" }
         exits_of = {}
         in_progress = Set.new
+        exits = nil
+        helper = ->(name, levels) { privates[name] && exits.call(privates[name], levels) }
+        # A helper's RETURN level: the level of its last binding (the value the
+        # inlined call yields), given its argument levels. A cycle contributes NONE.
+        returns_of = {}
+        returns_in_progress = Set.new
+        helper_return = nil
+        helper_return = lambda do |name, arg_levels|
+          m = privates[name]
+          next nil unless m
+
+          params, sig = LD.helper_params(m.params, arg_levels)
+          key = [m.name, sig]
+          next returns_of[key] if returns_of.key?(key)
+          next LD::NONE if returns_in_progress.include?(key) || m.body.nil? || m.body.empty?
+
+          returns_in_progress.add(key)
+          lv = Gates.new(m, params, helper, helper_return).level_of(m.body[-1].name)
+          returns_in_progress.delete(key)
+          returns_of[key] = lv
+        end
         exits = lambda do |m, arg_levels|
           params, sig = LD.helper_params(m.params, arg_levels)
           key = [m.name, sig]
@@ -48,8 +92,7 @@ module RunarCompiler
           next LD::FRESH if in_progress.include?(m.name)
 
           in_progress.add(m.name)
-          helper = ->(name, levels) { privates[name] && exits.call(privates[name], levels) }
-          ex = Gates.new(m, params, helper).run(m.body, LD::FRESH)
+          ex = Gates.new(m, params, helper, helper_return).run(m.body, LD::FRESH)
           in_progress.delete(m.name)
           exits_of[key] = ex
         end
@@ -73,15 +116,26 @@ module RunarCompiler
       end
 
       class Gates
-        def initialize(method, params, helper_exits)
+        def initialize(method, params, helper_exits, helper_return = nil)
           @helper_exits = helper_exits
           # Every binding of the method, by name (a name bound more than once
           # keeps all its values).
           @defs = {}
+          # currentBlockHeight()'s reads (no locktime reads) and their bin_op <
+          # compares, whose assert still pins the domain on its path (the pin
+          # bounds the transaction's nLockTime, whichever read it is spelled
+          # on). By identity.
+          self_pinned = Set.new.compare_by_identity
+          @self_pin_compares = Set.new.compare_by_identity
           index = lambda do |bs|
-            (bs || []).each do |b|
+            (bs || []).each_with_index do |b, i|
               v = b.value
               next if v.nil?
+
+              if LocktimeDomain.self_pinned_read?(bs, i)
+                self_pinned << v
+                @self_pin_compares << bs[i + 2].value
+              end
 
               (@defs[b.name] ||= []) << v
               if v.kind == "if"
@@ -102,11 +156,17 @@ module RunarCompiler
             next t.include?(r) unless r.nil?
 
             case v.kind
-            when "call" then v.func == "extractLocktime" || (v.args || []).any? { |a| t.include?(a) }
+            when "call"
+              (v.func == "extractLocktime" && !self_pinned.include?(v)) || (v.args || []).any? { |a| t.include?(a) }
             when "load_param" then (params[v.name] || LD::NONE) != LD::NONE
             when "bin_op" then LD::PROPAGATE.include?(v.op) && (t.include?(v.left) || t.include?(v.right))
             when "unary_op" then LD::PROPAGATE_UNARY.include?(v.op) && t.include?(v.operand)
             when "if" then [last.call(v.then), last.call(v.else_)].any? { |n| !n.nil? && t.include?(n) }
+            # The inlined call yields the helper's return value: it carries the
+            # helper's locktime taint into the caller.
+            when "method_call"
+              lv = helper_return&.call(v.method, (v.args || []).map { |a| t.include?(a) ? LD::DIRECT : LD::NONE })
+              !lv.nil? && lv != LD::NONE
             else false
             end
           end
@@ -115,8 +175,10 @@ module RunarCompiler
             next d.include?(r) unless r.nil?
 
             case v.kind
-            when "call" then v.func == "extractLocktime"
+            when "call" then v.func == "extractLocktime" && !self_pinned.include?(v)
             when "load_param" then params[v.name] == LD::DIRECT
+            when "method_call"
+              helper_return&.call(v.method, (v.args || []).map { |a| d.include?(a) ? LD::DIRECT : LD::NONE }) == LD::DIRECT
             else false
             end
           end
@@ -140,6 +202,11 @@ module RunarCompiler
             end
           end
           s
+        end
+
+        # Taint level of one binding name (a helper's return: its last binding).
+        def level_of(name)
+          level(name)
         end
 
         private
@@ -176,7 +243,7 @@ module RunarCompiler
           return false unless vs.length == 1
 
           v = vs[0]
-          return true if compare(v) == :pin
+          return true if compare(v) == :pin || @self_pin_compares.include?(v)
 
           r = PreimageRules.ref_target(v)
           return asserted_pin?(r, seen) unless r.nil?

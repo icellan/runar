@@ -1,0 +1,11 @@
+{
+  "sources": {
+    ".runar.ts": "./CurrentBlockHeightHelperTernary.runar.ts",
+    ".runar.sol": "./CurrentBlockHeightHelperTernary.runar.sol",
+    ".runar.py": "./CurrentBlockHeightHelperTernary.runar.py",
+    ".runar.rb": "./CurrentBlockHeightHelperTernary.runar.rb",
+    ".runar.java": "./CurrentBlockHeightHelperTernary.runar.java"
+  },
+  "parserSkip": [".runar.move", ".runar.go", ".runar.rs", ".runar.zig"],
+  "parserSkipReason": "This fixture pins currentBlockHeight() inside a private helper AND in a conditional-expression arm (`c ? a : b`) in one contract, so it ships only the surfaces that have a conditional expression, as ternary-expression does: .runar.ts, .runar.sol, .runar.rb and .runar.java spell it `c ? a : b` and .runar.py spells it `a if c else b`. The Move, Go, Rust-DSL and Zig surfaces have no conditional expression (their parsers turn `if` only into a statement). All seven COMPILERS remain full hex/ANF parity targets for the five surfaces (no compilers allowlist)."
+}

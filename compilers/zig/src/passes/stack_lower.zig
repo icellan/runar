@@ -388,6 +388,7 @@ const BindingsTask = struct {
             try self.local_bindings.put(self.allocator, binding.name, {});
         }
         try self.computeLastUsesWithArrays(bindings, inherited_arrays);
+        try self.extendLastUsesForHelpers(bindings, &self.last_uses);
 
         // Protect parent-scope refs from consume inside this scope: extend
         // their last-use index past the end of the bindings, mirroring TS
@@ -487,18 +488,29 @@ const InlineTask = struct {
         copy_ref_aliases: bool,
     } = null,
     body_lowered: bool = false,
+    /// The protected-ref set the helper body lowers under (when `has_protected`),
+    /// and the caller's own, restored after the body.
+    protected: std.StringHashMapUnmanaged(void) = .empty,
+    has_protected: bool = false,
+    prev_protected: ?*const std.StringHashMapUnmanaged(void) = null,
 
     fn step(t: *InlineTask) LowerError!?LowerTask {
         if (!t.body_lowered) {
             t.body_lowered = true;
+            if (t.has_protected) t.ctx.outer_protected_refs = &t.protected;
             return .{ .bindings = try BindingsTask.start(t.ctx, t.method.body, false, null) };
         }
+        t.ctx.outer_protected_refs = t.prev_protected;
         try t.ctx.inlineMethodCallTail(t);
         return null;
     }
 
     fn destroy(t: *InlineTask) void {
         const self = t.ctx;
+        if (self.outer_protected_refs == @as(?*const std.StringHashMapUnmanaged(void), &t.protected)) {
+            self.outer_protected_refs = t.prev_protected;
+        }
+        t.protected.deinit(self.allocator);
         if (t.saved) |saved| {
             self.force_copy_bindings.deinit(self.allocator);
             self.force_copy_bindings = saved.force_copy_bindings;
@@ -604,6 +616,7 @@ const LoopTask = struct {
                     const enclosing_last_uses = &t.enclosing_last_uses;
                     self.last_uses = .empty;
                     try self.computeLastUsesWithArrays(fl.body_bindings, &t.outer_arrays);
+                    try self.extendLastUsesForHelpers(fl.body_bindings, &self.last_uses);
 
                     // Prevent outer-scope refs from being consumed by pinning their
                     // last-use past every body binding index:
@@ -780,6 +793,11 @@ const LowerCtx = struct {
     /// (used by lowerIfExpr to protect outer values). Mirrors TS
     /// `outerProtectedRefs` — a pointer so it can be shared without copying.
     outer_protected_refs: ?*const std.StringHashMapUnmanaged(void) = null,
+    /// Memo for `helperOuterReads`, per private method name. A branch-arm
+    /// context points `shared_helper_reads` at its parent's, so one contract
+    /// computes each helper's reads once.
+    helper_reads_memo: std.StringHashMapUnmanaged(NameSet) = .empty,
+    shared_helper_reads: ?*std.StringHashMapUnmanaged(NameSet) = null,
     updated_props: std.StringHashMapUnmanaged(void),
     max_depth: u32,
     /// Method params whose names collide with a MUTABLE property, mapped to the
@@ -844,6 +862,55 @@ const LowerCtx = struct {
         self.owned_push_data.deinit(self.allocator);
         self.updated_props.deinit(self.allocator);
         self.renamed_params.deinit(self.allocator);
+        var it_hr = self.helper_reads_memo.valueIterator();
+        while (it_hr.next()) |set| set.deinit(self.allocator);
+        self.helper_reads_memo.deinit(self.allocator);
+    }
+
+    /// The caller-scope slots `method` reads (see `helperOuterReads`).
+    fn helperReadsMemo(self: *LowerCtx) *std.StringHashMapUnmanaged(NameSet) {
+        return self.shared_helper_reads orelse &self.helper_reads_memo;
+    }
+
+    fn helperReads(self: *LowerCtx, method: types.ANFMethod) Allocator.Error!*const NameSet {
+        return helperOuterReads(self.allocator, self.program, method, self.helperReadsMemo());
+    }
+
+    /// A `method_call` to a private method at binding `i` (anywhere inside
+    /// it, if arms and loop bodies included) is a use, at `i`, of every
+    /// caller-scope slot the helper reads, so the caller keeps that slot on
+    /// the stack through the call. Only ever moves a last use LATER, and only
+    /// for a slot a helper reads. N-264: an explicit work list over the
+    /// nesting. Mirrors extendLastUsesForHelpers.
+    fn extendLastUsesForHelpers(self: *LowerCtx, bindings: []const types.ANFBinding, last_uses: *std.StringHashMapUnmanaged(usize)) Allocator.Error!void {
+        var work: std.ArrayListUnmanaged(types.ANFValue) = .empty;
+        defer work.deinit(self.allocator);
+        for (bindings, 0..) |b, i| {
+            work.clearRetainingCapacity();
+            try work.append(self.allocator, b.value);
+            while (work.pop()) |v| {
+                switch (v) {
+                    .method_call => |mc| {
+                        const callee = findPrivateMethod(self.program.methods, mc.method) orelse continue;
+                        const reads = try self.helperReads(callee);
+                        var it = reads.iterator();
+                        while (it.next()) |e| {
+                            const n = e.key_ptr.*;
+                            const later = if (last_uses.get(n)) |last| last < i else true;
+                            if (later) try last_uses.put(self.allocator, n, i);
+                        }
+                    },
+                    .@"if" => |ie| {
+                        for (ie.then) |x| try work.append(self.allocator, x.value);
+                        for (ie.@"else") |x| try work.append(self.allocator, x.value);
+                    },
+                    .loop => |lp| {
+                        for (lp.body) |x| try work.append(self.allocator, x.value);
+                    },
+                    else => {},
+                }
+            }
+        }
     }
 
     fn trackDepth(self: *LowerCtx) void {
@@ -2051,6 +2118,25 @@ const LowerCtx = struct {
         //
         // last_uses IS restored because in TS `lastUses` is a local variable
         // inside each `lowerBindings` call, so the caller's analysis survives.
+        // A caller-scope slot the helper reads and the caller reads again after
+        // this call must survive the helper's body: protect it exactly as
+        // lowerIf protects a parent-scope ref still needed after the `if`. One
+        // whose last caller use IS this call may be consumed by the helper's
+        // own last read.
+        t.prev_protected = self.outer_protected_refs;
+        if (self.outer_protected_refs) |prev| {
+            var pit = prev.iterator();
+            while (pit.next()) |e| try t.protected.put(self.allocator, e.key_ptr.*, {});
+        }
+        const reads = try self.helperReads(method);
+        var rit = reads.iterator();
+        while (rit.next()) |e| {
+            const n = e.key_ptr.*;
+            const later = if (self.last_uses.get(n)) |last| last > self.current_idx else false;
+            if (later and self.stack.findDepth(n) != null) try t.protected.put(self.allocator, n, {});
+        }
+        t.has_protected = t.protected.count() > 0;
+
         t.saved = .{
             .last_uses = self.last_uses,
             .force_copy_bindings = self.force_copy_bindings,
@@ -5789,6 +5875,8 @@ const LowerCtx = struct {
             .else_ctx = LowerCtx.init(self.allocator, self.program),
         };
         errdefer t.destroy();
+        t.then_ctx.shared_helper_reads = self.helperReadsMemo();
+        t.else_ctx.shared_helper_reads = self.helperReadsMemo();
         const ie = &t.ie;
         // The ANF wire format has no version field, and `--ir` / `--ir-parity`
         // are documented surfaces that feed a checked-in ANF JSON straight into
@@ -6922,6 +7010,18 @@ const LowerCtx = struct {
                 try outer_refs.put(self.allocator, ref, {});
             }
         }
+        // An inlined helper's caller-scope reads are outer refs of the body
+        // too (see extendLastUsesForHelpers): the next iteration reads them.
+        var helper_uses: std.StringHashMapUnmanaged(usize) = .empty;
+        defer helper_uses.deinit(self.allocator);
+        try self.extendLastUsesForHelpers(fl.body_bindings, &helper_uses);
+        var hu_it = helper_uses.keyIterator();
+        while (hu_it.next()) |k| {
+            const ref = k.*;
+            if (!std.mem.eql(u8, ref, fl.var_name) and !deep_body_names.contains(ref)) {
+                try outer_refs.put(self.allocator, ref, {});
+            }
+        }
 
         // A local the body REBINDS and then READS AGAIN in the same iteration
         // is carried across iterations through the rebound slot, so it must
@@ -7817,6 +7917,113 @@ pub fn methodUsesCodePartFull(
         (methodUsesCodePart(bindings) or methodReadsVarLenState(bindings, properties, methods));
 }
 
+
+const NameSet = std.StringHashMapUnmanaged(void);
+
+/// The caller-scope stack slots a private method reads: every `load_param`
+/// name that is not one of its own parameters and every `load_prop` name that
+/// is not a contract property (`this.txPreimage` and `currentBlockHeight()` in
+/// a helper lower to `load_prop txPreimage`, the CALLER's preimage slot),
+/// including what the helpers it calls read, minus its own parameters (bound
+/// by the call). Searched through if arms and loop bodies. Private methods are
+/// inlined, so these are reads of the caller's slots at the call site;
+/// `collectValueRefs` of a `method_call` is its arguments only, so without
+/// `extendLastUsesForHelpers` the caller consumed its preimage before the
+/// helper read it. N-264: an explicit work list over both the nesting and the
+/// call graph; a call cycle (`--ir` only) contributes nothing. Mirrors
+/// helperOuterReads in 05-stack-lower.ts. The result is owned by `memo`.
+fn helperOuterReads(
+    allocator: Allocator,
+    program: types.ANFProgram,
+    method: types.ANFMethod,
+    memo: *std.StringHashMapUnmanaged(NameSet),
+) Allocator.Error!*const NameSet {
+    const Frame = struct {
+        m: types.ANFMethod,
+        expanded: bool = false,
+        reads: NameSet = .empty,
+        callees: std.ArrayListUnmanaged(types.ANFMethod) = .empty,
+    };
+    var stack: std.ArrayListUnmanaged(Frame) = .empty;
+    defer {
+        for (stack.items) |*f| {
+            f.reads.deinit(allocator);
+            f.callees.deinit(allocator);
+        }
+        stack.deinit(allocator);
+    }
+    var on_path: NameSet = .empty;
+    defer on_path.deinit(allocator);
+    var work: std.ArrayListUnmanaged([]const types.ANFBinding) = .empty;
+    defer work.deinit(allocator);
+
+    try stack.append(allocator, .{ .m = method });
+    while (stack.items.len > 0) {
+        const top = &stack.items[stack.items.len - 1];
+        if (memo.contains(top.m.name)) {
+            var f = stack.pop().?;
+            f.reads.deinit(allocator);
+            f.callees.deinit(allocator);
+            continue;
+        }
+        if (!top.expanded) {
+            top.expanded = true;
+            work.clearRetainingCapacity();
+            try work.append(allocator, top.m.body);
+            while (work.pop()) |bs| {
+                for (bs) |b| {
+                    switch (b.value) {
+                        .load_param => |lp| try top.reads.put(allocator, lp.name, {}),
+                        .load_prop => |lp| {
+                            var is_prop = false;
+                            for (program.properties) |prop| {
+                                if (std.mem.eql(u8, prop.name, lp.name)) is_prop = true;
+                            }
+                            if (!is_prop) try top.reads.put(allocator, lp.name, {});
+                        },
+                        .@"if" => |ie| {
+                            try work.append(allocator, ie.then);
+                            try work.append(allocator, ie.@"else");
+                        },
+                        .loop => |lp| try work.append(allocator, lp.body),
+                        .method_call => |mc| {
+                            if (findPrivateMethod(program.methods, mc.method)) |callee| {
+                                try top.callees.append(allocator, callee);
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+            try on_path.put(allocator, top.m.name, {});
+            // `top` may move when the stack grows: copy the callee list first.
+            const callees = try allocator.dupe(types.ANFMethod, top.callees.items);
+            defer allocator.free(callees);
+            for (callees) |c| {
+                if (!memo.contains(c.name) and !on_path.contains(c.name)) {
+                    try stack.append(allocator, .{ .m = c });
+                }
+            }
+            continue;
+        }
+        var f = stack.pop().?;
+        defer f.callees.deinit(allocator);
+        for (f.callees.items) |c| {
+            if (memo.getPtr(c.name)) |r| {
+                var it = r.iterator();
+                while (it.next()) |e| try f.reads.put(allocator, e.key_ptr.*, {});
+            }
+        }
+        for (f.m.params) |prm| _ = f.reads.remove(prm.name);
+        try memo.put(allocator, f.m.name, f.reads);
+        _ = on_path.remove(f.m.name);
+    }
+    if (memo.getPtr(method.name)) |r| return r;
+    const empty_static = struct {
+        const set: NameSet = .empty;
+    };
+    return &empty_static.set;
+}
 
 fn findPrivateMethod(methods: []const types.ANFMethod, name: []const u8) ?types.ANFMethod {
     for (methods) |method| {

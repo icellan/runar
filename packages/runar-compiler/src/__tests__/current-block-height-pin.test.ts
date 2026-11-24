@@ -22,7 +22,7 @@
  * locktime-domain-cases.json) or on-chain execution.
  */
 import { describe, it, expect } from 'vitest';
-import { compile } from '../index.js';
+import { compile, compileFromANF } from '../index.js';
 import type { ANFBinding } from '../ir/index.js';
 // @ts-expect-error vitest resolves this via alias (runar-testing is not a tsc dep of runar-compiler)
 import { TestContract } from 'runar-testing';
@@ -37,11 +37,12 @@ const runStatefulSpend = async (opts: Record<string, unknown>): Promise<SpendRes
 
 const D26 = /compares extractLocktime against a lower bound without pinning the locktime domain/;
 
-const gate = (body: string) => `import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';
+const gate = (body: string, helpers = '') => `import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';
 class G extends StatefulSmartContract {
   readonly h: bigint;
   count: bigint;
   constructor(h: bigint, count: bigint) { super(h, count); this.h = h; this.count = count; }
+${helpers}
   public spend() {
     assert(extractSequence(this.txPreimage) !== 0xffffffffn);
 ${body}
@@ -77,6 +78,25 @@ describe('currentBlockHeight() emits its own height-domain pin', () => {
     expect(ge && ge.value.kind === 'bin_op' && ge.value.left).toBe(call!.name);
   });
 
+  // Private helpers are inlined. The preimage must resolve as `this.txPreimage`
+  // does in a helper (load_prop, which the stack lowerer copies): a
+  // load_param there was the helper's own last use of the caller's preimage,
+  // so it was consumed and the caller's continuation read failed ("method
+  // parameter 'txPreimage' is not on the stack").
+  it('in a private helper the preimage read resolves as this.txPreimage does', () => {
+    const HEIGHT = '  private height(): bigint {\n    return currentBlockHeight();\n  }\n';
+    const r = compile(gate('    assert(this.height() >= this.h);', HEIGHT), { fileName: 'G.runar.ts', disableConstantFolding: true });
+    expect(r.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+    const helper = r.anf!.methods.find((m) => m.name === 'height')!.body;
+    const raw = compile(
+      gate('    assert(this.height() >= this.h);', '  private height(): bigint {\n    const lt = extractLocktime(this.txPreimage);\n    assert(lt < 500000000n);\n    return lt;\n  }\n'),
+      { fileName: 'G.runar.ts', disableConstantFolding: true },
+    ).anf!.methods.find((m) => m.name === 'height')!.body;
+    expect(helper[0]!.value).toEqual(raw[0]!.value);
+    expect(helper[0]!.value).toEqual({ kind: 'load_prop', name: 'txPreimage' });
+    expect(helper.slice(1, 5).map((b) => b.value.kind)).toEqual(['call', 'load_const', 'bin_op', 'assert']);
+  });
+
   it('one pin per call', () => {
     const body = spendBody(gate('    assert(currentBlockHeight() >= this.h);\n    assert(currentBlockHeight() <= this.h + 100n);'));
     const pins = body.filter((b) => b.value.kind === 'bin_op' && b.value.op === '<' && body.some(
@@ -97,6 +117,21 @@ describe('currentBlockHeight() emits its own height-domain pin', () => {
     ).toMatch(D26);
   });
 
+  // A private helper's RETURN value carries the locktime taint into the
+  // caller. Before, `private height() { return extractLocktime(this.txPreimage); }`
+  // let `assert(this.height() >= H)` compile with no pin in all seven tiers,
+  // and @bsv/sdk Spend accepted nLockTime 500000000 / 1700000000 against a
+  // height gate of 600000 while refusing height 500000.
+  it('D26 follows a helper return value (raw read refused, pinned or currentBlockHeight accepted)', () => {
+    const RAW = '  private height(): bigint {\n    return extractLocktime(this.txPreimage);\n  }\n';
+    const ID = '  private id(x: bigint): bigint {\n    return x;\n  }\n';
+    expect(errorsOf(gate('    assert(this.height() >= this.h);', RAW)).join('\n')).toMatch(D26);
+    expect(errorsOf(gate('    const lt = this.height();\n    assert(lt >= this.h);', RAW)).join('\n')).toMatch(D26);
+    expect(errorsOf(gate('    assert(this.id(extractLocktime(this.txPreimage)) >= this.h);', ID)).join('\n')).toMatch(D26);
+    expect(errorsOf(gate('    assert(this.height() < 500000000n);\n    assert(this.height() >= this.h);', RAW))).toEqual([]);
+    expect(errorsOf(gate('    assert(this.id(currentBlockHeight()) >= this.h);', ID))).toEqual([]);
+  });
+
   it('TestContract refuses a timestamp-domain locktime and accepts a height', () => {
     const src = gate('    assert(currentBlockHeight() >= this.h);');
     const ok = TestContract.fromSource(src, { h: 100n, count: 0n }, 'G.runar.ts');
@@ -107,6 +142,21 @@ describe('currentBlockHeight() emits its own height-domain pin', () => {
     const r = ts.call('spend');
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/currentBlockHeight/);
+  });
+
+  it('TestContract runs a helper and a ternary arm: timestamp refused, height accepted', () => {
+    const HELPERS =
+      '  private height(): bigint {\n    return currentBlockHeight();\n  }\n' +
+      '  private pick(): bigint {\n    return this.count > 5n ? currentBlockHeight() : 1000n;\n  }\n';
+    for (const body of ['    assert(this.height() >= this.h);', '    assert(this.pick() >= this.h);']) {
+      const src = gate(body, HELPERS);
+      const ok = TestContract.fromSource(src, { h: 100n, count: 10n }, 'G.runar.ts');
+      ok.setMockPreimage({ locktime: 499_999_999n, sequence: 0xfffffffen });
+      expect(ok.call('spend').success, body).toBe(true);
+      const ts = TestContract.fromSource(src, { h: 100n, count: 10n }, 'G.runar.ts');
+      ts.setMockPreimage({ locktime: 500_000_000n, sequence: 0xfffffffen });
+      expect(ts.call('spend').success, body).toBe(false);
+    }
   });
 
   it('refuses a currentBlockHeight() compare against a timestamp literal (it could never pass)', () => {
@@ -133,6 +183,87 @@ describe('currentBlockHeight() emits its own height-domain pin', () => {
     }
   });
 
+  // A helper call AFTER the caller's last own preimage read (a terminal method
+  // with no state write): the inlined helper's read is a use of the caller's
+  // slot at the call, so the slot is not consumed before it. It used to fail
+  // in all seven tiers ("property 'txPreimage' ... is neither on the stack"),
+  // for currentBlockHeight() and for a hand-written this.txPreimage read alike.
+  describe('executed: terminal method whose last preimage read is in a helper', () => {
+    const terminal = (helper: string, body: string) => `import { StatefulSmartContract, assert, currentBlockHeight, extractLocktime, extractSequence } from 'runar-lang';
+class T extends StatefulSmartContract {
+  readonly h: bigint;
+  count: bigint;
+  constructor(h: bigint, count: bigint) { super(h, count); this.h = h; this.count = count; }
+${helper}
+  public close(flag: boolean) {
+    assert(extractSequence(this.txPreimage) !== 0xffffffffn);
+${body}
+  }
+}
+`;
+    const CBH = '  private height(): bigint {\n    return currentBlockHeight();\n  }';
+    const RAW = '  private height(): bigint {\n    const lt = extractLocktime(this.txPreimage);\n    assert(lt < 500000000n);\n    return lt;\n  }';
+    const shapes: Array<[string, string, string]> = [
+      ['currentBlockHeight-helper', CBH, '    assert(this.height() >= this.h);'],
+      ['this.txPreimage-helper', RAW, '    assert(this.height() >= this.h);'],
+      ['helper-in-one-arm', CBH, '    if (flag) {\n      assert(this.height() >= this.h);\n    } else {\n      assert(this.h > 0n);\n    }'],
+      ['helper-in-loop', CBH, '    for (let i = 0n; i < 2n; i++) {\n      assert(this.height() >= this.h + i);\n    }\n    assert(this.h > 0n);'],
+    ];
+    for (const [name, helper, body] of shapes) {
+      for (const [lockTime, ok] of [[499_999_999, true], [500_000_000, false]] as const) {
+        it(`${name} @ nLockTime ${lockTime} -> ${ok ? 'accept' : 'reject'}`, async () => {
+          const res = await runStatefulSpend({
+            source: terminal(helper, body),
+            fileName: 'T.runar.ts',
+            method: 'close',
+            args: [true],
+            constructorArgs: [100n, 10n],
+            signerKey: 'alice',
+            lockTime,
+          });
+          expect(res.vmAccepted, res.vmError ?? '').toBe(ok);
+        });
+      }
+    }
+  });
+
+  // The --ir path may spell a helper's preimage read `load_param txPreimage`
+  // (D25's helper outpoint binding does; the Lean model's WF admits both). It
+  // compiles too: a caller-scope slot the caller reads again after the call is
+  // protected inside the helper (copied), as lowerIf protects a ref still
+  // needed after an `if`; so with a later caller read it is byte-identical to
+  // the load_prop spelling, and as the caller's last use it is consumed there.
+  it('a helper reading the caller preimage as load_param compiles (--ir input)', () => {
+    const HEIGHT = '  private height(): bigint {\n    return currentBlockHeight();\n  }\n';
+    const respell = (src: string, fileName: string): { asProp: string; asParam: string } => {
+      const r = compile(src, { fileName, disableConstantFolding: true });
+      expect(r.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+      const asProp = compileFromANF(r.anf!, { disableConstantFolding: true }).scriptHex;
+      const anf = structuredClone(r.anf!);
+      const helper = anf.methods.find((m) => m.name === 'height')!;
+      expect(helper.body[0]!.value).toEqual({ kind: 'load_prop', name: 'txPreimage' });
+      helper.body[0]!.value = { kind: 'load_param', name: 'txPreimage' };
+      return { asProp, asParam: compileFromANF(anf, { disableConstantFolding: true }).scriptHex };
+    };
+    const later = respell(gate('    assert(this.height() >= this.h);', HEIGHT), 'G.runar.ts');
+    expect(later.asParam).toBe(later.asProp);
+    const last = respell(
+      `import { StatefulSmartContract, assert, currentBlockHeight } from 'runar-lang';
+class T extends StatefulSmartContract {
+  readonly h: bigint;
+  count: bigint;
+  constructor(h: bigint, count: bigint) { super(h, count); this.h = h; this.count = count; }
+${HEIGHT}
+  public close() {
+    assert(this.height() >= this.h);
+  }
+}
+`,
+      'T.runar.ts',
+    );
+    expect(last.asParam.length).toBeGreaterThan(0);
+  });
+
   // Executed on the @bsv/sdk Spend engine (real checkPreimage continuation):
   // the pin holds wherever the call sits, including inside a value-producing
   // arm (the right of &&, a ternary arm) and an if arm; a height spend passes.
@@ -143,12 +274,17 @@ describe('currentBlockHeight() emits its own height-domain pin', () => {
       ['ternary-arm', '    assert((this.count > 5n ? currentBlockHeight() : 1000n) >= this.h);'],
       ['if-arm', '    if (this.count > 5n) {\n      assert(currentBlockHeight() >= this.h);\n    }'],
       ['two-calls', '    assert(currentBlockHeight() >= this.h);\n    assert(currentBlockHeight() <= this.h + 600000000n);'],
+      ['helper', '    assert(this.height() >= this.h);'],
+      ['ternary-in-helper', '    assert(this.pick() >= this.h);'],
     ];
+    const HELPERS =
+      '  private height(): bigint {\n    return currentBlockHeight();\n  }\n' +
+      '  private pick(): bigint {\n    return this.count > 5n ? currentBlockHeight() : 1000n;\n  }\n';
     for (const [name, body] of shapes) {
       for (const [lockTime, ok] of [[499_999_999, true], [500_000_000, false]] as const) {
         it(`${name} @ nLockTime ${lockTime} -> ${ok ? 'accept' : 'reject'}`, async () => {
           const res = await runStatefulSpend({
-            source: gate(body),
+            source: gate(body, HELPERS),
             fileName: 'G.runar.ts',
             method: 'spend',
             args: [],
