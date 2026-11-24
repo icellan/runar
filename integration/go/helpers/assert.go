@@ -3,7 +3,6 @@ package helpers
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -50,7 +49,7 @@ func checkTxRejected(txHex string, reason string) error {
 	if txid != "" || !errors.As(err, &nodeErr) || nodeErr.Method != "sendrawtransaction" {
 		return fmt.Errorf("the node never refused the TX (it was accepted, or never ruled on): %v", err)
 	}
-	if !strings.Contains(nodeErr.Message, reason) {
+	if !refusalMatches(nodeErr.Message, reason) {
 		return fmt.Errorf("the node refused the TX for the wrong reason: expected %q, got %q", reason, nodeErr.Message)
 	}
 	return nil

@@ -271,3 +271,38 @@ func TestCheckNodeRejected_BatchProviderLogsToo(t *testing.T) {
 		t.Fatalf("batch provider rejection not recognised: %v", got)
 	}
 }
+
+// TestScriptRefusal_TeranodeWording: Teranode reports a failed script as
+// "error validating transaction scripts -> TX_INVALID (31): ScriptVerifierGoBDK
+// fail to VerifyScript -> ...", never SV Node's
+// "mandatory-script-verify-flag-failed". Every negative in the nightly
+// Teranode job failed on that wording while the node was rejecting the spend.
+// Texts below are copied from that job's log. Control: a Teranode refusal for
+// a reason that never ran the script must still not count.
+func TestScriptRefusal_TeranodeWording(t *testing.T) {
+	const prefix = "TX rejected: PROCESSING (4): [Validate][7e80d17696c00342f73b4947993654cd3c55a727d39cd9a4ad49646b19126bdb] error validating transaction scripts -> TX_INVALID (31): ScriptVerifierGoBDK fail to VerifyScript -> UNKNOWN (0): "
+	for _, nodeMsg := range []string{
+		prefix + "Script evaluated without error but finished with a false/empty top stack element",
+		prefix + "Signature must be zero for failed CHECK(MULTI)SIG operation",
+	} {
+		stubNode(t, map[string]string{"sendrawtransaction": rpcErrorBody(-26, nodeMsg)})
+		p := NewRPCProvider()
+		p.BroadcastAttempts = 0
+		err := broadcastThroughStub(t, p)
+		if got := CheckNodeRejected(p, 0, err, ScriptVerifyFailed); got != nil {
+			t.Fatalf("CheckNodeRejected refused Teranode's script refusal %q: %v", nodeMsg, got)
+		}
+		if why := checkTxRejected("00", ScriptVerifyFailed); why != nil {
+			t.Fatalf("checkTxRejected refused Teranode's script refusal %q: %v", nodeMsg, why)
+		}
+	}
+	for _, nodeMsg := range []string{
+		"TX rejected: UTXO_NON_FINAL (71): [Validate][497f25350c5e8439892e131dada370bc67941e2eed69bad589c664b845ab899b] transaction is not final -> TX_LOCK_TIME (35): lock time (25101) as block height is greater than block height (15102)",
+		"TX rejected: TX_INVALID (31): [Validate] error validating transaction scripts",
+	} {
+		stubNode(t, map[string]string{"sendrawtransaction": rpcErrorBody(-26, nodeMsg)})
+		if why := checkTxRejected("00", ScriptVerifyFailed); why == nil || !strings.Contains(why.Error(), "wrong reason") {
+			t.Fatalf("a Teranode refusal that never ran the script passed as a script refusal %q: %v", nodeMsg, why)
+		}
+	}
+}
