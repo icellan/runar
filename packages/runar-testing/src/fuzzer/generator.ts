@@ -1477,7 +1477,8 @@ function arbMethodIR(
     const seen = new Set<string>();
     const params: GeneratedParam[] = [];
     for (const [pName, pType] of paramDefs) {
-      const unique = seen.has(pName) ? `${pName}X` : pName;
+      let unique = pName;
+      while (seen.has(unique)) unique += 'X';
       seen.add(unique);
       params.push({ name: unique, type: pType });
     }
@@ -1559,7 +1560,8 @@ function arbStatefulMethodIR(
     const seen = new Set<string>();
     const params: GeneratedParam[] = [];
     for (const [pName, pType] of paramDefs) {
-      const unique = seen.has(pName) ? `${pName}X` : pName;
+      let unique = pName;
+      while (seen.has(unique)) unique += 'X';
       seen.add(unique);
       params.push({ name: unique, type: pType });
     }
@@ -1690,7 +1692,8 @@ function arbGeneratedContractOf(
     const seen = new Set<string>();
     const properties: GeneratedProperty[] = [];
     for (const [pName, pType] of propDefs) {
-      const unique = seen.has(pName) ? `${pName}X` : pName;
+      let unique = pName;
+      while (seen.has(unique)) unique += 'X';
       seen.add(unique);
       properties.push({ name: unique, type: pType, readonly: true });
     }
@@ -1761,7 +1764,8 @@ function arbGeneratedStatefulContractOf(
     const properties: GeneratedProperty[] = [];
     let hasMutable = false;
     for (const [pName, pType, isReadonly] of propDefs) {
-      const unique = seen.has(pName) ? `${pName}X` : pName;
+      let unique = pName;
+      while (seen.has(unique)) unique += 'X';
       seen.add(unique);
       properties.push({ name: unique, type: pType, readonly: isReadonly });
       if (!isReadonly) hasMutable = true;
