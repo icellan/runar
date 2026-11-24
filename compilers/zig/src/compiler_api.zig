@@ -15,6 +15,7 @@ const expand_fixed_arrays = @import("passes/expand_fixed_arrays.zig");
 const continuation_binding = @import("passes/continuation_binding.zig");
 const stateful_scaffold = @import("ir/stateful_scaffold.zig");
 const required_fields = @import("ir/required_fields.zig");
+const ir_json = @import("ir/json.zig");
 const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
@@ -449,6 +450,25 @@ pub fn runPipeline(
         if (lower_diag.message) |message| diag.addError(work, "  anf lowering error: ", message);
         return err;
     };
+
+    // N-071 on the source path too (Go's F-004 checks both paths). The
+    // validator exempts StatefulSmartContract because the injected
+    // continuation assert ends a state-writing method, but a TERMINAL stateful
+    // method (no state write) gets no continuation: a body ending in a loop,
+    // an else-less `if` or a binding reached stack lowering, which appended
+    // OP_1 over the leftover state field (two items: CLEANSTACK failure on
+    // every honest spend). Checked before folding, as Go does.
+    for (program.methods) |m| {
+        if (m.is_public and !std.mem.eql(u8, m.name, "constructor") and !ir_json.endsWithTerminalAssert(stack_lower.methodBindings(m))) {
+            const msg = std.fmt.allocPrint(
+                work,
+                "IR validation: public method '{s}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+                .{m.name},
+            ) catch return error.OutOfMemory;
+            diag.addError(work, "  anf lowering error: ", msg);
+            return error.ANFLowerFailed;
+        }
+    }
 
     // D25 (fail closed): the lowered program must carry the continuation
     // binding the --ir loader demands. The classifier runs on the AST before

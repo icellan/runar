@@ -99,6 +99,7 @@
     "stateful": 1322,
     "stateful-bytestring": 1279,
     "stateful-counter": 1321,
+    "stateful-terminal-loop": 487,
     "stateful-wots-gate": 20245,
     "terminal-varlen-read": 1466,
     "ternary-expression": 48,

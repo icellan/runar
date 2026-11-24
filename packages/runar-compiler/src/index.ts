@@ -412,6 +412,23 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     };
   }
 
+  // N-071 on the source path too (Go's F-004 checks both paths). 02-validate
+  // exempts StatefulSmartContract because the injected continuation assert
+  // ends a state-writing method, but a TERMINAL stateful method (no state
+  // write) gets no continuation: a body ending in a loop, an else-less `if`
+  // or a binding left the leftover stack value (e.g. a deserialized state
+  // field) as the spend result. Checked before folding, as Go does.
+  const terminalError = terminalAssertError(anf);
+  if (terminalError !== null) {
+    diagnostics.push({ message: terminalError, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
+
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.
   if (opts.constructorArgs) {
@@ -662,13 +679,8 @@ export function compileFromANF(
   // a public method's script a covenant. Stack lowering leaves the method's
   // last binding as the script result, so a body of [] compiled to an EMPTY
   // (anyone-can-spend) script. Same rule and words as Go's F-004 check.
-  for (const method of anf.methods) {
-    if (method.isPublic && method.name !== 'constructor' && !endsWithTerminalAssert(method.body)) {
-      throw new Error(
-        `IR validation: public method '${method.name}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend`,
-      );
-    }
-  }
+  const terminalError = terminalAssertError(anf);
+  if (terminalError !== null) throw new Error(terminalError);
   // N-113 / R-081 (N-215): a contract with no public method has no spending
   // entry point, and stack lowering then emits an EMPTY (anyone-can-spend)
   // locking script. The constructor does not count: ANF flattens it into
@@ -766,6 +778,15 @@ export function compileFromANF(
  * `raw_script` with out_arity 1 (UnsafeSmartContract's `asm()` terminal) is
  * also accepted, because ANF carries no parentClass.
  */
+function terminalAssertError(anf: ANFProgram): string | null {
+  for (const method of anf.methods) {
+    if (method.isPublic && method.name !== 'constructor' && !endsWithTerminalAssert(method.body)) {
+      return `IR validation: public method '${method.name}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend`;
+    }
+  }
+  return null;
+}
+
 function endsWithTerminalAssert(bindings: ANFBinding[]): boolean {
   const last = bindings[bindings.length - 1];
   if (last === undefined) return false;

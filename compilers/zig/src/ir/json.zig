@@ -320,7 +320,7 @@ pub fn serializeArtifact(allocator: std.mem.Allocator, artifact: types.Artifact)
 /// binding is an `assert`, or an `if` whose then AND else arms both end that
 /// way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
 /// `asm()` terminal) is also accepted, because ANF carries no parentClass.
-fn endsWithTerminalAssert(bindings: []const types.ANFBinding) bool {
+pub fn endsWithTerminalAssert(bindings: []const types.ANFBinding) bool {
     if (bindings.len == 0) return false;
     return switch (bindings[bindings.len - 1].value) {
         .assert => true,

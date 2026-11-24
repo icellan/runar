@@ -117,14 +117,9 @@ public final class AnfLoader {
         // method's last binding as the script result, so `"body": []`
         // compiled to an EMPTY (anyone-can-spend) script. Same rule and words
         // as Go's F-004 check; see endsWithTerminalAssert.
-        for (AnfMethod m : methods) {
-            if (m.isPublic() && !"constructor".equals(m.name()) && !endsWithTerminalAssert(m.body())) {
-                throw new RuntimeException(
-                    "IR validation: public method '" + m.name() + "' must end with an assert() call"
-                    + " (or an if/else whose arms both do, or a terminal raw_script with out_arity 1);"
-                    + " otherwise the value its last binding leaves on the stack decides the spend"
-                );
-            }
+        String terminalError = terminalAssertError(methods);
+        if (terminalError != null) {
+            throw new RuntimeException(terminalError);
         }
 
         // N-113 / R-081: a contract with no public method has no spending
@@ -621,6 +616,26 @@ public final class AnfLoader {
      * (UnsafeSmartContract's {@code asm()} terminal) is also accepted, because
      * ANF carries no parentClass.
      */
+    /**
+     * N-071: the first public method that does not end with a terminal assert,
+     * as the diagnostic all seven tiers share, or null. Also run on the source
+     * path right after {@code AnfLower.run} (Cli): Validate exempts
+     * StatefulSmartContract, whose injected continuation assert ends a
+     * state-writing method, but a TERMINAL stateful method gets no
+     * continuation, so a body ending in a loop, an else-less {@code if} or a
+     * binding left the leftover stack value as the spend result.
+     */
+    public static String terminalAssertError(List<AnfMethod> methods) {
+        for (AnfMethod m : methods) {
+            if (m.isPublic() && !"constructor".equals(m.name()) && !endsWithTerminalAssert(m.body())) {
+                return "IR validation: public method '" + m.name() + "' must end with an assert() call"
+                    + " (or an if/else whose arms both do, or a terminal raw_script with out_arity 1);"
+                    + " otherwise the value its last binding leaves on the stack decides the spend";
+            }
+        }
+        return null;
+    }
+
     private static boolean endsWithTerminalAssert(List<AnfBinding> bindings) {
         if (bindings == null || bindings.isEmpty()) {
             return false;

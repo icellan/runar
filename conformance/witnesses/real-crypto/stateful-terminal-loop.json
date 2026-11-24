@@ -1,0 +1,72 @@
+{
+  "fixture": "stateful-terminal-loop",
+  "kind": "stateful",
+  "signerKey": "alice",
+  "note": "A TERMINAL stateful method (no state write, so no injected continuation assert): close(x) asserts x >= floor + i for i in 0..1, then x > count. The trailing assert is the script result. Without it the method is refused in all seven tiers (negatives N547-N549); before that refusal, the loop-terminal shape compiled in six tiers to a script whose spend was decided by the leftover deserialized count (count = 0 froze the UTXO) and in Zig to one that failed CLEANSTACK on every spend. Every row below is derived from the source by hand.",
+  "constructorArgs": [
+    "10n",
+    "0n"
+  ],
+  "spends": [
+    {
+      "method": "close",
+      "args": [
+        "11n"
+      ],
+      "expect": "accept",
+      "note": "count = 0: 11 >= 10, 11 >= 11 and 11 > 0 all hold. The discriminating row: the pre-fix loop-terminal script left count (0) on top and rejected this honest spend.",
+      "expectedState": {
+        "floor": "10n",
+        "count": "0n"
+      }
+    },
+    {
+      "method": "close",
+      "args": [
+        "11n"
+      ],
+      "constructorArgs": [
+        "10n",
+        "5n"
+      ],
+      "expect": "accept",
+      "note": "count = 5: 11 >= 10, 11 >= 11 and 11 > 5 all hold.",
+      "expectedState": {
+        "floor": "10n",
+        "count": "5n"
+      }
+    },
+    {
+      "method": "close",
+      "args": [
+        "10n"
+      ],
+      "expect": "reject",
+      "note": "second loop iteration: 10 >= 10 + 1 fails, so the last iteration's assert must still VERIFY."
+    },
+    {
+      "method": "close",
+      "args": [
+        "9n"
+      ],
+      "expect": "reject",
+      "note": "first loop iteration: 9 >= 10 fails."
+    },
+    {
+      "method": "close",
+      "args": [
+        "11n"
+      ],
+      "constructorArgs": [
+        "10n",
+        "20n"
+      ],
+      "expect": "reject",
+      "note": "the loop passes but the trailing assert 11 > 20 fails; it is the script result, so a false value must reject."
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "92b5df695aa67a6a7e5c462a816eb420bfeb9082f78998f71ee51499e1806a04",
+    "expected-ir.json": "a4e8650372d089c714d54ed435936c0a29d2f53e02c352c7d5f46940132df457"
+  }
+}

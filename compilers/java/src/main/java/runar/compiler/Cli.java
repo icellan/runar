@@ -209,6 +209,13 @@ public final class Cli {
                 + PassLocation.formatAt("anf-lower error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
+        // N-071 on the source path too (Go's F-004 checks both paths); see
+        // AnfLoader.terminalAssertError. Checked before folding, as Go does.
+        String terminalError = AnfLoader.terminalAssertError(anf.methods());
+        if (terminalError != null) {
+            err.println("runar-java: " + terminalError);
+            return 65;
+        }
 
         // Pass 4.25: constant folding (gated by --disable-constant-folding).
         // Pass 4.5:  general ANF cleanup (always on, matches Python pipeline).
@@ -889,6 +896,10 @@ public final class Cli {
             Typecheck.run(contract);
             contract = ExpandFixedArrays.run(ContinuationBinding.apply(contract));
             AnfProgram anf = AnfLower.run(contract);
+            String terminalError = AnfLoader.terminalAssertError(anf.methods());
+            if (terminalError != null) {
+                throw new RuntimeException(terminalError);
+            }
             anf = optimizeAnf(anf, req.disableConstantFolding);
 
             String irJson = req.emitIr || (!req.hex && !req.emitIr) ? Jcs.stringify(anf) : "";
