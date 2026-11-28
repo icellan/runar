@@ -6,7 +6,7 @@
  * private key number, avoiding RNG dependency and UTXO conflicts.
  */
 
-import { PrivateKey, Hash } from '@bsv/sdk';
+import { PrivateKey } from '@bsv/sdk';
 import { LocalSigner, ExternalSigner, RPCProvider } from 'runar-sdk';
 import type { Signer } from 'runar-sdk';
 import { fundAddress, mine, rpcCall } from './node.js';
@@ -120,7 +120,11 @@ export async function splitFundParallel(
  * Create a funded test wallet with an SDK-compatible signer.
  */
 export async function createFundedWallet(
-  provider: RPCProvider,
+  // Unused: funding goes straight to the node over RPC (fundAddress/rpcCall),
+  // not through the SDK provider. Kept in the signature because every caller
+  // passes its provider positionally, and it is what the day the funding path
+  // moves onto the provider will need.
+  _provider: RPCProvider,
   btcAmount: number = 1.0,
 ): Promise<TestWallet> {
   const { privKeyHex, pubKeyHex, pubKeyHash } = createWallet();

@@ -1,0 +1,29 @@
+{
+  "//": [
+    "Typecheck for the security lab. Extends the repo base config (strict +",
+    "noUncheckedIndexedAccess + noUnusedLocals) rather than the looser",
+    "integration/ts/tsconfig.json, because the lab asserts on engine internals",
+    "(stack items, ASM strings, diagnostics) where a sloppy index access reads as",
+    "a pass. Node16 module resolution means its own relative imports need",
+    "explicit .js extensions, matching integration/ts/** imports of helpers.",
+    "Files imported from integration/ts/helpers are checked too, since tsc",
+    "follows imports into .ts sources."
+  ],
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "baseUrl": "..",
+    "types": ["node"],
+    "paths": {
+      "runar-lang/runtime": ["packages/runar-lang/src/runtime/index.ts"],
+      "runar-lang": ["packages/runar-lang/src/index.ts"],
+      "runar-compiler": ["packages/runar-compiler/src/index.ts"],
+      "runar-ir-schema": ["packages/runar-ir-schema/src/index.ts"],
+      "runar-sdk": ["packages/runar-sdk/src/index.ts"],
+      "runar-testing": ["packages/runar-testing/src/index.ts"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

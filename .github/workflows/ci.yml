@@ -529,6 +529,35 @@ jobs:
           npx tsx fuzz-regressions/replay.ts --check-no-deletions --base origin/main
       - name: Example tests (TS + Sol + Move)
         run: npx vitest run examples/ts/ examples/sol/ examples/move/
+      - name: Typecheck security lab
+        # The lab has no package.json, so `pnpm run typecheck` (turbo, per
+        # package) never sees it, and the step below runs through vitest, which
+        # transpiles with esbuild and strips types without checking them. The lab
+        # asserts on engine internals -- stack items, ASM strings, SDK return
+        # shapes -- where a wrong field name otherwise reads as a pass, so
+        # security-lab/tsconfig.json holds it to the repo base config (strict +
+        # noUncheckedIndexedAccess + noUnusedLocals). It also pulls in the
+        # integration/ts/helpers the on-chain tests import.
+        run: npx tsc -p security-lab
+      - name: Security lab — attacker-vs-compiled-script suite
+        # Adversarial suite over the real compiled Script: hand-built witnesses,
+        # real BIP-143 signatures over attacker-chosen tx contexts, and sighash
+        # scopes the honest SDK never picks, judged by @bsv/sdk's Spend rather
+        # than the mocked interpreter. Most of it is now a regression guard for
+        # fixes that landed (unsigned preimage-field reads, the D25 continuation
+        # value floor, the D26 locktime domain pin); the sighash-downgrade hole in
+        # stateless checkSig is still open and asserted as such. See
+        # security-lab/README.md for the catalogue and FINDINGS.md for status.
+        #
+        # --silent=false because vitest 5 hides console.log from passing tests,
+        # and the ACCEPT/reject table each test prints IS the artifact a reviewer
+        # needs; without it a green run says nothing about what was accepted.
+        #
+        # The five on-chain tests in security-lab/onchain/ skip themselves here
+        # (no node in this job) and run in the `integration` job instead -- that
+        # gate exists because the repo-root vitest config collects them too
+        # without serializing workers, which mines two suites against one tip.
+        run: npx vitest run security-lab --silent=false
       - name: Chronicle opcode-policy disclosure gate
         # Compiled contracts require the Chronicle opcode policy: every stateful
         # contract embeds OP_2MUL in its checkPreimage binding blob, and the EC /
@@ -1821,6 +1850,29 @@ jobs:
 
       - name: TypeScript integration tests
         run: cd integration/ts && npx vitest run
+
+      - name: Security lab — on-chain attack verification
+        # The on-chain half of security-lab: re-checks the findings that turn on
+        # time, finality, standardness and relay against a live node, where the
+        # in-process Spend oracle cannot rule out that its verdict was an artifact
+        # of a lenient interpreter or of the harness itself. Guards, on real
+        # blocks: a 200-byte ByteString state post is mined AND the very next
+        # spend of that UTXO is accepted (it used to be rejected
+        # "Invalid OP_SPLIT range", stranding the coins); a height-gated
+        # withdrawal is held out of every block until its deadline and mined
+        # after it; a withdrawal that leaves its input final is rejected
+        # "mandatory-script-verify-flag-failed" rather than mined early; a
+        # post-2038 timestamp locktime is parked as non-final instead of failing
+        # the script. Asserts on the mechanism -- reject code, pool membership,
+        # confirmations -- so a regression shows up as a changed assertion rather
+        # than a silent pass.
+        #
+        # Uses this job's RPC_URL/RPC_USER/RPC_PASS through
+        # integration/ts/helpers/node.js; security-lab/vitest.config.ts keeps
+        # fileParallelism: false (parallel workers mining one tip drop each
+        # other's transactions) and onchain-setup.ts refuses any chain that is not
+        # regtest.
+        run: cd security-lab && npx vitest run --silent=false
 
       - name: TypeScript SDK regtest test (assembleMultiContractCall)
         # N-474: this file lives in packages/runar-sdk, so the only other step
